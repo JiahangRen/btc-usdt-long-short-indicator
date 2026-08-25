@@ -1,0 +1,122 @@
+import http from 'node:http';
+import { readFile } from 'node:fs/promises';
+import { extname, join, normalize } from 'node:path';
+
+const PORT = Number(process.env.PORT || 8787);
+const PUBLIC = join(process.cwd(), 'public');
+// A short cache keeps the one-second client refresh responsive without issuing
+// duplicate upstream requests from rapid UI interactions.
+const TTL = 900;
+const cache = new Map();
+const sources = ['gate', 'okx', 'binance'];
+
+function json(res, status, body) {
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+  res.end(JSON.stringify(body));
+}
+function validCandle(c) { return c && [c.time, c.open, c.high, c.low, c.close, c.volume].every(Number.isFinite); }
+function intervalFor(source, interval) {
+  const map = { '1m':'1m', '5m':'5m', '15m':'15m', '30m':'30m', '1h':'1H', '2h':'2H', '4h':'4H', '1d':'1D', '1w':'1W' };
+  if (source === 'gate' || source === 'binance') return interval === '1h' ? '1h' : interval === '2h' ? '2h' : interval === '4h' ? '4h' : interval === '1d' ? '1d' : interval === '1w' ? '1w' : interval;
+  return map[interval];
+}
+async function request(url) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 4_000);
+  try {
+    const r = await fetch(url, { signal: ctrl.signal, headers: { accept: 'application/json' } });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return await r.json();
+  } finally { clearTimeout(timer); }
+}
+async function fromGate(interval, limit) {
+  const [ticker, rows] = await Promise.all([
+    request('https://api.gateio.ws/api/v4/futures/usdt/tickers?contract=BTC_USDT'),
+    request(`https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract=BTC_USDT&interval=${intervalFor('gate', interval)}&limit=${limit}`)
+  ]);
+  const d = ticker[0]; if (!d) throw new Error('ticker payload empty');
+  return { ticker: { last:+d.last, open24h:+d.last / (1 + (+d.change_percentage || 0) / 100), changePct:+d.change_percentage, high24:+d.high_24h, low24:+d.low_24h }, candles: rows.map(c => ({ time:+c.t*1000, volume:+c.v, close:+c.c, high:+c.h, low:+c.l, open:+c.o })).reverse() };
+}
+async function fromOKX(interval, limit) {
+  const [ticker, rows] = await Promise.all([
+    // Keep the dashboard on the same market as the OKX mobile perpetual
+    // contract, rather than mixing its price with BTC-USDT spot.
+    request('https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT-SWAP'),
+    request(`https://www.okx.com/api/v5/market/candles?instId=BTC-USDT-SWAP&bar=${intervalFor('okx', interval)}&limit=${limit}`)
+  ]);
+  const d = ticker.data?.[0]; if (!d || ticker.code !== '0' || rows.code !== '0') throw new Error(ticker.msg || rows.msg || 'invalid API payload');
+  return { ticker: { last:+d.last, open24h:+d.open24h, changePct:(+d.last / +d.open24h - 1) * 100, high24:+d.high24h, low24:+d.low24h }, candles: rows.data.map(c => ({ time:+c[0], open:+c[1], high:+c[2], low:+c[3], close:+c[4], volume:+c[5] })).reverse() };
+}
+async function fromBinance(interval, limit) {
+  const [ticker, rows] = await Promise.all([
+    request('https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=BTCUSDT'),
+    request(`https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=${intervalFor('binance', interval)}&limit=${limit}`)
+  ]);
+  return { ticker: { last:+ticker.lastPrice, open24h:+ticker.openPrice, changePct:+ticker.priceChangePercent, high24:+ticker.highPrice, low24:+ticker.lowPrice }, candles: rows.map(c => ({ time:+c[0], open:+c[1], high:+c[2], low:+c[3], close:+c[4], volume:+c[5] })) };
+}
+const loaders = { gate: fromGate, okx: fromOKX, binance: fromBinance };
+async function binanceHistory(interval, limit = 1000) {
+  const rows = await request(`https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${interval}&limit=${limit}`);
+  const candles = rows.map(c => ({ time:+c[0], open:+c[1], high:+c[2], low:+c[3], close:+c[4], volume:+c[5] })).filter(validCandle);
+  if (candles.length < 300) throw new Error('insufficient historical candles');
+  return candles;
+}
+async function yahooHistory(symbol) {
+  const raw = await request(`https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=2y&interval=1d&events=history`);
+  const result = raw.chart?.result?.[0]; const closes = result?.indicators?.quote?.[0]?.close;
+  if (!result?.timestamp || !closes) throw new Error(`${symbol} history unavailable`);
+  const candles = result.timestamp.map((time, i) => ({ time:time * 1000, close:+closes[i] })).filter(x => Number.isFinite(x.close));
+  const last = candles.at(-1)?.close, previous = candles.at(-2)?.close;
+  return { candles, quote:{ last, previous } };
+}
+async function market(interval, limit, preferred) {
+  const key = `${interval}:${limit}:${preferred || 'auto'}`; const hit = cache.get(key);
+  if (hit && Date.now() - hit.time < TTL) return { ...hit.value, cached: true };
+  // A user-selected source is intentionally locked: displayed price and chart
+  // must not silently switch exchanges during a temporary upstream failure.
+  const order = preferred && loaders[preferred] ? [preferred] : sources;
+  const failures = {};
+  const jobs = order.map(source => loaders[source](interval, limit).then(value => ({ source, value })).catch(e => { failures[source] = e.name === 'AbortError' ? 'timeout (4s)' : e.message; throw e; }));
+  try {
+    const { source, value } = await Promise.any(jobs);
+    const candles = value.candles.filter(validCandle).sort((a,b) => a.time - b.time).slice(-limit);
+    if (candles.length < 30 || !Number.isFinite(value.ticker.last)) throw new Error('insufficient valid market data');
+    const result = { ...value, candles, source, fetchedAt: Date.now(), cached: false, failures };
+    cache.set(key, { time: Date.now(), value: result }); return result;
+  } catch { throw Object.assign(new Error('All data sources failed'), { failures }); }
+}
+const mime = { '.html':'text/html; charset=utf-8', '.js':'text/javascript; charset=utf-8', '.css':'text/css; charset=utf-8' };
+http.createServer(async (req, res) => {
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  if (url.pathname === '/api/market') {
+    const interval = url.searchParams.get('interval') || '4h';
+    const limit = Math.min(Math.max(Number(url.searchParams.get('limit') || 180), 30), 300);
+    try { json(res, 200, await market(interval, limit, url.searchParams.get('source'))); } catch (e) { json(res, 503, { error:e.message, failures:e.failures || {} }); }
+    return;
+  }
+  if (url.pathname === '/api/status') { json(res, 200, { sources, cacheEntries: cache.size, now:Date.now() }); return; }
+  if (url.pathname === '/api/forecast-history') {
+    const key = 'forecast-history'; const hit = cache.get(key);
+    try {
+      if (hit && Date.now() - hit.time < 300_000) { json(res, 200, { ...hit.value, cached:true }); return; }
+      const [intraday, daily] = await Promise.all([binanceHistory('15m'), binanceHistory('1d')]);
+      const value = { intraday, daily, source:'binance', fetchedAt:Date.now(), cached:false };
+      cache.set(key, { time:Date.now(), value }); json(res, 200, value);
+    } catch (e) { json(res, 503, { error:'Forecast history unavailable', detail:e.message }); }
+    return;
+  }
+  if (url.pathname === '/api/correlation-history') {
+    const key = 'correlation-history'; const hit = cache.get(key);
+    try {
+      if (hit && Date.now() - hit.time < 300_000) { json(res, 200, { ...hit.value, cached:true }); return; }
+      const [btc, spy, qqq] = await Promise.all([binanceHistory('1d'), yahooHistory('SPY'), yahooHistory('QQQ')]);
+      const value = { btc:btc.map(x=>({time:x.time,close:x.close})), spy:spy.candles, qqq:qqq.candles, indexQuotes:{spy:spy.quote,qqq:qqq.quote}, fetchedAt:Date.now(), cached:false };
+      cache.set(key, { time:Date.now(), value }); json(res, 200, value);
+    } catch (e) { json(res, 503, { error:'Correlation history unavailable', detail:e.message }); }
+    return;
+  }
+  const relative = url.pathname === '/' ? 'index.html' : normalize(url.pathname).replace(/^[/\\]+/, '');
+  if (relative.includes('..')) { res.writeHead(403); res.end(); return; }
+  try { const file = join(PUBLIC, relative); const body = await readFile(file); res.writeHead(200, { 'content-type': mime[extname(file)] || 'application/octet-stream' }); res.end(body); }
+  catch { res.writeHead(404); res.end('Not found'); }
+}).listen(PORT, '127.0.0.1', () => console.log(`BTC indicator: http://127.0.0.1:${PORT}`));

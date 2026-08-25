@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jeffereyreng.btc-indicator</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/jeffereyreng/.local/share/mise/installs/node/26/bin/node</string>
+    <string>/Users/jeffereyreng/Documents/ChatGPT/btc指示器/server.mjs</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/jeffereyreng/Documents/ChatGPT/btc指示器</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/jeffereyreng/Documents/ChatGPT/btc指示器/btc-indicator.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/jeffereyreng/Documents/ChatGPT/btc指示器/btc-indicator.error.log</string>
+</dict>
+</plist>
