@@ -223,8 +223,8 @@ function drawCandlestickChart(){
     const hammer=lower/full>.52&&upper/full<.2&&body/full<.32,star=upper/full>.52&&lower/full<.2&&body/full<.32;
     if((hammer||star)&&candleWidth>=4){c.save();c.fillStyle=hammer?'#55d9ff':'#ffc35b';c.font='700 10px system-ui';c.textAlign='center';c.fillText(hammer?'H':'S',xx,hammer?Math.min(P.t+ch-3,y(v.low)+14):Math.max(P.t+10,y(v.high)-7));c.restore()}
   });
-  /* Bright blue close-price trace with a contrast outline: readable in both themes. */
-  if(series.close){c.save();c.beginPath();d.forEach((v,i)=>i?c.lineTo(x(i),y(v.close)):c.moveTo(x(i),y(v.close)));c.strokeStyle='rgba(10,22,42,.72)';c.lineWidth=4.4;c.stroke();c.strokeStyle='#31b8ff';c.lineWidth=2.25;c.stroke();c.restore()}
+  /* Close-price trace uses the same teal as the “价格” legend. */
+  if(series.close){c.save();c.beginPath();d.forEach((v,i)=>i?c.lineTo(x(i),y(v.close)):c.moveTo(x(i),y(v.close)));c.strokeStyle='rgba(10,22,42,.72)';c.lineWidth=4.4;c.stroke();c.strokeStyle='#00d4aa';c.lineWidth=2.25;c.stroke();c.restore()}
   const line=(a,color,enabled)=>{if(!enabled)return;c.beginPath();let started=false;a.forEach((v,i)=>{if(!Number.isFinite(v)){started=false;return}if(started)c.lineTo(x(i),y(v));else{c.moveTo(x(i),y(v));started=true}});c.strokeStyle=color;c.lineWidth=1.35;c.stroke()};line(ma20,'#4b9fff',lines.ma20);line(ma50,'#d69b2d',lines.ma50);line(ma200,'#a970ff',lines.ma200);
   const highValue=v=>series.candles?v.high:v.close,lowValue=v=>series.candles?v.low:v.close,hiI=d.reduce((best,v,i)=>highValue(v)>highValue(d[best])?i:best,0),loI=d.reduce((best,v,i)=>lowValue(v)<lowValue(d[best])?i:best,0);
   for(const [i,value,color] of [[hiI,highValue(d[hiI]),'#ffcb65'],[loI,lowValue(d[loI]),'#52d5f4']]){const xx=x(i),yy=y(value);c.save();c.strokeStyle=color+'99';c.setLineDash([4,4]);c.beginPath();c.moveTo(P.l,yy);c.lineTo(P.l+cw,yy);c.stroke();c.setLineDash([]);c.fillStyle='#15202d';c.strokeStyle=color;c.lineWidth=2;c.beginPath();c.arc(xx,yy,5,0,Math.PI*2);c.fill();c.stroke();c.restore()}
@@ -236,13 +236,14 @@ function drawCandlestickChart(){
 draw=function(){if(!chartPaused)drawCandlestickChart()};
 ['mousemove','pointermove','pointerdown','mouseleave'].forEach(type=>$('chart')?.addEventListener(type,()=>drawCandlestickChart()));
 if(state.candles.length)drawCandlestickChart();
+setTimeout(()=>{const hint=$('panLabel')?.querySelector('small');if(hint)hint.textContent=tx('按住 ⌘ / Ctrl + 滚轮缩放','Hold ⌘ / Ctrl + scroll to zoom')},25);
 
 /* Pan the actual displayed slice.  The older compatibility renderer reset it
    to the newest candles, which made ⌘/Ctrl + wheel appear to do nothing. */
 visibleCandles=function(){const data=frozenCandles||state.candles;if(!data.length)return[];const count=state.viewPoints?Math.max(2,Math.ceil(state.viewPoints/state.zoom)):Math.max(30,Math.ceil(data.length/state.zoom));const n=Math.min(data.length,count),maxOffset=Math.max(0,data.length-n),offset=Math.max(0,Math.min(maxOffset,state.panOffset||0)),end=data.length-offset;return data.slice(Math.max(0,end-n),end)};
 
 function updatePanAvailability(){const data=frozenCandles||state.candles,count=state.viewPoints?Math.max(2,Math.ceil(state.viewPoints/state.zoom)):Math.max(30,Math.ceil(data.length/state.zoom)),max=Math.max(0,data.length-Math.min(data.length,count)),offset=Math.max(0,Math.min(max,state.panOffset||0)),tools=$('panTools');if(!tools)return;tools.querySelector('[data-pan="back"]')?.toggleAttribute('disabled',offset>=max);tools.querySelector('[data-pan="forward"]')?.toggleAttribute('disabled',offset===0)}
-$('chart')?.closest('.chart-box')?.addEventListener('wheel',event=>{if(!event.metaKey&&!event.ctrlKey)return;event.preventDefault();event.stopPropagation();const data=frozenCandles||state.candles,count=state.viewPoints?Math.max(2,Math.ceil(state.viewPoints/state.zoom)):Math.max(30,Math.ceil(data.length/state.zoom)),n=Math.min(data.length,count),max=Math.max(0,data.length-n),step=Math.max(1,Math.round(n*.1));if(max){state.panOffset=Math.max(0,Math.min(max,(state.panOffset||0)+(event.deltaY>0?step:-step)));hoverIndex=null;chartSelection=null;draw()}updatePanAvailability()},{capture:true,passive:false});
+$('chart')?.closest('.chart-box')?.addEventListener('wheel',event=>{if(!event.metaKey&&!event.ctrlKey)return;event.preventDefault();event.stopPropagation();const factor=event.deltaY<0?1.2:1/1.2,next=Math.max(1,Math.min(5,state.zoom*factor));if(next===state.zoom)return;state.zoom=next;state.panOffset=0;hoverIndex=null;chartSelection=null;const label=$('zoomLabel');if(label)label.textContent=`${Math.round(state.zoom*100)}%`;draw();updatePanAvailability()},{capture:true,passive:false});
 
 /* Floating extrema labels share the renderer's scale and the selected display
    mode: candle chart uses wick high/low, close-line chart uses close high/low. */
