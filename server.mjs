@@ -21,13 +21,22 @@ function intervalFor(source, interval) {
   if (source === 'gate' || source === 'binance') return interval === '1h' ? '1h' : interval === '2h' ? '2h' : interval === '4h' ? '4h' : interval === '1d' ? '1d' : interval === '1w' ? '1w' : interval;
   return map[interval];
 }
-async function request(url) {
+async function request(url, timeout = 4_000) {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 4_000);
+  const timer = setTimeout(() => ctrl.abort(), timeout);
   try {
     const r = await fetch(url, { signal: ctrl.signal, headers: { accept: 'application/json' } });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     return await r.json();
+  } finally { clearTimeout(timer); }
+}
+async function requestText(url, timeout = 8_000) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeout);
+  try {
+    const r = await fetch(url, { signal: ctrl.signal, headers: { accept: 'text/csv,text/plain' } });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return await r.text();
   } finally { clearTimeout(timer); }
 }
 async function fromGate(interval, limit) {
@@ -57,10 +66,44 @@ async function fromBinance(interval, limit) {
 }
 const loaders = { gate: fromGate, okx: fromOKX, binance: fromBinance };
 async function binanceHistory(interval, limit = 1000) {
-  const rows = await request(`https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${interval}&limit=${limit}`);
+  const rows = await request(`https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${interval}&limit=${limit}`, 8_000);
   const candles = rows.map(c => ({ time:+c[0], open:+c[1], high:+c[2], low:+c[3], close:+c[4], volume:+c[5] })).filter(validCandle);
   if (candles.length < 300) throw new Error('insufficient historical candles');
   return candles;
+}
+async function gateHistory(interval, limit = 1000) {
+  const rows = await request(`https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract=BTC_USDT&interval=${interval}&limit=${limit}`, 8_000);
+  const candles = rows.map(c => ({ time:+c.t*1000, open:+c.o, high:+c.h, low:+c.l, close:+c.c, volume:+c.v })).filter(validCandle).sort((a,b) => a.time - b.time);
+  if (candles.length < 300) throw new Error('insufficient historical candles');
+  return candles;
+}
+async function coinbaseHistory(interval, limit = 1000) {
+  const granularity = interval === '15m' ? 900 : interval === '1d' ? 86400 : 0;
+  if (!granularity) throw new Error(`unsupported interval ${interval}`);
+  const byTime = new Map();
+  let end = Date.now();
+  for (let page = 0; page < Math.ceil(limit / 290) + 1 && byTime.size < limit; page++) {
+    const start = end - granularity * 290 * 1000;
+    const params = new URLSearchParams({ granularity:String(granularity), start:new Date(start).toISOString(), end:new Date(end).toISOString() });
+    const rows = await request(`https://api.exchange.coinbase.com/products/BTC-USD/candles?${params}`, 8_000);
+    if (!Array.isArray(rows) || !rows.length) break;
+    for (const c of rows) {
+      const candle = { time:+c[0]*1000, low:+c[1], high:+c[2], open:+c[3], close:+c[4], volume:+c[5] };
+      if (validCandle(candle)) byTime.set(candle.time, candle);
+    }
+    end = start - granularity * 1000;
+  }
+  const candles = [...byTime.values()].sort((a,b) => a.time - b.time).slice(-limit);
+  if (candles.length < 300) throw new Error('insufficient historical candles');
+  return candles;
+}
+async function forecastHistory(interval) {
+  const failures = [];
+  for (const [source, loader] of [['coinbase', coinbaseHistory], ['gate', gateHistory], ['binance', binanceHistory]]) {
+    try { return { candles:await loader(interval), source }; }
+    catch (e) { failures.push(`${source}: ${e.name === 'AbortError' ? 'timeout' : e.message}`); }
+  }
+  throw new Error(failures.join('; '));
 }
 async function yahooHistory(symbol) {
   const raw = await request(`https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=2y&interval=1d&events=history`);
@@ -69,6 +112,27 @@ async function yahooHistory(symbol) {
   const candles = result.timestamp.map((time, i) => ({ time:time * 1000, close:+closes[i] })).filter(x => Number.isFinite(x.close));
   const last = candles.at(-1)?.close, previous = candles.at(-2)?.close;
   return { candles, quote:{ last, previous } };
+}
+async function stooqHistory(symbol) {
+  const end = new Date();
+  const start = new Date(Date.now() - 3 * 366 * 86400_000);
+  const compact = d => d.toISOString().slice(0,10).replaceAll('-', '');
+  const raw = await requestText(`https://stooq.com/q/d/l/?s=${symbol.toLowerCase()}.us&i=d&d1=${compact(start)}&d2=${compact(end)}`);
+  const candles = raw.trim().split(/\r?\n/).slice(1).map(line => {
+    const [date,, , ,close] = line.split(',');
+    return { time:Date.parse(`${date}T00:00:00Z`), close:+close };
+  }).filter(x => Number.isFinite(x.time) && Number.isFinite(x.close));
+  if (candles.length < 300) throw new Error(`${symbol} history unavailable`);
+  const last = candles.at(-1)?.close, previous = candles.at(-2)?.close;
+  return { candles, quote:{ last, previous } };
+}
+async function equityHistory(symbol) {
+  const failures = [];
+  for (const [source, loader] of [['stooq', stooqHistory], ['yahoo', yahooHistory]]) {
+    try { return { ...(await loader(symbol)), source }; }
+    catch (e) { failures.push(`${source}: ${e.name === 'AbortError' ? 'timeout' : e.message}`); }
+  }
+  throw new Error(failures.join('; '));
 }
 async function market(interval, limit, preferred) {
   const key = `${interval}:${limit}:${preferred || 'auto'}`; const hit = cache.get(key);
@@ -100,8 +164,8 @@ http.createServer(async (req, res) => {
     const key = 'forecast-history'; const hit = cache.get(key);
     try {
       if (hit && Date.now() - hit.time < 300_000) { json(res, 200, { ...hit.value, cached:true }); return; }
-      const [intraday, daily] = await Promise.all([binanceHistory('15m'), binanceHistory('1d')]);
-      const value = { intraday, daily, source:'binance', fetchedAt:Date.now(), cached:false };
+      const [intradayResult, dailyResult] = await Promise.all([forecastHistory('15m'), forecastHistory('1d')]);
+      const value = { intraday:intradayResult.candles, daily:dailyResult.candles, source:`${intradayResult.source}/${dailyResult.source}`, fetchedAt:Date.now(), cached:false };
       cache.set(key, { time:Date.now(), value }); json(res, 200, value);
     } catch (e) { json(res, 503, { error:'Forecast history unavailable', detail:e.message }); }
     return;
@@ -110,8 +174,8 @@ http.createServer(async (req, res) => {
     const key = 'correlation-history'; const hit = cache.get(key);
     try {
       if (hit && Date.now() - hit.time < 300_000) { json(res, 200, { ...hit.value, cached:true }); return; }
-      const [btc, spy, qqq] = await Promise.all([binanceHistory('1d'), yahooHistory('SPY'), yahooHistory('QQQ')]);
-      const value = { btc:btc.map(x=>({time:x.time,close:x.close})), spy:spy.candles, qqq:qqq.candles, indexQuotes:{spy:spy.quote,qqq:qqq.quote}, fetchedAt:Date.now(), cached:false };
+      const [btc, spy, qqq] = await Promise.all([forecastHistory('1d'), equityHistory('SPY'), equityHistory('QQQ')]);
+      const value = { btc:btc.candles.map(x=>({time:x.time,close:x.close})), spy:spy.candles, qqq:qqq.candles, indexQuotes:{spy:spy.quote,qqq:qqq.quote}, sources:{btc:btc.source,spy:spy.source,qqq:qqq.source}, fetchedAt:Date.now(), cached:false };
       cache.set(key, { time:Date.now(), value }); json(res, 200, value);
     } catch (e) { json(res, 503, { error:'Correlation history unavailable', detail:e.message }); }
     return;
