@@ -29,9 +29,14 @@ jobs:
             exit 0
           fi
           install -d -m 700 ~/.ssh
-          printf '%s' "$DEPLOY_SSH_KEY_B64" | base64 --decode > ~/.ssh/deploy_key
+          if ! printf '%s' "$DEPLOY_SSH_KEY_B64" | tr -d '[:space:]' | base64 --decode > ~/.ssh/deploy_key 2>/dev/null; then
+            printf '%s\n' "$DEPLOY_SSH_KEY_B64" | tr -d '\r' > ~/.ssh/deploy_key
+          fi
           chmod 600 ~/.ssh/deploy_key
-          ssh-keygen -y -f ~/.ssh/deploy_key > /dev/null
+          if ! ssh-keygen -y -f ~/.ssh/deploy_key > /dev/null 2>&1; then
+            echo "DEPLOY_SSH_KEY_B64 is neither valid Base64 nor a valid OpenSSH private key."
+            exit 1
+          fi
           ssh-keyscan -p 22 -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
           echo "ready=true" >> "$GITHUB_OUTPUT"
 
