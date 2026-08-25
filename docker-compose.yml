@@ -2,6 +2,9 @@ services:
   app:
     build: .
     restart: unless-stopped
+    # Docker creates the host-mounted SQLite directory as root; this service
+    # needs write access to that single bind-mounted data directory.
+    user: "0:0"
     environment:
       HOST: 0.0.0.0
       PORT: 8787
