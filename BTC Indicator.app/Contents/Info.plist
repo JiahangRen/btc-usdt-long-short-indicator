@@ -5,7 +5,7 @@
   <key>CFBundleDevelopmentRegion</key>
   <string>en</string>
   <key>CFBundleDisplayName</key>
-  <string>BTC Indicator</string>
+  <string>BTC/USDT 多空指标指示器</string>
   <key>CFBundleExecutable</key>
   <string>BTCIndicator</string>
   <key>CFBundleIconFile</key>
@@ -13,13 +13,13 @@
   <key>CFBundleIdentifier</key>
   <string>com.jeffereyreng.btc-indicator.launcher</string>
   <key>CFBundleName</key>
-  <string>BTC Indicator</string>
+  <string>BTC/USDT 多空指标指示器</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>1.0</string>
+  <string>1.1.0</string>
   <key>CFBundleVersion</key>
-  <string>1</string>
+  <string>2</string>
   <key>LSMinimumSystemVersion</key>
   <string>11.0</string>
 </dict>
