@@ -9,7 +9,9 @@ const PUBLIC = join(process.cwd(), 'public');
 // duplicate upstream requests from rapid UI interactions.
 const TTL = 15_000;
 const cache = new Map();
-const sources = ['gate', 'okx', 'binance'];
+// Keep the automatic market selection aligned with the dashboard default and
+// the BTC-USDT perpetual contract used by the owner.
+const sources = ['okx', 'gate', 'binance'];
 
 function json(res, status, body) {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
