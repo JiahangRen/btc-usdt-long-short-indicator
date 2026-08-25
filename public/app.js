@@ -226,7 +226,7 @@ function drawCandlestickChart(){
   /* Close-price trace uses the same teal as the “价格” legend. */
   if(series.close){c.save();c.beginPath();d.forEach((v,i)=>i?c.lineTo(x(i),y(v.close)):c.moveTo(x(i),y(v.close)));c.strokeStyle='rgba(10,22,42,.72)';c.lineWidth=4.4;c.stroke();c.strokeStyle='#00d4aa';c.lineWidth=2.25;c.stroke();c.restore()}
   const line=(a,color,enabled)=>{if(!enabled)return;c.beginPath();let started=false;a.forEach((v,i)=>{if(!Number.isFinite(v)){started=false;return}if(started)c.lineTo(x(i),y(v));else{c.moveTo(x(i),y(v));started=true}});c.strokeStyle=color;c.lineWidth=1.35;c.stroke()};line(ma20,'#4b9fff',lines.ma20);line(ma50,'#d69b2d',lines.ma50);line(ma200,'#a970ff',lines.ma200);
-  const highValue=v=>series.candles?v.high:v.close,lowValue=v=>series.candles?v.low:v.close,hiI=d.reduce((best,v,i)=>highValue(v)>highValue(d[best])?i:best,0),loI=d.reduce((best,v,i)=>lowValue(v)<lowValue(d[best])?i:best,0);
+  const highValue=v=>v.close,lowValue=v=>v.close,hiI=d.reduce((best,v,i)=>highValue(v)>highValue(d[best])?i:best,0),loI=d.reduce((best,v,i)=>lowValue(v)<lowValue(d[best])?i:best,0);
   for(const [i,value,color] of [[hiI,highValue(d[hiI]),'#ffcb65'],[loI,lowValue(d[loI]),'#52d5f4']]){const xx=x(i),yy=y(value);c.save();c.strokeStyle=color+'99';c.setLineDash([4,4]);c.beginPath();c.moveTo(P.l,yy);c.lineTo(P.l+cw,yy);c.stroke();c.setLineDash([]);c.fillStyle='#15202d';c.strokeStyle=color;c.lineWidth=2;c.beginPath();c.arc(xx,yy,5,0,Math.PI*2);c.fill();c.stroke();c.restore()}
   for(let g=0;g<5;g++){const i=Math.round(g*(d.length-1)/4);c.fillStyle='#75849a';c.textAlign='center';c.fillText(time(d[i].time),x(i),h-8)}
   if(chartSelection){const a=Math.min(chartSelection.start,chartSelection.end),b=Math.max(chartSelection.start,chartSelection.end);c.fillStyle='rgba(75,159,255,.13)';c.fillRect(x(a),P.t,x(b)-x(a),ch);c.strokeStyle='rgba(135,190,255,.9)';c.setLineDash([4,4]);c.strokeRect(x(a),P.t,x(b)-x(a),ch);c.setLineDash([])}
@@ -236,6 +236,10 @@ function drawCandlestickChart(){
 draw=function(){if(!chartPaused)drawCandlestickChart()};
 ['mousemove','pointermove','pointerdown','mouseleave'].forEach(type=>$('chart')?.addEventListener(type,()=>drawCandlestickChart()));
 if(state.candles.length)drawCandlestickChart();
+
+/* “最高/最低选中价” means closing price in every display mode.  Keeping the
+   marker and hover card on that same close point prevents the 500% mismatch. */
+$('chart')?.addEventListener('mousemove',()=>{const tip=$('chartTooltip'),d=visibleCandles();if(!tip||hoverIndex===null||d.length<2)return;tip.querySelector('.range-extrema-tooltip-note')?.remove();const highIndex=d.reduce((best,v,i)=>v.close>d[best].close?i:best,0),lowIndex=d.reduce((best,v,i)=>v.close<d[best].close?i:best,0),kind=hoverIndex===highIndex?'high':hoverIndex===lowIndex?'low':null;if(!kind)return;const label=kind==='high'?tx('此为当前查看范围内最高收盘价','Highest closing price in this range'):tx('此为当前查看范围内最低收盘价','Lowest closing price in this range');tip.insertAdjacentHTML('afterbegin',`<div class="range-extrema-tooltip-note ${kind}">${label}</div>`)});
 setTimeout(()=>{const hint=$('panLabel')?.querySelector('small');if(hint)hint.textContent=tx('按住 ⌘ / Ctrl + 滚轮缩放','Hold ⌘ / Ctrl + scroll to zoom')},25);
 
 /* Pan the actual displayed slice.  The older compatibility renderer reset it
