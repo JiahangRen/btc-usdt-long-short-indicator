@@ -1,0 +1,4 @@
+renjiahang1201.xyz {
+	encode zstd gzip
+	reverse_proxy app:8787
+}

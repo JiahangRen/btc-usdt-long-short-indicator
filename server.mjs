@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
 
 const PORT = Number(process.env.PORT || 8787);
+const HOST = process.env.HOST || '127.0.0.1';
 const PUBLIC = join(process.cwd(), 'public');
 // A short cache keeps the one-second client refresh responsive without issuing
 // duplicate upstream requests from rapid UI interactions.
@@ -119,4 +120,4 @@ http.createServer(async (req, res) => {
   if (relative.includes('..')) { res.writeHead(403); res.end(); return; }
   try { const file = join(PUBLIC, relative); const body = await readFile(file); res.writeHead(200, { 'content-type': mime[extname(file)] || 'application/octet-stream' }); res.end(body); }
   catch { res.writeHead(404); res.end('Not found'); }
-}).listen(PORT, '127.0.0.1', () => console.log(`BTC indicator: http://127.0.0.1:${PORT}`));
+}).listen(PORT, HOST, () => console.log(`BTC indicator: http://${HOST}:${PORT}`));
