@@ -7,6 +7,8 @@ services:
       PORT: 8787
     expose:
       - "8787"
+    volumes:
+      - ./data:/app/data
 
   caddy:
     image: caddy:2-alpine
