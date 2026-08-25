@@ -1,4 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="BTC indicator">
-  <rect x="10" y="10" width="236" height="236" rx="62" fill="#111923" stroke="#40516a" stroke-width="10"/>
-  <rect x="82" y="48" width="18" height="160" rx="9" fill="#22d3ee"/><rect x="101" y="48" width="13" height="160" rx="6.5" fill="#22d3ee"/><rect x="96" y="52" width="91" height="74" rx="33" fill="#22d3ee"/><rect x="111" y="67" width="51" height="44" rx="19" fill="#111923"/><rect x="96" y="130" width="99" height="74" rx="33" fill="#22d3ee"/><rect x="111" y="145" width="59" height="44" rx="19" fill="#111923"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="BTC market indicator">
+  <circle cx="128" cy="128" r="118" fill="#101923"/><circle cx="128" cy="128" r="112" fill="#172536"/>
+  <circle cx="111" cy="132" r="64" fill="#ffb020"/><circle cx="111" cy="132" r="50" fill="#162231"/>
+  <rect x="91" y="89" width="10" height="86" rx="5" fill="#ffbe3d"/><rect x="106" y="89" width="8" height="86" rx="4" fill="#ffbe3d"/>
+  <rect x="101" y="93" width="40" height="36" rx="17" fill="#ffb020"/><rect x="111" y="103" width="20" height="16" rx="7" fill="#162231"/><rect x="101" y="132" width="46" height="36" rx="17" fill="#ffb020"/><rect x="111" y="142" width="24" height="16" rx="7" fill="#162231"/>
+  <rect x="165" y="137" width="9" height="38" rx="4.5" fill="#00d4aa"/><rect x="159" y="148" width="21" height="18" rx="3" fill="#00d4aa"/><rect x="188" y="111" width="9" height="49" rx="4.5" fill="#00d4aa"/><rect x="182" y="123" width="21" height="24" rx="3" fill="#00d4aa"/>
+  <path d="M157 108h38V70h12v38h-38z" fill="#3ce58d"/><path d="M196 58l31 31h-62z" fill="#3ce58d"/>
 </svg>
