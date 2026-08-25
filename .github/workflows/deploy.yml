@@ -14,23 +14,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Configure SSH
         id: ssh
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
         run: |
-          if [ -z "$DEPLOY_HOST" ] || [ -z "$DEPLOY_USER" ] || [ -z "$DEPLOY_SSH_KEY" ]; then
+          if [ -z "$DEPLOY_HOST" ] || [ -z "$DEPLOY_USER" ] || [ -z "$DEPLOY_SSH_KEY_B64" ]; then
             echo "ready=false" >> "$GITHUB_OUTPUT"
             echo "Deployment secrets are not configured; skipping deployment."
             exit 0
           fi
           install -d -m 700 ~/.ssh
-          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          printf '%s' "$DEPLOY_SSH_KEY_B64" | base64 --decode > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
+          ssh-keygen -y -f ~/.ssh/deploy_key > /dev/null
           ssh-keyscan -p 22 -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
           echo "ready=true" >> "$GITHUB_OUTPUT"
 
@@ -40,7 +41,7 @@ jobs:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
         run: |
-          rsync -az --delete-after --exclude='.git/' -e "ssh -i ~/.ssh/deploy_key -p 22" ./ "$DEPLOY_USER@$DEPLOY_HOST:/opt/btc-usdt-long-short-indicator/"
+          rsync -az --delete-after --exclude='.git/' -e "ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p 22" ./ "$DEPLOY_USER@$DEPLOY_HOST:/opt/btc-usdt-long-short-indicator/"
 
       - name: Rebuild containers
         if: steps.ssh.outputs.ready == 'true'
@@ -48,7 +49,7 @@ jobs:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
         run: |
-          ssh -i ~/.ssh/deploy_key -p 22 "$DEPLOY_USER@$DEPLOY_HOST" 'cd /opt/btc-usdt-long-short-indicator && docker compose up -d --build'
+          ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p 22 "$DEPLOY_USER@$DEPLOY_HOST" 'cd /opt/btc-usdt-long-short-indicator && docker compose up -d --build'
 
       - name: Verify production
         if: steps.ssh.outputs.ready == 'true'
