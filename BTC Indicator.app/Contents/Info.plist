@@ -9,7 +9,7 @@
   <key>CFBundleExecutable</key>
   <string>BTCIndicator</string>
   <key>CFBundleIconFile</key>
-  <string>Icon.png</string>
+  <string>Icon.icns</string>
   <key>CFBundleIdentifier</key>
   <string>com.jeffereyreng.btc-indicator.launcher</string>
   <key>CFBundleName</key>
