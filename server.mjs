@@ -6,7 +6,7 @@ const PORT = Number(process.env.PORT || 8787);
 const PUBLIC = join(process.cwd(), 'public');
 // A short cache keeps the one-second client refresh responsive without issuing
 // duplicate upstream requests from rapid UI interactions.
-const TTL = 900;
+const TTL = 15_000;
 const cache = new Map();
 const sources = ['gate', 'okx', 'binance'];
 
