@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { readFile } from 'node:fs/promises';
 import { mkdirSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
@@ -68,22 +69,141 @@ function persistMarket(result, interval) {
 function persistTrainingRun(value, forced) {
   safelyStore(() => storeTrainingRun.run(value.fetchedAt, value.source, value.intraday.length, value.daily.length, forced ? 1 : 0));
 }
+function storedCandles(source, interval, limit) {
+  const rows = database.prepare('SELECT candle_time AS time, open, high, low, close, volume FROM candles WHERE source=? AND interval=? ORDER BY candle_time DESC LIMIT ?').all(source, interval, limit);
+  return rows.reverse().map(row => ({ time:+row.time, open:+row.open, high:+row.high, low:+row.low, close:+row.close, volume:+row.volume })).filter(validCandle);
+}
+function persistHistory(source, interval, candles) {
+  const now = Date.now();
+  safelyStore(() => {
+    candles.forEach(candle => {
+      storeCandle.run(source, interval, candle.time, candle.open, candle.high, candle.low, candle.close, candle.volume, now);
+      updateCandle.run(candle.open, candle.high, candle.low, candle.close, candle.volume, now, source, interval, candle.time);
+    });
+    cleanStorage(now);
+  });
+}
 function storageStatus() {
   const count = table => database.prepare(`SELECT COUNT(*) AS total FROM ${table}`).get().total;
   return { engine:'SQLite', quoteSnapshots:count('quote_snapshots'), candles:count('candles'), marketSnapshots:count('market_snapshots'), trainingRuns:count('training_runs') };
 }
-// A short cache keeps the one-second client refresh responsive without issuing
-// duplicate upstream requests from rapid UI interactions.
-const TTL = 15_000;
-const QUOTE_TTL = 900;
+// Layered cache policy.  Quotes are fed by the OKX stream, chart/indicator
+// data is refreshed at a lower cadence, and slow history is retained in SQLite.
+const MARKET_TTL = 10_000;
+const CONTEXT_TTL = 10_000;
+const HISTORY_TTL = 300_000;
+const QUOTE_TTL = 1_000;
+const UPSTREAM_TIMEOUT = 1_200;
+const STALE_QUOTE_MAX_AGE = 60_000;
 const cache = new Map();
+const inFlight = new Map();
+function cacheResult(hit, now = Date.now()) {
+  return { ...hit.value, cached:true, cacheAgeMs:Math.max(0, now - hit.time) };
+}
+function remember(key, value) {
+  cache.set(key, { time:Date.now(), value });
+  return value;
+}
+function coalesce(key, work) {
+  const running = inFlight.get(key);
+  if (running) return running;
+  const promise = Promise.resolve().then(work).finally(() => inFlight.delete(key));
+  inFlight.set(key, promise);
+  return promise;
+}
 // Keep the automatic market selection aligned with the dashboard default and
 // the BTC-USDT perpetual contract used by the owner.
 const sources = ['okx', 'coinbase', 'gate', 'binance'];
+// A single process-wide public connection keeps the default OKX perpetual
+// quote hot in memory.  REST remains the safe fallback if the stream or a
+// particular channel is unavailable in a region.
+const okxStream = {
+  socket:null, status:'connecting', ticker:null, spotPrice:null,
+  fundingRate:null, nextFundingRate:null, oi:null, oiUnit:'BTC',
+  lastMessageAt:0, tickerAt:0, contextAt:0, connectedAt:0,
+  reconnects:0, lastError:null, retryMs:1_000, heartbeat:null, retryTimer:null
+};
+function streamAge(at, now = Date.now()) { return at ? Math.max(0, now - at) : null; }
+function freshOkxTicker(maxAge = 5_000) {
+  return okxStream.ticker && streamAge(okxStream.tickerAt) <= maxAge ? { ...okxStream.ticker } : null;
+}
+function freshOkxContext(maxAge = 30_000) {
+  if (!freshOkxTicker(maxAge) || !Number.isFinite(okxStream.spotPrice) || !Number.isFinite(okxStream.fundingRate) || !Number.isFinite(okxStream.oi) || streamAge(okxStream.contextAt) > maxAge) return null;
+  const ticker = freshOkxTicker(maxAge);
+  return {
+    source:'okx', fundingRate:okxStream.fundingRate, nextFundingRate:okxStream.nextFundingRate,
+    oi:okxStream.oi, oiUnit:okxStream.oiUnit, basisPct:(ticker.last / okxStream.spotPrice - 1) * 100,
+    perpPrice:ticker.last, spotPrice:okxStream.spotPrice, fetchedAt:okxStream.contextAt,
+    cached:true, cacheAgeMs:streamAge(okxStream.contextAt), transport:'websocket'
+  };
+}
+function clearOkxTimers() {
+  if (okxStream.heartbeat) clearInterval(okxStream.heartbeat);
+  if (okxStream.retryTimer) clearTimeout(okxStream.retryTimer);
+  okxStream.heartbeat = null; okxStream.retryTimer = null;
+}
+function scheduleOkxReconnect() {
+  if (okxStream.retryTimer) return;
+  const delay = okxStream.retryMs;
+  okxStream.retryMs = Math.min(okxStream.retryMs * 2, 30_000);
+  okxStream.retryTimer = setTimeout(() => { okxStream.retryTimer = null; openOkxStream(); }, delay);
+  okxStream.retryTimer.unref?.();
+}
+function updateOkxStream(message) {
+  const channel = message.arg?.channel, instId = message.arg?.instId;
+  const row = message.data?.[0]; if (!row) return;
+  const now = Date.now(); okxStream.lastMessageAt = now;
+  if (channel === 'tickers' && instId === 'BTC-USDT-SWAP') {
+    const ticker = { last:+row.last, open24h:+row.open24h, changePct:(+row.last / +row.open24h - 1) * 100, high24:+row.high24h, low24:+row.low24h };
+    if (Object.values(ticker).every(Number.isFinite)) { okxStream.ticker = ticker; okxStream.tickerAt = now; persistQuote('okx', ticker, now); }
+  } else if (channel === 'tickers' && instId === 'BTC-USDT') {
+    if (Number.isFinite(+row.last)) { okxStream.spotPrice = +row.last; okxStream.contextAt = now; }
+  } else if (channel === 'funding-rate') {
+    if (Number.isFinite(+row.fundingRate)) { okxStream.fundingRate = +row.fundingRate; okxStream.nextFundingRate = Number.isFinite(+row.nextFundingRate) ? +row.nextFundingRate : +row.fundingRate; okxStream.contextAt = now; }
+  } else if (channel === 'open-interest') {
+    const oi = Number.isFinite(+row.oiCcy) ? +row.oiCcy : +row.oi;
+    if (Number.isFinite(oi)) { okxStream.oi = oi; okxStream.oiUnit = Number.isFinite(+row.oiCcy) ? 'BTC' : 'contracts'; okxStream.contextAt = now; }
+  }
+}
+function openOkxStream() {
+  if (okxStream.socket && [WebSocket.CONNECTING, WebSocket.OPEN].includes(okxStream.socket.readyState)) return;
+  clearOkxTimers(); okxStream.status = 'connecting';
+  try {
+    const socket = new WebSocket('wss://ws.okx.com:8443/ws/v5/public');
+    okxStream.socket = socket;
+    socket.addEventListener('open', () => {
+      okxStream.status = 'connected'; okxStream.connectedAt = Date.now(); okxStream.retryMs = 1_000; okxStream.lastError = null;
+      socket.send(JSON.stringify({ op:'subscribe', args:[
+        { channel:'tickers', instId:'BTC-USDT-SWAP' }, { channel:'tickers', instId:'BTC-USDT' },
+        { channel:'funding-rate', instId:'BTC-USDT-SWAP' }, { channel:'open-interest', instType:'SWAP', instId:'BTC-USDT-SWAP' }
+      ] }));
+      okxStream.heartbeat = setInterval(() => { if (socket.readyState === WebSocket.OPEN) socket.send('ping'); }, 20_000);
+      okxStream.heartbeat.unref?.();
+    });
+    socket.addEventListener('message', event => {
+      try { const message = JSON.parse(String(event.data)); if (message.event === 'error') okxStream.lastError = message.msg || 'subscription error'; else updateOkxStream(message); }
+      catch { /* Ignore non-JSON heartbeat frames. */ }
+    });
+    socket.addEventListener('error', () => { okxStream.lastError = 'socket error'; });
+    socket.addEventListener('close', () => { if (okxStream.socket !== socket) return; okxStream.socket = null; okxStream.status = 'reconnecting'; okxStream.reconnects += 1; clearOkxTimers(); scheduleOkxReconnect(); });
+  } catch (error) { okxStream.status = 'reconnecting'; okxStream.lastError = error.message; scheduleOkxReconnect(); }
+}
+openOkxStream();
+// Each API response carries request-scoped timings.  This lets the browser
+// distinguish its route to this server from the server's route to an exchange.
+const requestTiming = new AsyncLocalStorage();
 
 function json(res, status, body) {
+  const scope = requestTiming.getStore();
+  const now = performance.now();
+  const timing = scope ? {
+    serverMs: Math.round(now - scope.started),
+    upstreamMs: scope.upstreamStarted === null ? 0 : Math.round(scope.upstreamEnded - scope.upstreamStarted),
+    upstreamCalls: scope.upstreamCalls
+  } : undefined;
+  const payload = timing && body && typeof body === 'object' && !Array.isArray(body) ? { ...body, timing } : body;
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-  res.end(JSON.stringify(body));
+  res.end(JSON.stringify(payload));
 }
 function validCandle(c) { return c && [c.time, c.open, c.high, c.low, c.close, c.volume].every(Number.isFinite); }
 function intervalFor(source, interval) {
@@ -91,23 +211,33 @@ function intervalFor(source, interval) {
   if (source === 'gate' || source === 'binance') return interval === '1h' ? '1h' : interval === '2h' ? '2h' : interval === '4h' ? '4h' : interval === '1d' ? '1d' : interval === '1w' ? '1w' : interval;
   return map[interval];
 }
-async function request(url, timeout = 4_000) {
+async function request(url, timeout = UPSTREAM_TIMEOUT) {
+  const scope = requestTiming.getStore(), started = performance.now();
+  if (scope && scope.upstreamStarted === null) scope.upstreamStarted = started;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeout);
   try {
     const r = await fetch(url, { signal: ctrl.signal, headers: { accept: 'application/json' } });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     return await r.json();
-  } finally { clearTimeout(timer); }
+  } finally {
+    clearTimeout(timer);
+    if (scope) { scope.upstreamEnded = performance.now(); scope.upstreamCalls += 1; }
+  }
 }
 async function requestText(url, timeout = 8_000) {
+  const scope = requestTiming.getStore(), started = performance.now();
+  if (scope && scope.upstreamStarted === null) scope.upstreamStarted = started;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeout);
   try {
     const r = await fetch(url, { signal: ctrl.signal, headers: { accept: 'text/csv,text/plain' } });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     return await r.text();
-  } finally { clearTimeout(timer); }
+  } finally {
+    clearTimeout(timer);
+    if (scope) { scope.upstreamEnded = performance.now(); scope.upstreamCalls += 1; }
+  }
 }
 async function fromGate(interval, limit) {
   const [ticker, rows] = await Promise.all([
@@ -135,14 +265,15 @@ async function okxCandleRows(interval, limit) {
   return { code:'0', data:candles.map(c => [String(c.time),String(c.open),String(c.high),String(c.low),String(c.close),String(c.volume)]) };
 }
 async function fromOKX(interval, limit) {
+  const streamedTicker = freshOkxTicker();
   const [ticker, rows] = await Promise.all([
     // Keep the dashboard on the same market as the OKX mobile perpetual
     // contract, rather than mixing its price with BTC-USDT spot.
-    request('https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT-SWAP'),
+    streamedTicker ? Promise.resolve(null) : request('https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT-SWAP'),
     okxCandleRows(interval, limit)
   ]);
-  const d = ticker.data?.[0]; if (!d || ticker.code !== '0' || rows.code !== '0') throw new Error(ticker.msg || rows.msg || 'invalid API payload');
-  return { ticker: { last:+d.last, open24h:+d.open24h, changePct:(+d.last / +d.open24h - 1) * 100, high24:+d.high24h, low24:+d.low24h }, candles: rows.data.map(c => ({ time:+c[0], open:+c[1], high:+c[2], low:+c[3], close:+c[4], volume:+c[5] })).reverse() };
+  const d = ticker?.data?.[0]; if ((!streamedTicker && (!d || ticker.code !== '0')) || rows.code !== '0') throw new Error(ticker?.msg || rows.msg || 'invalid API payload');
+  return { ticker:streamedTicker || { last:+d.last, open24h:+d.open24h, changePct:(+d.last / +d.open24h - 1) * 100, high24:+d.high24h, low24:+d.low24h }, candles: rows.data.map(c => ({ time:+c[0], open:+c[1], high:+c[2], low:+c[3], close:+c[4], volume:+c[5] })).reverse() };
 }
 const coinbaseIntervals = {
   '1m':['ONE_MINUTE', 60_000], '5m':['FIVE_MINUTE', 300_000],
@@ -220,34 +351,45 @@ async function fromBinance(interval, limit) {
 const loaders = { gate: fromGate, okx: fromOKX, coinbase: fromCoinbase, binance: fromBinance };
 async function liveQuote(source = 'okx') {
   const selected = loaders[source] ? source : 'okx', key = `quote:${selected}`, hit = cache.get(key);
-  if (hit && Date.now() - hit.time < QUOTE_TTL) return { ...hit.value, cached:true };
+  const streamed = selected === 'okx' ? freshOkxTicker() : null;
+  if (streamed) return { source:selected, ticker:streamed, fetchedAt:okxStream.tickerAt, cached:true, cacheAgeMs:streamAge(okxStream.tickerAt), transport:'websocket', stale:false };
+  if (hit && Date.now() - hit.time < QUOTE_TTL) return { ...cacheResult(hit), transport:hit.value.transport || 'rest', stale:false };
   const prior = [...cache.values()].map(entry => entry.value).reverse().find(value => value?.source === selected && value?.ticker)?.ticker;
-  let ticker;
-  if (selected === 'okx') {
-    const payload = await request('https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT-SWAP'), row = payload.data?.[0];
-    if (payload.code !== '0' || !row) throw new Error(payload.msg || 'OKX quote unavailable');
-    ticker = { last:+row.last, open24h:+row.open24h, changePct:(+row.last / +row.open24h - 1) * 100, high24:+row.high24h, low24:+row.low24h };
-  } else if (selected === 'binance') {
-    const row = await request('https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=BTCUSDT');
-    ticker = { last:+row.lastPrice, open24h:+row.openPrice, changePct:+row.priceChangePercent, high24:+row.highPrice, low24:+row.lowPrice };
-  } else if (selected === 'gate') {
-    const row = (await request('https://api.gateio.ws/api/v4/futures/usdt/tickers?contract=BTC_USDT'))[0];
-    if (!row) throw new Error('Gate quote unavailable');
-    ticker = { last:+row.last, open24h:+row.last / (1 + (+row.change_percentage || 0) / 100), changePct:+row.change_percentage, high24:+row.high_24h, low24:+row.low_24h };
-  } else {
-    const payload = await request('https://api.international.coinbase.com/api/v1/instruments/BTC-PERP/quote', 8_000), row = payload.quote || payload, last = +(row.trade_price || row.mark_price);
-    if (!Number.isFinite(last)) throw new Error('Coinbase quote unavailable');
-    ticker = { last, open24h:prior?.open24h || last, changePct:prior?.open24h ? (last / prior.open24h - 1) * 100 : 0, high24:Math.max(prior?.high24 || last,last), low24:Math.min(prior?.low24 || last,last) };
+  try {
+    const value = await coalesce(key, async () => {
+      let ticker;
+      if (selected === 'okx') {
+        const payload = await request('https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT-SWAP'), row = payload.data?.[0];
+        if (payload.code !== '0' || !row) throw new Error(payload.msg || 'OKX quote unavailable');
+        ticker = { last:+row.last, open24h:+row.open24h, changePct:(+row.last / +row.open24h - 1) * 100, high24:+row.high24h, low24:+row.low24h };
+      } else if (selected === 'binance') {
+        const row = await request('https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=BTCUSDT');
+        ticker = { last:+row.lastPrice, open24h:+row.openPrice, changePct:+row.priceChangePercent, high24:+row.highPrice, low24:+row.lowPrice };
+      } else if (selected === 'gate') {
+        const row = (await request('https://api.gateio.ws/api/v4/futures/usdt/tickers?contract=BTC_USDT'))[0];
+        if (!row) throw new Error('Gate quote unavailable');
+        ticker = { last:+row.last, open24h:+row.last / (1 + (+row.change_percentage || 0) / 100), changePct:+row.change_percentage, high24:+row.high_24h, low24:+row.low_24h };
+      } else {
+        const payload = await request('https://api.international.coinbase.com/api/v1/instruments/BTC-PERP/quote', 1_200), row = payload.quote || payload, last = +(row.trade_price || row.mark_price);
+        if (!Number.isFinite(last)) throw new Error('Coinbase quote unavailable');
+        ticker = { last, open24h:prior?.open24h || last, changePct:prior?.open24h ? (last / prior.open24h - 1) * 100 : 0, high24:Math.max(prior?.high24 || last,last), low24:Math.min(prior?.low24 || last,last) };
+      }
+      const fresh = { source:selected, ticker, fetchedAt:Date.now(), cached:false, cacheAgeMs:0, transport:'rest', stale:false };
+      remember(key, fresh); persistQuote(selected, ticker, fresh.fetchedAt); return fresh;
+    });
+    return value;
+  } catch (error) {
+    if (hit && Date.now() - hit.time <= STALE_QUOTE_MAX_AGE) return { ...cacheResult(hit), transport:hit.value.transport || 'rest', stale:true, fallbackReason:error.name === 'AbortError' ? 'timeout' : error.message };
+    throw error;
   }
-  const value = { source:selected, ticker, fetchedAt:Date.now(), cached:false };
-  cache.set(key, { time:Date.now(), value });
-  persistQuote(selected, ticker, value.fetchedAt);
-  return value;
 }
 async function marketContext(source = 'okx') {
   const selected = loaders[source] ? source : 'okx', key = `market-context:${selected}`;
   const hit = cache.get(key);
-  if (hit && Date.now() - hit.time < TTL) return { ...hit.value, cached:true };
+  const streamed = selected === 'okx' ? freshOkxContext() : null;
+  if (streamed) return streamed;
+  if (hit && Date.now() - hit.time < CONTEXT_TTL) return { ...cacheResult(hit), transport:hit.value.transport || 'rest', stale:false };
+  try { return await coalesce(key, async () => {
   let value;
   if (selected === 'okx') {
     const [funding, oi, perp, spot] = await Promise.all([
@@ -283,8 +425,13 @@ async function marketContext(source = 'okx') {
     const perpPrice=+perp.last, spotPrice=+spot.last;
     value = { source:selected, fundingRate:Number(perp.funding_rate), nextFundingRate:Number(perp.funding_rate), oi:Number(perp.total_size), oiUnit:'contracts', basisPct:(perpPrice / spotPrice - 1) * 100, perpPrice, spotPrice, fetchedAt:Date.now(), cached:false };
   }
-  cache.set(key, { time:Date.now(), value });
+  value.transport = 'rest'; value.cacheAgeMs = 0; value.stale = false;
+  remember(key, value);
   return value;
+  }); } catch (error) {
+    if (hit && Date.now() - hit.time <= STALE_QUOTE_MAX_AGE) return { ...cacheResult(hit), transport:hit.value.transport || 'rest', stale:true, fallbackReason:error.name === 'AbortError' ? 'timeout' : error.message };
+    throw error;
+  }
 }
 async function binanceHistory(interval, limit = 1000) {
   const rows = await request(`https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${interval}&limit=${limit}`, 8_000);
@@ -321,7 +468,13 @@ async function coinbaseHistory(interval, limit = 1000) {
 async function forecastHistory(interval) {
   const failures = [];
   for (const [source, loader] of [['coinbase', coinbaseHistory], ['gate', gateHistory], ['binance', binanceHistory]]) {
-    try { return { candles:await loader(interval), source }; }
+    const stored = storedCandles(source, interval, 1000);
+    if (stored.length >= 900) return { candles:stored, source, cached:true, storage:'sqlite' };
+    try {
+      const candles = await loader(interval);
+      persistHistory(source, interval, candles);
+      return { candles, source, cached:false, storage:'upstream' };
+    }
     catch (e) { failures.push(`${source}: ${e.name === 'AbortError' ? 'timeout' : e.message}`); }
   }
   throw new Error(failures.join('; '));
@@ -357,22 +510,28 @@ async function equityHistory(symbol) {
 }
 async function market(interval, limit, preferred) {
   const key = `${interval}:${limit}:${preferred || 'auto'}`; const hit = cache.get(key);
-  if (hit && Date.now() - hit.time < TTL) return { ...hit.value, cached: true };
+  if (hit && Date.now() - hit.time < MARKET_TTL) return { ...cacheResult(hit), stale:false };
   // A user-selected source is intentionally locked: displayed price and chart
   // must not silently switch exchanges during a temporary upstream failure.
-  const order = preferred && loaders[preferred] ? [preferred] : sources;
-  const failures = {};
-  const jobs = order.map(source => loaders[source](interval, limit).then(value => ({ source, value })).catch(e => { failures[source] = e.name === 'AbortError' ? 'timeout (4s)' : e.message; throw e; }));
-  try {
-    const { source, value } = await Promise.any(jobs);
-    const candles = value.candles.filter(validCandle).sort((a,b) => a.time - b.time).slice(-limit);
-    if (candles.length < 30 || !Number.isFinite(value.ticker.last)) throw new Error('insufficient valid market data');
-    const result = { ...value, candles, source, fetchedAt: Date.now(), cached: false, failures };
-    cache.set(key, { time: Date.now(), value: result }); persistMarket(result, interval); return result;
-  } catch { throw Object.assign(new Error('All data sources failed'), { failures }); }
+  try { return await coalesce(key, async () => {
+    const order = preferred && loaders[preferred] ? [preferred] : sources;
+    const failures = {};
+    const jobs = order.map(source => loaders[source](interval, limit).then(value => ({ source, value })).catch(e => { failures[source] = e.name === 'AbortError' ? 'timeout (1.2s)' : e.message; throw e; }));
+    try {
+      const { source, value } = await Promise.any(jobs);
+      const candles = value.candles.filter(validCandle).sort((a,b) => a.time - b.time).slice(-limit);
+      if (candles.length < 30 || !Number.isFinite(value.ticker.last)) throw new Error('insufficient valid market data');
+      const streamedTicker = source === 'okx' ? freshOkxTicker() : null;
+      const result = { ...value, ticker:streamedTicker || value.ticker, candles, source, fetchedAt: Date.now(), cached:false, cacheAgeMs:0, stale:false, transport:streamedTicker ? 'websocket' : 'rest', failures };
+      remember(key, result); persistMarket(result, interval); return result;
+    } catch { throw Object.assign(new Error('All data sources failed'), { failures }); }
+  }); } catch (error) {
+    if (hit && Date.now() - hit.time <= STALE_QUOTE_MAX_AGE) return { ...cacheResult(hit), stale:true, fallbackReason:error.message };
+    throw error;
+  }
 }
 const mime = { '.html':'text/html; charset=utf-8', '.js':'text/javascript; charset=utf-8', '.css':'text/css; charset=utf-8', '.svg':'image/svg+xml', '.png':'image/png', '.ico':'image/x-icon' };
-http.createServer(async (req, res) => {
+http.createServer((req, res) => requestTiming.run({ started:performance.now(), upstreamStarted:null, upstreamEnded:null, upstreamCalls:0 }, async () => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   if (url.pathname === '/api/market') {
     const interval = url.searchParams.get('interval') || '4h';
@@ -384,7 +543,14 @@ http.createServer(async (req, res) => {
     try { json(res, 200, await liveQuote(url.searchParams.get('source') || 'okx')); } catch (e) { json(res, 503, { error:e.message }); }
     return;
   }
-  if (url.pathname === '/api/status') { json(res, 200, { sources, cacheEntries: cache.size, storage:storageStatus(), now:Date.now() }); return; }
+  if (url.pathname === '/api/status') {
+    const now = Date.now();
+    json(res, 200, {
+      sources, cacheEntries: cache.size, storage:storageStatus(), now,
+      refreshPolicy:{ quoteMs:1_000, marketMs:MARKET_TTL, contextMs:CONTEXT_TTL, historyMs:HISTORY_TTL },
+      websocket:{ provider:'OKX', status:okxStream.status, tickerAgeMs:streamAge(okxStream.tickerAt, now), messageAgeMs:streamAge(okxStream.lastMessageAt, now), contextAgeMs:streamAge(okxStream.contextAt, now), reconnects:okxStream.reconnects, lastError:okxStream.lastError }
+    }); return;
+  }
   if (url.pathname === '/api/market-context') {
     try { json(res, 200, await marketContext(url.searchParams.get('source') || 'okx')); }
     catch (e) { json(res, 503, { error:'Market context unavailable', detail:e.message }); }
@@ -393,20 +559,20 @@ http.createServer(async (req, res) => {
   if (url.pathname === '/api/forecast-history') {
     const key = 'forecast-history', force = url.searchParams.get('refresh') === '1'; const hit = cache.get(key);
     try {
-      if (!force && hit && Date.now() - hit.time < 300_000) { json(res, 200, { ...hit.value, cached:true }); return; }
+      if (!force && hit && Date.now() - hit.time < HISTORY_TTL) { json(res, 200, cacheResult(hit)); return; }
       const [intradayResult, dailyResult] = await Promise.all([forecastHistory('15m'), forecastHistory('1d')]);
       const value = { intraday:intradayResult.candles, daily:dailyResult.candles, source:`${intradayResult.source}/${dailyResult.source}`, fetchedAt:Date.now(), cached:false };
-      cache.set(key, { time:Date.now(), value }); persistTrainingRun(value, force); json(res, 200, value);
+      remember(key, value); persistTrainingRun(value, force); json(res, 200, value);
     } catch (e) { json(res, 503, { error:'Forecast history unavailable', detail:e.message }); }
     return;
   }
   if (url.pathname === '/api/correlation-history') {
     const key = 'correlation-history'; const hit = cache.get(key);
     try {
-      if (hit && Date.now() - hit.time < 300_000) { json(res, 200, { ...hit.value, cached:true }); return; }
+      if (hit && Date.now() - hit.time < HISTORY_TTL) { json(res, 200, cacheResult(hit)); return; }
       const [btc, spy, qqq] = await Promise.all([forecastHistory('1d'), equityHistory('SPY'), equityHistory('QQQ')]);
       const value = { btc:btc.candles.map(x=>({time:x.time,close:x.close})), spy:spy.candles, qqq:qqq.candles, indexQuotes:{spy:spy.quote,qqq:qqq.quote}, sources:{btc:btc.source,spy:spy.source,qqq:qqq.source}, fetchedAt:Date.now(), cached:false };
-      cache.set(key, { time:Date.now(), value }); json(res, 200, value);
+      remember(key, value); json(res, 200, value);
     } catch (e) { json(res, 503, { error:'Correlation history unavailable', detail:e.message }); }
     return;
   }
@@ -414,4 +580,4 @@ http.createServer(async (req, res) => {
   if (relative.includes('..')) { res.writeHead(403); res.end(); return; }
   try { const file = join(PUBLIC, relative); const body = await readFile(file); res.writeHead(200, { 'content-type': mime[extname(file)] || 'application/octet-stream' }); res.end(body); }
   catch { res.writeHead(404); res.end('Not found'); }
-}).listen(PORT, HOST, () => console.log(`BTC indicator: http://${HOST}:${PORT}`));
+})).listen(PORT, HOST, () => console.log(`BTC indicator: http://${HOST}:${PORT}`));
