@@ -46,7 +46,9 @@ jobs:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
         run: |
-          rsync -az --delete-after --exclude='.git/' -e "ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p 22" ./ "$DEPLOY_USER@$DEPLOY_HOST:/opt/btc-usdt-long-short-indicator/"
+          # Market history and training samples are a persistent server-side
+          # SQLite volume. Never delete or overwrite them during application sync.
+          rsync -az --delete-after --exclude='.git/' --exclude='data/' -e "ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p 22" ./ "$DEPLOY_USER@$DEPLOY_HOST:/opt/btc-usdt-long-short-indicator/"
 
       - name: Rebuild containers
         if: steps.ssh.outputs.ready == 'true'
