@@ -56,7 +56,11 @@ function drawLegacy2() {
   if(hoverIndex!==null){const v=d[hoverIndex],xx=x(hoverIndex),yy=y(v.close);c.save();c.strokeStyle='rgba(222,237,255,.42)';c.setLineDash([3,4]);c.beginPath();c.moveTo(xx,P.t);c.lineTo(xx,P.t+ch);c.moveTo(P.l,yy);c.lineTo(P.l+cw,yy);c.stroke();c.setLineDash([]);c.fillStyle='#fff';c.beginPath();c.arc(xx,yy,3.5,0,Math.PI*2);c.fill();c.restore()}
 }
 (() => {const cv=$('chart'),box=cv.parentElement,tip=document.createElement('div');tip.id='chartTooltip';box.appendChild(tip);cv.addEventListener('mousemove',event=>{const visible=visibleCandles();if(!visible.length)return;const rect=cv.getBoundingClientRect(),ratio=(event.clientX-rect.left-18)/(rect.width-92);hoverIndex=Math.max(0,Math.min(visible.length-1,Math.round(ratio*(visible.length-1))));const d=visible[hoverIndex],change=(d.close/d.open-1)*100;tip.innerHTML=`<b>${time(d.time)}</b><span>开 ${money(d.open)}　高 ${money(d.high)}</span><span>低 ${money(d.low)}　收 ${money(d.close)}</span><span class="${change>=0?'bull':'bear'}">${pct(change)}　量 ${d.volume.toLocaleString('en-US',{maximumFractionDigits:2})}</span>`;tip.style.display='grid';tip.style.left=Math.min(event.clientX-rect.left+14,rect.width-185)+'px';tip.style.top=Math.max(8,event.clientY-rect.top-96)+'px';draw()});cv.addEventListener('mouseleave',()=>{hoverIndex=null;tip.style.display='none';draw()});cv.addEventListener('wheel',event=>{if(!event.metaKey&&!event.ctrlKey)return;event.preventDefault();const data=frozenCandles||state.candles,n=state.viewPoints?Math.max(2,Math.ceil(state.viewPoints/state.zoom)):Math.max(30,Math.ceil(data.length/state.zoom)),max=Math.max(0,data.length-n),step=Math.max(1,Math.round(n*.1));state.panOffset=Math.max(0,Math.min(max,(state.panOffset||0)+(event.deltaY>0?step:-step)));hoverIndex=null;chartSelection=null;draw()},{passive:false});window.addEventListener('resize',draw)})();
-(() => {const main=document.querySelector('main'),chartCard=[...main.children].find(x=>x.querySelector&&x.querySelector('#chart')),grid=main.querySelector('.grid');if(!chartCard||!grid)return;const layout=document.createElement('section');layout.className='terminal-layout';const side=document.createElement('aside');side.className='side-stack';side.append(...grid.children);const changes=document.createElement('section');changes.className='change-card';changes.innerHTML='<h2>周期涨幅</h2><div id="changeTags"></div>';side.append(changes);layout.append(chartCard,side);main.insertBefore(layout,grid);grid.remove();const title=main.querySelector('header h1'),sub=main.querySelector('header p');title.textContent='₿ BTC/USDT 多空指标';sub.innerHTML='<span class="live-pulse"></span>实时连接 · REST 轮询';const footer=document.createElement('footer');footer.innerHTML='<b>风险提示：</b> 本指标仅供研究参考，不构成任何投资建议。加密资产波动剧烈，请独立决策并严格控制风险。';main.append(footer)})();
+(() => {const main=document.querySelector('main'),chartCard=[...main.children].find(x=>x.querySelector&&x.querySelector('#chart')),grid=main.querySelector('.grid');if(!chartCard||!grid)return;chartCard.id='mainChartCard';const layout=document.createElement('section');layout.className='terminal-layout';const side=document.createElement('aside');side.className='side-stack';const [signalCard,indicatorCard]=[...grid.children];signalCard.id='ruleSignalCard';indicatorCard.id='indicatorDetailsCard';side.append(signalCard,indicatorCard);const changes=document.createElement('section');changes.className='change-card';changes.id='periodChangeCard';changes.innerHTML='<h2>周期涨幅</h2><div id="changeTags"></div>';side.append(changes);layout.append(chartCard,side);main.insertBefore(layout,grid);grid.remove();const title=main.querySelector('header h1'),sub=main.querySelector('header p');title.textContent='₿ BTC/USDT 多空指标';sub.innerHTML='<span class="live-pulse"></span>实时连接 · REST 轮询';const footer=document.createElement('footer');footer.innerHTML='<b>风险提示：</b> 本指标仅供研究参考，不构成任何投资建议。加密资产波动剧烈，请独立决策并严格控制风险。';main.append(footer)})();
+/* On phones, read the live decision before working through the dense chart.
+   The same nodes are restored to the right sidebar on desktop, so state and
+   event handlers are preserved rather than duplicated. */
+(() => {const query=matchMedia('(max-width: 760px)');function arrange(){const layout=document.querySelector('.terminal-layout'),side=layout?.querySelector('.side-stack'),chart=$('mainChartCard'),signal=$('ruleSignalCard'),indicators=$('indicatorDetailsCard'),changes=$('periodChangeCard');if(!layout||!side||!chart||!signal||!indicators||!changes)return;if(query.matches){layout.classList.add('mobile-reading-layout');layout.replaceChildren(signal,chart,side);side.hidden=true;layout.after(indicators)}else{side.hidden=false;side.replaceChildren(signal,indicators);layout.classList.remove('mobile-reading-layout');layout.replaceChildren(chart,side)}draw()}query.addEventListener('change',arrange);setTimeout(arrange,0);setTimeout(arrange,80)})();
 function buttons() {
   $('intervals').innerHTML=`<span class="control-label">K 线周期</span>`+intervals.map(([v,n])=>`<button data-i="${v}" class="${state.range===null&&state.interval===v?'active':''}">${n}</button>`).join('');
   $('ranges').innerHTML=`<span class="control-label">查看范围</span>`+Object.keys(ranges).map(x=>`<button data-r="${x}" class="${state.range===x?'active':''}">${x}</button>`).join('');
@@ -93,7 +97,17 @@ function updateClocks(){const el=$('marketClocks');if(!el)return;const zh=uiLang
 let chartSelection=null, requestLatency=0;
 const tx=(zh,en)=>uiLang==='zh'?zh:en;
 function pointTime(ms){return new Intl.DateTimeFormat(uiLang==='zh'?'zh-CN':'en-US',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(ms)}
-function addHelp(el,zh,en){if(!el||el.querySelector('.help-dot'))return;const tip=document.createElement('span');tip.className='help-dot';tip.tabIndex=0;tip.textContent='!';tip.dataset.tip=tx(zh,en);el.append(tip)}
+let floatingHelpTip=null,activeHelpDot=null;
+function ensureFloatingHelpTip(){if(floatingHelpTip)return floatingHelpTip;floatingHelpTip=document.createElement('div');floatingHelpTip.id='globalHelpTooltip';floatingHelpTip.setAttribute('role','tooltip');floatingHelpTip.hidden=true;document.body.append(floatingHelpTip);return floatingHelpTip}
+function showFloatingHelpTip(dot){const text=dot?.dataset?.tip;if(!text)return;const tip=ensureFloatingHelpTip();activeHelpDot=dot;tip.textContent=text;tip.hidden=false;const rect=dot.getBoundingClientRect(),margin=12,maxLeft=Math.max(margin,window.innerWidth-tip.offsetWidth-margin);let left=Math.min(maxLeft,Math.max(margin,rect.left+rect.width/2-tip.offsetWidth/2));let top=rect.bottom+9;if(top+tip.offsetHeight>window.innerHeight-margin)top=Math.max(margin,rect.top-tip.offsetHeight-9);tip.style.left=`${Math.round(left)}px`;tip.style.top=`${Math.round(top)}px`}
+function hideFloatingHelpTip(dot){if(dot&&dot!==activeHelpDot)return;activeHelpDot=null;if(floatingHelpTip)floatingHelpTip.hidden=true}
+document.addEventListener('pointerover',event=>{const dot=event.target.closest?.('.help-dot[data-tip]');if(dot)showFloatingHelpTip(dot)});
+document.addEventListener('pointerout',event=>{const dot=event.target.closest?.('.help-dot[data-tip]');if(dot&&!dot.contains(event.relatedTarget))hideFloatingHelpTip(dot)});
+document.addEventListener('focusin',event=>{const dot=event.target.closest?.('.help-dot[data-tip]');if(dot)showFloatingHelpTip(dot)});
+document.addEventListener('focusout',event=>{const dot=event.target.closest?.('.help-dot[data-tip]');if(dot)hideFloatingHelpTip(dot)});
+document.addEventListener('click',event=>{const dot=event.target.closest?.('.help-dot[data-tip]');if(!dot)return;event.preventDefault();activeHelpDot===dot?hideFloatingHelpTip(dot):showFloatingHelpTip(dot)});
+window.addEventListener('scroll',()=>hideFloatingHelpTip(),true);window.addEventListener('resize',()=>hideFloatingHelpTip());
+function addHelp(el,zh,en){if(!el||el.querySelector('.help-dot'))return;const tip=document.createElement('button');tip.type='button';tip.className='help-dot';tip.setAttribute('aria-label',tx('查看说明','Show explanation'));tip.textContent='!';tip.dataset.tip=tx(zh,en);el.append(tip)}
 function ensureInteractionUI(){
   const chartCard=$('chart')?.closest('.card');
   if(chartCard&&!$('selectionStats')){const stats=document.createElement('div');stats.id='selectionStats';stats.className='selection-stats muted';stats.textContent=tx('拖拽图表可框选区段，显示最高、最低及涨跌幅。','Drag on chart to select a period: high, low and return.');chartCard.append(stats)}
@@ -151,7 +165,7 @@ renderSignalProjection=function(){const signal=$('signal'),reason=$('signalReaso
 
 /* The forecast grid belongs directly below the chart on wide displays, using
    the otherwise empty left column while the indicator stack remains visible. */
-setTimeout(()=>{const layout=document.querySelector('.terminal-layout'),chartCard=layout?.querySelector(':scope > .card'),forecast=document.querySelector('main > .forecast-card');if(layout&&chartCard&&forecast&&!chartCard.contains(forecast))chartCard.append(forecast)},0);
+setTimeout(()=>{const chartCard=$('mainChartCard'),forecast=document.querySelector('main > .forecast-card');if(chartCard&&forecast&&!chartCard.contains(forecast))chartCard.append(forecast)},0);
 
 /* Keep the compact multi-period resonance beside the indicator list so the
    two desktop columns finish at a similar height. */
@@ -180,7 +194,7 @@ visibleCandles=function(){const data=frozenCandles||state.candles,n=Math.max(30,
 const drawLive=draw;
 draw=function(){if(!chartPaused)drawLive()};
 (() => {const cv=$('chart'),card=cv?.closest('.card'),periods=document.querySelector('.change-card');if(!cv||!card)return;
-  const selection=$('selectionStats');if(periods){periods.classList.add('chart-periods');(selection||cv.parentElement).after(periods)}
+  const selection=$('selectionStats');if(periods){periods.classList.add('chart-periods')}
   const clearHover=()=>{chartPaused=false;frozenCandles=null;hoverIndex=null;chartSelection=null;const stat=$('selectionStats');if(stat)stat.textContent=tx('拖拽图表可框选区段，显示时间段、最高、最低及涨跌幅。','Drag on chart to select a time span, high, low and return.');const tip=$('chartTooltip');if(tip)tip.style.display='none';drawLive()};
   cv.addEventListener('mouseenter',()=>{frozenCandles=state.candles.slice();chartPaused=true});
   cv.addEventListener('mousemove',()=>{if(chartPaused)drawLive()});
@@ -241,7 +255,7 @@ function drawCandlestickChart(){
   if(!cv||!rect||d.length<2)return;
   const dpr=devicePixelRatio||1,w=rect.width,h=rect.height;
   cv.width=Math.round(w*dpr);cv.height=Math.round(h*dpr);
-  const c=cv.getContext('2d'),P={l:18,r:74,t:15,b:30},cw=w-P.l-P.r,ch=h-P.t-P.b;
+  const c=cv.getContext('2d'),P={l:52,r:74,t:15,b:30},cw=w-P.l-P.r,ch=h-P.t-P.b;
   const closes=d.map(v=>v.close),ma20=ema(closes,20),ma50=ema(closes,50),ma200=ema(closes,200);
   const values=d.flatMap(v=>[v.low,v.high]);[ma20,ma50,ma200].forEach(a=>a.forEach(v=>{if(Number.isFinite(v))values.push(v)}));
   let lo=Math.min(...values),hi=Math.max(...values),margin=(hi-lo||1)*.075;lo-=margin;hi+=margin;
@@ -259,7 +273,7 @@ function drawCandlestickChart(){
   const line=(a,color,enabled)=>{if(!enabled)return;c.beginPath();let started=false;a.forEach((v,i)=>{if(!Number.isFinite(v)){started=false;return}if(started)c.lineTo(x(i),y(v));else{c.moveTo(x(i),y(v));started=true}});c.strokeStyle=color;c.lineWidth=1.35;c.stroke()};line(ma20,'#4b9fff',lines.ma20);line(ma50,'#d69b2d',lines.ma50);line(ma200,'#a970ff',lines.ma200);
   const highValue=v=>v.close,lowValue=v=>v.close,hiI=d.reduce((best,v,i)=>highValue(v)>highValue(d[best])?i:best,0),loI=d.reduce((best,v,i)=>lowValue(v)<lowValue(d[best])?i:best,0);
   for(const [i,value,color] of [[hiI,highValue(d[hiI]),'#ffcb65'],[loI,lowValue(d[loI]),'#52d5f4']]){const xx=x(i),yy=y(value);c.save();c.strokeStyle=color+'99';c.setLineDash([4,4]);c.beginPath();c.moveTo(P.l,yy);c.lineTo(P.l+cw,yy);c.stroke();c.setLineDash([]);c.fillStyle='#15202d';c.strokeStyle=color;c.lineWidth=2;c.beginPath();c.arc(xx,yy,5,0,Math.PI*2);c.fill();c.stroke();c.restore()}
-  for(let g=0;g<5;g++){const i=Math.round(g*(d.length-1)/4);c.fillStyle='#75849a';c.textAlign='center';c.fillText(time(d[i].time),x(i),h-8)}
+  for(let g=0;g<5;g++){const i=Math.round(g*(d.length-1)/4);c.fillStyle='#75849a';c.textAlign=g===0?'left':g===4?'right':'center';c.fillText(time(d[i].time),g===0?P.l:g===4?P.l+cw:x(i),h-8)}
   if(chartSelection){const a=Math.min(chartSelection.start,chartSelection.end),b=Math.max(chartSelection.start,chartSelection.end);c.fillStyle='rgba(75,159,255,.13)';c.fillRect(x(a),P.t,x(b)-x(a),ch);c.strokeStyle='rgba(135,190,255,.9)';c.setLineDash([4,4]);c.strokeRect(x(a),P.t,x(b)-x(a),ch);c.setLineDash([])}
   if(hoverIndex!==null){const v=d[hoverIndex],xx=x(hoverIndex),yy=y(v.close);c.save();c.strokeStyle='rgba(222,237,255,.42)';c.setLineDash([3,4]);c.beginPath();c.moveTo(xx,P.t);c.lineTo(xx,P.t+ch);c.moveTo(P.l,yy);c.lineTo(P.l+cw,yy);c.stroke();c.setLineDash([]);c.fillStyle='#fff';c.beginPath();c.arc(xx,yy,3.5,0,Math.PI*2);c.fill();c.restore()}
   renderRangeExtremaPoints();
@@ -284,6 +298,46 @@ var derivativeMarketContext=null,derivativeMarketContextLoading=false;
 function formatRate(value){return Number.isFinite(value)?`${value>=0?'+':''}${(value*100).toFixed(4)}%`:'--'}
 function fixedSessionVwap(candles){const latest=candles.at(-1),start=Math.floor(latest.time/86_400_000)*86_400_000,session=candles.filter(c=>c.time>=start),total=session.reduce((sum,c)=>sum+c.volume,0);return total?session.reduce((sum,c)=>sum+((c.high+c.low+c.close)/3)*c.volume,0)/total:NaN}
 function renderTradingConfirmation(m){const indicators=$('indicators'),candles=fixedRuleSignal.candles;if(!indicators||candles.length<30)return;const latest=candles.at(-1),averageVolume=candles.slice(-21,-1).reduce((sum,c)=>sum+c.volume,0)/20,volumeRatio=averageVolume?latest.volume/averageVolume:NaN,vwap=fixedSessionVwap(candles),trendBull=m.close>m.e20&&m.e20>m.e50&&m.e50>m.e200,trendBear=m.close<m.e20&&m.e20<m.e50&&m.e50<m.e200,trendKind=trendBull?'bull':trendBear?'bear':'flat',vwapKind=m.close>vwap?'bull':m.close<vwap?'bear':'flat',volumeKind=volumeRatio>=1.2?'bull':volumeRatio<.8?'bear':'flat',context=derivativeMarketContext?.source===(fixedRuleSignal.source||state.source)?derivativeMarketContext:null,funding=context?.fundingRate,basis=context?.basisPct,oi=context?.oi;const crowdedLong=Number.isFinite(funding)&&funding>=.0005,crowdedShort=Number.isFinite(funding)&&funding<=-.0005,extremeBasis=Number.isFinite(basis)&&Math.abs(basis)>=.12;let action='观望',decisionKind='flat',reason='趋势、成交或位置尚未同时确认';if((trendBull||trendBear)&&volumeRatio>=1&&((trendBull&&vwapKind==='bull')||(trendBear&&vwapKind==='bear'))){action=trendBull?'研究偏多':'研究偏空';decisionKind=trendBull?'bull':'bear';reason=trendBull?'趋势、VWAP 与成交量同向':'趋势、VWAP 与成交量同向'}else if((trendBull||trendBear)&&volumeRatio<1){reason='趋势存在，但成交量未确认'}else if(trendBull||trendBear){reason='趋势存在，但价格与 VWAP 尚未同向'}if((decisionKind==='bull'&&crowdedLong)||(decisionKind==='bear'&&crowdedShort)){action='观望';decisionKind='flat';reason+=`；${crowdedLong?'多头':'空头'}资金费率偏拥挤`}if(extremeBasis){reason+=`；永续${basis>0?'溢价':'贴水'}偏大`}const row=(key,name,value,detail,kind,label)=>`<div class="metric trade-confirmation-row" data-fixed-basis="true" data-indicator="${key}"><span>${name}</span><b>${value}</b><i class="badge ${kind}">${label||({bull:'偏多',bear:'偏空',flat:'中性'}[kind])}</i><small>${detail}</small></div>`;const volumeDetail=Number.isFinite(volumeRatio)?`${volumeRatio.toFixed(2)}× ${volumeRatio>=1.2?'放量确认':volumeRatio<.8?'量能偏弱':'量能一般'} · 对比前 20 根已收盘K线`:'数据不足';const fundingKind=crowdedLong?'bear':crowdedShort?'bull':'flat',fundingDetail=Number.isFinite(funding)?`${funding>0?'多头付费':'空头付费'} · 下期 ${formatRate(context.nextFundingRate)}`:'当前数据源未提供',basisKind=extremeBasis?(basis>0?'bear':'bull'):'flat',basisDetail=Number.isFinite(basis)?`永续 ${money(context.perpPrice)} / 现货 ${money(context.spotPrice)}`:'当前数据源未提供';indicators.classList.add('trade-confirmation-metrics');indicators.innerHTML=[row('trend',tx('趋势结构','Trend structure'),trendBull?'EMA 多头排列':trendBear?'EMA 空头排列':tx('均线分歧','Mixed EMAs'),`EMA20 ${money(m.e20)} · EMA50 ${money(m.e50)} · EMA200 ${money(m.e200)}`,trendKind),row('volume',tx('成交量确认','Volume confirmation'),Number.isFinite(volumeRatio)?`${volumeRatio.toFixed(2)}×`:'--',volumeDetail,volumeKind,volumeRatio>=1.2?tx('确认','Confirmed'):volumeRatio<.8?tx('偏弱','Weak'):tx('一般','Normal')),row('vwap',tx('日内 VWAP','Session VWAP'),Number.isFinite(vwap)?money(vwap):'--',Number.isFinite(vwap)?`${m.close>=vwap?tx('现价在 VWAP 上方','Price above VWAP'):tx('现价在 VWAP 下方','Price below VWAP')} · ${m.close>=vwap?'+':'−'}${Math.abs((m.close/vwap-1)*100).toFixed(2)}% · UTC 日内`:'数据不足',vwapKind),row('funding',tx('资金费率','Funding rate'),formatRate(funding),fundingDetail,fundingKind,crowdedLong?tx('多头拥挤','Long crowded'):crowdedShort?tx('空头拥挤','Short crowded'):tx('中性','Neutral')),row('oi',tx('持仓量 OI','Open interest'),Number.isFinite(oi)?`${oi.toLocaleString('en-US',{maximumFractionDigits:2})} ${context.oiUnit}`:'--',context?`${String(context.source).toUpperCase()} ${tx('当前公开持仓量','current public open interest')}`:tx('数据暂不可用','Data unavailable'),'flat'),row('basis',tx('永续价差','Perp basis'),Number.isFinite(basis)?`${basis>=0?'+':''}${basis.toFixed(3)}%`:'--',basisDetail,basisKind,extremeBasis?tx('注意','Caution'):tx('中性','Neutral')),`<div class="trade-decision ${decisionKind}"><span>${tx('研究结论','Research view')}</span><b>${action}</b><p>${reason}。${context?` ${String(context.source).toUpperCase()} · ${context.cached?tx('缓存','cached'):tx('实时','live')}`:''}</p></div>`].join('');const tips={trend:[`基于最近 200 根已收盘 ${fixedRuleSignal.interval} K 线的 EMA20、EMA50、EMA200 排列。只用于趋势过滤，不等于立即开仓。`,'EMA alignment over the latest 200 closed basis candles. It filters trend; it is not an entry by itself.'],volume:[`当前已收盘 K 线成交量与之前 20 根已收盘 K 线平均成交量的比值。≥1.2× 视为放量确认，<0.8× 视为量能偏弱。`,'Ratio of the latest closed candle volume to the preceding 20-candle average. ≥1.2× confirms participation; <0.8× is weak.'],vwap:[`按 UTC 自然日内成交量加权平均价。现价在其上方仅代表日内位置偏强，仍需趋势和成交量确认。`,'UTC-session volume-weighted average price. Above it is only a stronger intraday position and still needs trend and volume confirmation.'],funding:['永续资金费率反映多空持仓的定期费用，不直接预测涨跌。费率过高或过低时，页面将拥挤方向降级为观望。','Funding reflects periodic perp-position payments, not a direct price forecast. Extreme readings downgrade the crowded side to wait.'],oi:['交易所公开的当前未平仓合约量。它说明参与杠杆规模，不单独判断多空。','Public current open interest. It shows leveraged participation, not direction by itself.'],basis:['永续价格相对现货价格的百分比。过大的溢价或贴水提示杠杆市场可能拥挤。','Perpetual price relative to spot. A large premium or discount can indicate crowded derivatives positioning.']};indicators.querySelectorAll('.trade-confirmation-row').forEach(el=>{const copy=tips[el.dataset.indicator];if(copy)addHelp(el.querySelector('span'),copy[0],copy[1])})}
+/* Superseded microstructure renderer retained below for historical context.
+   The active renderer follows it in a readable form.
+const renderTradingConfirmationWithMicrostructure=renderTradingConfirmation;
+renderTradingConfirmation=function(m){renderTradingConfirmationWithMicrostructure(m);const indicators=$('indicators'),context=derivativeMarketContext;if(!indicators||context?.source!=='okx')return;const book=context.orderBook,flow=context.takerFlow,oiChange=context.oiChangePct,fundingChange=context.fundingChangePct,priceChange=state.ticker?.changePct;const signal=(value,positive=12,negative=-12)=>!Number.isFinite(value)?'flat':value>=positive?'bull':value<=negative?'bear':'flat',label=kind=>kind==='bull'?tx('偏多','Bullish'):kind==='bear'?tx('偏空','Bearish'):tx('中性','Neutral'),number=value=>Number.isFinite(value)?`${value>=0?'+':''}${value.toFixed(2)}%`:'--',add=(key,name,value,detail,kind,help)=>{const row=document.createElement('div');row.className='metric trade-confirmation-row compact-indicator microstructure-row';row.dataset.fixedBasis='true';row.dataset.indicator=key;row.innerHTML=`<span>${name}</span><b>${value}</b><i class="badge ${kind}">${label(kind)}</i>`;const decision=indicators.querySelector('.trade-decision');decision?decision.before(row):indicators.append(row);if(help)addHelp(row.querySelector('span'),help[0],help[1]);};const bookKind=signal(book?.imbalancePct),flowKind=signal(flow?.imbalancePct,14,-14),oiKind=Number.isFinite(oiChange)&&Number.isFinite(priceChange)?oiChange>=.2&&priceChange>=.1?'bull':oiChange>=.2&&priceChange<=-.1?'bear':'flat':'flat',fundingKind=Number.isFinite(fundingChange)?fundingChange>=.001?'bear':fundingChange<=-.001?'bull':'flat';add('book',tx('盘口失衡','Order-book imbalance'),book?`${number(book.imbalancePct)} · ${book.ratio.toFixed(2)}×`:'积累中',book?`${tx('前 5 档买盘','Top-5 bids')} / ${tx('卖盘','asks')} · ${money(book.bidDepth)} / ${money(book.askDepth)}`:tx('等待 OKX 盘口快照','Waiting for an OKX order-book snapshot'),bookKind,['前 5 档挂单金额的买卖差。挂单可以迅速撤销，因此只作为短线确认，不直接作为开仓信号。','Difference between top-five bid and ask notional. Orders can be cancelled quickly, so use only as short-term confirmation.']);add('taker',tx('主动成交','Taker flow'),flow?`${number(flow.imbalancePct)} · ${flow.buyRatioPct.toFixed(1)}%`:'积累中',flow?`${flow.windowSeconds}${tx(' 秒窗口','s window')} · ${tx('主动成交','taker trades')} ${flow.tradeCount} ${tx('笔','trades')}`:tx('正在积累 60 秒成交窗口','Building the 60-second trade window'),flowKind,['最近 60 秒主动买入与主动卖出成交额的差异。它反映已成交意愿，比静态挂单更难伪造，但仍可能很快反转。','Difference between taker buy and sell notional in the latest 60 seconds. It reflects executed intent, but can still reverse quickly.']);add('oi-change',tx('OI 变化（约5分）','OI change (~5m)'),Number.isFinite(oiChange)?number(oiChange):'积累中',Number.isFinite(oiChange)?`${priceChange>=0?tx('价格上涨','Price up'):tx('价格下跌','Price down')} ${number(priceChange)} · ${context.oiChangeWindowSeconds||300}${tx(' 秒样本','s sample')}`:tx('需先积累约 5 分钟的 OI 快照','Needs about five minutes of OI snapshots'),oiKind,['对比当前未平仓量与约 5 分钟前快照。价格上涨且 OI 增加通常代表新多参与；价格下跌且 OI 增加通常代表新空参与。','Compares current open interest with a roughly five-minute-old snapshot. Rising price plus rising OI can indicate new longs; falling price plus rising OI can indicate new shorts.']);add('funding-change',tx('资金费率变化','Funding-rate change'),Number.isFinite(fundingChange)?number(fundingChange):'积累中',Number.isFinite(fundingChange)?`${context.fundingChangeWindowSeconds||0}${tx(' 秒对比窗口','s comparison window')} · ${tx('当前','Current')} ${formatRate(context.fundingRate)}`:tx('需先积累约 1 小时费率快照','Needs about one hour of funding snapshots'),fundingKind,['当前资金费率相对约一小时前的变化。变化上升表示多头付费压力增加，变化下降表示空头付费压力增加；它是拥挤风险提示而非方向预测。','Change in funding versus roughly one hour ago. Rising funding increases long-crowding pressure; falling funding increases short-crowding pressure. It flags crowding risk rather than direction.']);const microKinds=[bookKind,flowKind,oiKind],bull=microKinds.filter(kind=>kind==='bull').length,bear=microKinds.filter(kind=>kind==='bear').length,decision=indicators.querySelector('.trade-decision'),view=decision?.querySelector('b'),reason=decision?.querySelector('p');if(decision&&view&&reason){const current=view.textContent.trim(),conflict=(current.includes('多')&&bear>=2)||(current.includes('空')&&bull>=2);if(conflict){view.textContent=tx('观望','Wait');decision.classList.remove('bull','bear');decision.classList.add('flat');reason.textContent=tx('趋势与实时盘口/主动成交发生分歧，暂不追随单一方向。','Trend conflicts with live order-book and taker flow; do not follow a single direction.')}else{const evidence=bull>=2?tx('盘口与主动成交偏多','Order book and taker flow lean bullish'):bear>=2?tx('盘口与主动成交偏空','Order book and taker flow lean bearish'):tx('盘口与主动成交未形成共识','Order book and taker flow have no consensus');reason.textContent=`${reason.textContent} · ${evidence}`}}indicators.classList.add('indicator-adaptive-grid');indicators.style.setProperty('--indicator-font-scale',indicators.querySelectorAll('.compact-indicator').length>12?'.78':'.84')};
+*/
+const renderTradingConfirmationWithLiveFlow=renderTradingConfirmation;
+renderTradingConfirmation=function(m){
+  renderTradingConfirmationWithLiveFlow(m);
+  const indicators=$('indicators'),context=derivativeMarketContext;
+  if(!indicators||context?.source!=='okx')return;
+  const book=context.orderBook,flow=context.takerFlow,oiChange=context.oiChangePct,fundingChange=context.fundingChangePct,priceChange=context.priceChangePct;
+  const direction=(value,positive=12,negative=-12)=>!Number.isFinite(value)?'flat':value>=positive?'bull':value<=negative?'bear':'flat';
+  const directionLabel=kind=>kind==='bull'?tx('偏多','Bullish'):kind==='bear'?tx('偏空','Bearish'):tx('中性','Neutral');
+  const signedPercent=value=>Number.isFinite(value)?`${value>=0?'+':''}${value.toFixed(2)}%`:'--';
+  const add=(key,name,value,detail,kind,help)=>{
+    const row=document.createElement('div');
+    row.className='metric trade-confirmation-row compact-indicator microstructure-row';
+    row.dataset.fixedBasis='true';row.dataset.indicator=key;
+    row.innerHTML=`<span>${name}</span><b>${value}</b><i class="badge ${kind}">${directionLabel(kind)}</i>`;
+    const decision=indicators.querySelector('.trade-decision');
+    decision?decision.before(row):indicators.append(row);
+    if(help)addHelp(row.querySelector('span'),help[0],help[1]);
+  };
+  const bookKind=direction(book?.imbalancePct),flowKind=direction(flow?.imbalancePct,14,-14);
+  const oiKind=Number.isFinite(oiChange)&&Number.isFinite(priceChange)?(oiChange>=.2&&priceChange>=.1?'bull':oiChange>=.2&&priceChange<=-.1?'bear':'flat'):'flat';
+  const fundingKind=Number.isFinite(fundingChange)?(fundingChange>=.001?'bear':fundingChange<=-.001?'bull':'flat'):'flat';
+  const bookValue=book?`${signedPercent(book.imbalancePct)} · ${Number.isFinite(book.ratio)?book.ratio.toFixed(2)+'×':'--'}`:tx('积累中','Collecting');
+  add('book',tx('盘口失衡','Order-book imbalance'),bookValue,book?`${tx('前 5 档买/卖深度比','Top-5 bid/ask depth ratio')} ${Number.isFinite(book.ratio)?book.ratio.toFixed(2)+'×':'--'}`:tx('等待 OKX 盘口快照','Waiting for an OKX order-book snapshot'),bookKind,['前 5 档挂单深度的买卖差。挂单可以迅速撤销，因此只作为短线确认，不直接作为开仓信号。','Difference between top-five bid and ask depth. Orders can be cancelled quickly, so use only as short-term confirmation.']);
+  add('taker',tx('主动成交','Taker flow'),flow?`${signedPercent(flow.imbalancePct)} · ${flow.buyRatioPct.toFixed(1)}%`:tx('积累中','Collecting'),flow?`${flow.windowSeconds}${tx(' 秒窗口','s window')} · ${tx('主动成交','taker trades')} ${flow.tradeCount} ${tx('笔','trades')}`:tx('正在积累 60 秒成交窗口','Building the 60-second trade window'),flowKind,['最近 60 秒主动买入与主动卖出成交额的差异。它反映已成交意愿，比静态挂单更难伪造，但仍可能很快反转。','Difference between taker buy and sell notional in the latest 60 seconds. It reflects executed intent, but can still reverse quickly.']);
+  add('oi-change',tx('OI 变化（约5分）','OI change (~5m)'),Number.isFinite(oiChange)?signedPercent(oiChange):tx('积累中','Collecting'),Number.isFinite(oiChange)&&Number.isFinite(priceChange)?`${tx('价格（约5分钟）','Price (~5m)')} ${signedPercent(priceChange)} · ${context.oiChangeWindowSeconds||300}${tx(' 秒样本','s sample')}`:tx('需先积累约 5 分钟的 OI 与价格快照','Needs about five minutes of OI and price snapshots'),oiKind,['对比当前未平仓量与约 5 分钟前快照。价格上涨且 OI 增加通常代表新多参与；价格下跌且 OI 增加通常代表新空参与。','Compares current open interest with a roughly five-minute-old snapshot. Rising price plus rising OI can indicate new longs; falling price plus rising OI can indicate new shorts.']);
+  add('funding-change',tx('资金费率变化','Funding-rate change'),Number.isFinite(fundingChange)?signedPercent(fundingChange):tx('积累中','Collecting'),Number.isFinite(fundingChange)?`${context.fundingChangeWindowSeconds||0}${tx(' 秒对比窗口','s comparison window')} · ${tx('当前','Current')} ${formatRate(context.fundingRate)}`:tx('需先积累约 1 小时费率快照','Needs about one hour of funding snapshots'),fundingKind,['当前资金费率相对约一小时前的变化。变化上升表示多头付费压力增加，变化下降表示空头付费压力增加；它是拥挤风险提示而非方向预测。','Change in funding versus roughly one hour ago. Rising funding increases long-crowding pressure; falling funding increases short-crowding pressure. It flags crowding risk rather than direction.']);
+  const directions=[bookKind,flowKind,oiKind],bull=directions.filter(kind=>kind==='bull').length,bear=directions.filter(kind=>kind==='bear').length,decision=indicators.querySelector('.trade-decision'),view=decision?.querySelector('b'),reason=decision?.querySelector('p');
+  if(decision&&view&&reason){
+    const current=view.textContent.trim(),conflict=(current.includes('多')&&bear>=2)||(current.includes('空')&&bull>=2);
+    if(conflict){view.textContent=tx('观望','Wait');decision.classList.remove('bull','bear');decision.classList.add('flat');reason.textContent=tx('趋势与实时盘口/主动成交发生分歧，暂不追随单一方向。','Trend conflicts with live order-book and taker flow; do not follow a single direction.');}
+    else{const evidence=bull>=2?tx('盘口与主动成交偏多','Order book and taker flow lean bullish'):bear>=2?tx('盘口与主动成交偏空','Order book and taker flow lean bearish'):tx('盘口与主动成交未形成共识','Order book and taker flow have no consensus');reason.textContent=`${reason.textContent} · ${evidence}`;}
+  }
+  indicators.classList.add('indicator-adaptive-grid');
+  indicators.style.setProperty('--indicator-font-scale',indicators.querySelectorAll('.compact-indicator').length>12?'.78':'.84');
+};
 async function loadDerivativeMarketContext(force=false){if(derivativeMarketContextLoading)return;const source=state.source||'okx';if(!force&&derivativeMarketContext?.source===source)return;derivativeMarketContextLoading=true;try{const response=await fetch('/api/market-context?'+new URLSearchParams({source})),data=await response.json();if(!response.ok)throw new Error(data.detail||data.error);derivativeMarketContext=data;renderFixedRuleSignal()}catch{derivativeMarketContext={source,error:true}}finally{derivativeMarketContextLoading=false}}
 const renderFixedRuleSignalWithTradingConfirmation=renderFixedRuleSignal;
 renderFixedRuleSignal=function(){renderFixedRuleSignalWithTradingConfirmation();if(fixedRuleSignal.candles.length>=200)renderTradingConfirmation(metrics(fixedRuleSignal.candles))};
@@ -328,7 +382,8 @@ $('chart')?.closest('.chart-box')?.addEventListener('wheel',event=>{if(!event.me
 renderRangeExtremaPoints=function(){const box=$('chart')?.closest('.chart-box'),cv=$('chart'),d=visibleCandles();if(!box||!cv||d.length<2)return;let high=$('rangeHighPoint'),low=$('rangeLowPoint');if(!high){high=document.createElement('div');high.id='rangeHighPoint';high.className='range-extreme high';box.append(high)}if(!low){low=document.createElement('div');low.id='rangeLowPoint';low.className='range-extreme low';box.append(low)}const series=state.chartSeries||{candles:true,close:false},highValue=v=>series.candles?v.high:v.close,lowValue=v=>series.candles?v.low:v.close,hiI=d.reduce((best,v,i)=>highValue(v)>highValue(d[best])?i:best,0),loI=d.reduce((best,v,i)=>lowValue(v)<lowValue(d[best])?i:best,0),values=d.flatMap(v=>[v.low,v.high]),closes=d.map(v=>v.close);[ema(closes,20),ema(closes,50),ema(closes,200)].forEach(a=>a.forEach(v=>{if(Number.isFinite(v))values.push(v)}));let min=Math.min(...values),max=Math.max(...values),pad=(max-min||1)*.075;min-=pad;max+=pad;const rect=cv.getBoundingClientRect(),P={l:18,r:74,t:15,b:30},cw=rect.width-P.l-P.r,ch=rect.height-P.t-P.b,x=i=>P.l+i/(d.length-1)*cw,y=v=>P.t+ch-(v-min)/(max-min)*ch,label=state.range||state.interval,point=(el,i,value,kind)=>{el.style.left=`${Math.max(8,Math.min(rect.width-160,x(i)))}px`;el.style.top=`${Math.max(6,Math.min(rect.height-28,y(value)+(kind==='high'?-25:8)))}px`;el.textContent=`${label}${kind==='high'?tx('最高点',' high'):tx('最低点',' low')} ${money(value)} · ${pointTime(d[i].time)}`};point(high,hiI,highValue(d[hiI]),'high');point(low,loI,lowValue(d[loI]),'low')};
 
 /* Header version is deliberately independent from the selected market source. */
-(()=>{const controls=document.querySelector('main>header .controls');if(!controls||$('appVersion'))return;const version=document.createElement('span');version.id='appVersion';version.textContent='v1.4.7';const sourceLabel=controls.querySelector('label');if(sourceLabel)controls.insertBefore(version,sourceLabel);else controls.prepend(version)})();
+(()=>{const controls=document.querySelector('main>header .controls');if(!controls||$('appVersion'))return;const version=document.createElement('button');version.type='button';version.id='appVersion';version.textContent='v1.5.0';version.title='查看更新日志';version.setAttribute('aria-expanded','false');const sourceLabel=controls.querySelector('label');if(sourceLabel)controls.insertBefore(version,sourceLabel);else controls.prepend(version);const log=document.createElement('section');log.id='versionChangelog';log.hidden=true;log.innerHTML='<b>v1.5.0 更新日志</b><ul><li>周期涨幅扩展至 2 日、1 周、1 月、半年，并自适应换行。</li><li>恐惧&贪婪指数移入仪表盘区域，补齐五档情绪说明。</li><li>全局说明点、指标卡与移动端布局继续优化。</li></ul>';document.body.append(log);version.onclick=()=>{const open=log.hidden;if(open){const rect=version.getBoundingClientRect(),width=Math.min(340,window.innerWidth-28);log.style.top=`${Math.min(window.innerHeight-80,rect.bottom+8)}px`;log.style.left=`${Math.max(14,Math.min(window.innerWidth-width-14,rect.left))}px`;log.style.right='auto'}log.hidden=!open;version.setAttribute('aria-expanded',String(open))};document.addEventListener('click',event=>{if(!log.hidden&&!log.contains(event.target)&&event.target!==version){log.hidden=true;version.setAttribute('aria-expanded','false')}})})();
+(()=>{const controls=document.querySelector('main>header .controls');if(!controls||$('appVersion'))return;const version=document.createElement('button');version.type='button';version.id='appVersion';version.textContent='v2.0.0';version.title='查看更新日志';version.setAttribute('aria-expanded','false');const sourceLabel=controls.querySelector('label');if(sourceLabel)controls.insertBefore(version,sourceLabel);else controls.prepend(version);const log=document.createElement('section');log.id='versionChangelog';log.hidden=true;log.innerHTML='<b>v2.0.0 更新日志</b><ul><li><strong>新增：</strong>OKX 市场微观结构——盘口失衡、主动成交、OI 变化、资金费率趋势与永续价差，并保存公开快照供趋势判断。</li><li><strong>新增：</strong>恐惧&贪婪仪表、BTC × 美联储公开日历、综合宏观指标与 2 日/1 周/1 月/半年周期涨幅。</li><li><strong>优化：</strong>多周期预测、个人持仓价差、指标解释说明，以及桌面/平板/手机的自适应卡片布局。</li><li><strong>修复：</strong>周期涨幅在实时刷新和窗口缩放时跳位、贪婪卡片尺寸突变、说明浮层遮挡与顶部行情区文字重叠。</li></ul>';document.body.append(log);version.onclick=()=>{const open=log.hidden;if(open){const rect=version.getBoundingClientRect(),width=Math.min(340,window.innerWidth-28);log.style.top=`${Math.min(window.innerHeight-80,rect.bottom+8)}px`;log.style.left=`${Math.max(14,Math.min(window.innerWidth-width-14,rect.left))}px`;log.style.right='auto'}log.hidden=!open;version.setAttribute('aria-expanded',String(open))};document.addEventListener('click',event=>{if(!log.hidden&&!log.contains(event.target)&&event.target!==version){log.hidden=true;version.setAttribute('aria-expanded','false')}})})();
 
 /* Apply the fixed rule basis after every legacy analysis wrapper has run. */
 const renderAnalysisFinalFixedRuleSignal=renderAnalysis;
@@ -455,7 +510,7 @@ draw=function(){drawWithRangeExtrema();renderRangeExtremaPoints()};
 /* Make the range extrema unmistakable: the dashed guides remain price levels,
    while these circles identify the exact candle where each extreme occurred. */
 const drawWithExtremaDots=draw;
-draw=function(){drawWithExtremaDots();const cv=$('chart'),d=visibleCandles();if(!cv||d.length<2)return;const rect=cv.getBoundingClientRect(),P={l:18,r:74,t:15,b:30},cw=rect.width-P.l-P.r,ch=rect.height-P.t-P.b,closes=d.map(v=>v.close),averages=[ema(closes,20),ema(closes,50),ema(closes,200)],values=d.flatMap(v=>[v.low,v.high]);averages.forEach(a=>a.forEach(v=>{if(Number.isFinite(v))values.push(v)}));let lo=Math.min(...values),hi=Math.max(...values),margin=(hi-lo||1)*.075;lo-=margin;hi+=margin;const x=i=>P.l+i/(d.length-1)*cw,y=v=>P.t+ch-(v-lo)/(hi-lo)*ch,hiI=d.reduce((best,v,i)=>v.high>d[best].high?i:best,0),loI=d.reduce((best,v,i)=>v.low<d[best].low?i:best,0),c=cv.getContext('2d'),dpr=devicePixelRatio||1;for(const [i,value,color] of [[hiI,d[hiI].high,'#ffcb65'],[loI,d[loI].low,'#52d5f4']]){c.save();c.setTransform(dpr,0,0,dpr,0,0);c.fillStyle='#15202d';c.strokeStyle=color;c.lineWidth=2;c.beginPath();c.arc(x(i),y(value),5,0,Math.PI*2);c.fill();c.stroke();c.fillStyle=color;c.beginPath();c.arc(x(i),y(value),2,0,Math.PI*2);c.fill();c.restore()}};
+draw=function(){drawWithExtremaDots();const cv=$('chart'),d=visibleCandles();if(!cv||d.length<2)return;const rect=cv.getBoundingClientRect(),P={l:52,r:74,t:15,b:30},cw=rect.width-P.l-P.r,ch=rect.height-P.t-P.b,closes=d.map(v=>v.close),averages=[ema(closes,20),ema(closes,50),ema(closes,200)],values=d.flatMap(v=>[v.low,v.high]);averages.forEach(a=>a.forEach(v=>{if(Number.isFinite(v))values.push(v)}));let lo=Math.min(...values),hi=Math.max(...values),margin=(hi-lo||1)*.075;lo-=margin;hi+=margin;const x=i=>P.l+i/(d.length-1)*cw,y=v=>P.t+ch-(v-lo)/(hi-lo)*ch,hiI=d.reduce((best,v,i)=>v.high>d[best].high?i:best,0),loI=d.reduce((best,v,i)=>v.low<d[best].low?i:best,0),c=cv.getContext('2d'),dpr=devicePixelRatio||1;for(const [i,value,color] of [[hiI,d[hiI].high,'#ffcb65'],[loI,d[loI].low,'#52d5f4']]){c.save();c.setTransform(dpr,0,0,dpr,0,0);c.fillStyle='#15202d';c.strokeStyle=color;c.lineWidth=2;c.beginPath();c.arc(x(i),y(value),5,0,Math.PI*2);c.fill();c.stroke();c.fillStyle=color;c.beginPath();c.arc(x(i),y(value),2,0,Math.PI*2);c.fill();c.restore()}};
 
 /* Empirical liquidation-risk calculator (historical volatility, not a guarantee). */
 const liqProbState=JSON.parse(localStorage.getItem('btc_liq_probability')||'{"exchange":"okx","side":"long","amount":1000,"leverage":10,"entry":0}');
@@ -477,7 +532,8 @@ resonance=async function(auto=false){const btn=$('loadResonance'),out=$('resonan
 function renderHorizonForecasts(){const host=$('microForecast');if(!host)return;let box=$('horizonForecasts');if(!box){box=document.createElement('div');box.id='horizonForecasts';box.className='horizon-forecasts';host.append(box)}if(!horizonForecastCache){box.innerHTML=`<span>${tx('正在训练 15 分钟与 24 小时模型…','Training 15m and 24h models…')}</span>`;return}const card=(label,fit)=>{const long=fit.prob*100,cls=long>=50?'bull':'bear';return `<article><small>${label}</small><b class="${cls}">${long.toFixed(2)}% ${tx('看多','bullish')}</b><span>${tx('看空','bearish')} ${(100-long).toFixed(2)}% · ${tx('历史验证','historical validation')} ${(fit.accuracy*100).toFixed(2)}%</span></article>`};box.innerHTML=card(tx('15 分钟机器预测','15m ML forecast'),horizonForecastCache.f15)+card(tx('24 小时长线预测','24h long-horizon forecast'),horizonForecastCache.f24)}
 async function loadHorizonForecasts(){if(horizonForecastLoading||horizonForecastCache)return;horizonForecastLoading=true;try{const r=await fetch('/api/forecast-history'),data=await r.json();if(!r.ok)throw new Error(data.error);const f15=trainProbability(data.intraday.map(x=>x.close),1),f24=trainProbability(data.daily.map(x=>x.close),1);if(f15&&f24)horizonForecastCache={f15,f24}}catch{}finally{horizonForecastLoading=false;renderHorizonForecasts()}}
 const renderAnalysisFinal=renderAnalysis;
-renderAnalysis=function(){renderAnalysisFinal();renderHorizonForecasts();loadHorizonForecasts();addHelp($('sl')?.parentElement,'ATR 止损以近期平均真实波幅推算价格缓冲，用于研究风险边界，不保证成交或避免亏损。','ATR stop uses average true range to estimate a price buffer. It is a risk-research guide, not a guarantee.');addHelp($('tp')?.parentElement,'ATR 止盈以近期平均真实波幅推算目标区间，用于研究退出参考，不保证成交或收益。','ATR target uses average true range to estimate a target zone. It is a research exit reference, not a return guarantee.');addHelp($('intervals')?.querySelector('.control-label'),'K 线周期决定每根 K 线代表多长时间，例如 15 分钟 K 线每根聚合 15 分钟价格。','Candle interval sets the duration represented by each candle; a 15m candle aggregates 15 minutes of price.');addHelp($('ranges')?.querySelector('.control-label'),'查看范围决定图表加载和显示多长的历史，例如 1D 显示一天。它不同于每根 K 线的周期。','Visible range sets how much history is loaded and shown, such as 1D. It differs from the duration of each candle.');};
+function addLevelHelp(value,zh,en){const level=value?.parentElement;if(!level)return;let label=level.querySelector('.level-label');if(!label){const text=[...level.childNodes].find(node=>node.nodeType===Node.TEXT_NODE&&node.textContent.trim());if(!text)return;label=document.createElement('span');label.className='level-label';label.textContent=text.textContent.trim();level.insertBefore(label,value);text.remove()}addHelp(label,zh,en)}
+renderAnalysis=function(){renderAnalysisFinal();renderHorizonForecasts();loadHorizonForecasts();addLevelHelp($('sl'),'ATR 止损以近期平均真实波幅推算价格缓冲，用于研究风险边界，不保证成交或避免亏损。','ATR stop uses average true range to estimate a price buffer. It is a risk-research guide, not a guarantee.');addLevelHelp($('tp'),'ATR 止盈以近期平均真实波幅推算目标区间，用于研究退出参考，不保证成交或收益。','ATR target uses average true range to estimate a target zone. It is a research exit reference, not a return guarantee.');addHelp($('intervals')?.querySelector('.control-label'),'K 线周期决定每根 K 线代表多长时间，例如 15 分钟 K 线每根聚合 15 分钟价格。','Candle interval sets the duration represented by each candle; a 15m candle aggregates 15 minutes of price.');addHelp($('ranges')?.querySelector('.control-label'),'查看范围决定图表加载和显示多长的历史，例如 1D 显示一天。它不同于每根 K 线的周期。','Visible range sets how much history is loaded and shown, such as 1D. It differs from the duration of each candle.');};
 $('chart')?.closest('.chart-box')?.insertAdjacentHTML('beforeend','<div id="selectionOverlay" hidden></div>');
 $('chart')?.addEventListener('pointerup',renderSelectionOverlay);
 $('chart')?.addEventListener('pointerleave',()=>{const o=$('selectionOverlay');if(o)o.hidden=true});
@@ -567,6 +623,183 @@ const renderFixedRuleSignalWithExpandedDetails=renderFixedRuleSignal;
 renderFixedRuleSignal=function(){renderFixedRuleSignalWithExpandedDetails();if(fixedRuleSignal.candles.length>=30)renderExpandedIndicatorDetails(metrics(fixedRuleSignal.candles))};
 if(fixedRuleSignal.candles.length)renderFixedRuleSignal();
 
+/* Personal reference price is local to this browser.  The idle state remains
+   quote-like; an actual input appears only after the number is double-clicked. */
+const entryPriceStorageKey='btc_personal_entry_price';
+let personalEntryPrice=Number(localStorage.getItem(entryPriceStorageKey));
+if(!Number.isFinite(personalEntryPrice)||personalEntryPrice<=0)personalEntryPrice=null;
+const entrySideStorageKey='btc_personal_entry_side';
+let personalEntrySide=localStorage.getItem(entrySideStorageKey)==='short'?'short':'long';
+let personalEntryEditing=false;
+function ensurePersonalEntryCard(){let card=$('personalEntryCard');if(card)return card;const hero=document.querySelector('.hero'),price=$('price');if(!hero||!price)return null;card=document.createElement('section');card.id='personalEntryCard';card.className='personal-entry-card';const strip=$('exchangeMeta'),quote=price.closest('div');if(strip)hero.insertBefore(card,strip);else if(quote)quote.after(card);else hero.append(card);return card}
+const personalSidePicker=()=>`<span class="personal-entry-heading">${tx('我的买入价','My entry price')}<i class="personal-side-picker"><button type="button" data-entry-side="long" class="${personalEntrySide==='long'?'active':''}">${tx('做多','Long')}</button><button type="button" data-entry-side="short" class="${personalEntrySide==='short'?'active':''}">${tx('做空','Short')}</button></i></span>`;
+function bindPersonalSidePicker(card){card.querySelectorAll('[data-entry-side]').forEach(button=>button.onclick=()=>{personalEntrySide=button.dataset.entrySide==='short'?'short':'long';localStorage.setItem(entrySideStorageKey,personalEntrySide);renderPersonalEntryCard()})}
+function beginPersonalEntryEdit(){const card=ensurePersonalEntryCard();if(!card||personalEntryEditing)return;personalEntryEditing=true;const initial=personalEntryPrice?personalEntryPrice.toFixed(2):'';card.innerHTML=`${personalSidePicker()}<input id="personalEntryInput" aria-label="${tx('我的买入价','My entry price')}" type="number" inputmode="decimal" min="0" step="0.01" placeholder="${tx('输入买入价','Enter buy-in price')}" value="${initial}"><small>${tx('按 Enter 保存；留空可清除','Press Enter to save; leave blank to clear')}</small>`;bindPersonalSidePicker(card);const input=$('personalEntryInput');input?.focus();input?.select();const finish=save=>{if(!personalEntryEditing)return;if(save){const next=Number(input?.value);personalEntryPrice=Number.isFinite(next)&&next>0?next:null;if(personalEntryPrice)localStorage.setItem(entryPriceStorageKey,String(personalEntryPrice));else localStorage.removeItem(entryPriceStorageKey)}personalEntryEditing=false;renderPersonalEntryCard()};input?.addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();finish(true)}if(event.key==='Escape'){event.preventDefault();finish(false)}});input?.addEventListener('blur',()=>finish(true))}
+function renderPersonalEntryCard(){const card=ensurePersonalEntryCard(),live=state.ticker?.last;if(!card||personalEntryEditing)return;if(!personalEntryPrice){card.className='personal-entry-card empty';card.innerHTML=`${personalSidePicker()}<button type="button" class="personal-entry-value" title="${tx('双击数字输入买入价','Double-click the number to enter your buy-in price')}">--</button><small>${tx('双击数字即可输入买入价','Double-click the number to enter your buy-in price')}</small>`}else{const rawDelta=Number.isFinite(live)?live-personalEntryPrice:0,delta=personalEntrySide==='short'?-rawDelta:rawDelta,percentage=personalEntryPrice?delta/personalEntryPrice*100:0,profit=delta>=0;card.className=`personal-entry-card ${profit?'profit':'loss'}`;card.innerHTML=`${personalSidePicker()}<div class="personal-entry-price-row"><button type="button" class="personal-entry-value" title="${tx('双击数字修改买入价','Double-click the number to edit your buy-in price')}">${money(personalEntryPrice)}</button><i class="personal-entry-status">${profit?tx('盈利中','In profit'):tx('亏损中','At a loss')}</i></div><b>${profit?'+':'−'}${money(Math.abs(delta))} <em>${profit?'+':'−'}${Math.abs(percentage).toFixed(2)}%</em></b><small>${tx('按仓位方向计算 · 双击数字修改','Calculated by position side · double-click number to edit')}</small>`}card.querySelector('.personal-entry-value')?.addEventListener('dblclick',beginPersonalEntryEdit);bindPersonalSidePicker(card)}
+const renderTickerWithPersonalEntry=renderTicker;
+renderTicker=function(){renderTickerWithPersonalEntry();renderPersonalEntryCard()};
+renderPersonalEntryCard();
+
+/* Public-calendar-only macro watch.  It intentionally tracks event timing,
+   not a paid macro-data feed or a direction call. */
+let fedCalendarLoading=false;
+function macroCountdown(at){
+  const seconds=Math.max(0,Math.round((at-Date.now())/1000));
+  const days=Math.floor(seconds/86_400),hours=Math.floor((seconds%86_400)/3_600),minutes=Math.floor((seconds%3_600)/60);
+  return days?tx(`${days} 天 ${hours} 小时`,` ${days}d ${hours}h`):hours?tx(`${hours} 小时 ${minutes} 分钟`,` ${hours}h ${minutes}m`):tx(`${minutes} 分钟`,` ${minutes}m`);
+}
+function renderFedMonitor(data){
+  let card=$('fedMonitorCard'),correlation=document.querySelector('.correlation-card');
+  if(!card){card=document.createElement('section');card.id='fedMonitorCard';card.className='card fed-monitor-card';if(correlation)correlation.before(card);else document.querySelector('main')?.append(card)}
+  if(!card)return;
+  const events=(data?.events||[]).slice(0,3), nearest=events[0], near=nearest && nearest.at-Date.now()<48*3_600_000;
+  const missing=(data?.unavailable||[]).flatMap(source=>source==='BLS CPI'?[tx('美国 CPI','US CPI')]:source==='BLS Employment'?[tx('美国非农就业','US payrolls')]:[]);
+  const eventCards=[...events.map(event=>`<article class="fed-event ${event===nearest&&near?'near':''}"><span>${event.name}</span><b>${new Intl.DateTimeFormat(uiLang==='zh'?'zh-CN':'en-US',{month:'2-digit',day:'2-digit',year:'numeric',timeZone:'Asia/Shanghai'}).format(event.at)}</b><strong>${tx('距事件 ','In ')}${macroCountdown(event.at)}</strong><small>${event.source}</small></article>`),...missing.map(name=>`<article class="fed-event unavailable"><span>${name}</span><b>--</b><strong>${tx('官方日历暂不可达','Official calendar unavailable')}</strong><small>${tx('将于下一次检查自动重试','Will retry at the next check')}</small></article>`)].join('');
+  const compactDollar=value=>value>=1e12?`$${(value/1e12).toFixed(2)}T`:value>=1e9?`$${(value/1e9).toFixed(2)}B`:value>=1e6?`$${(value/1e6).toFixed(2)}M`:`$${value.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}`;
+  const value=signal=>signal.key==='btc-dominance'?`${Number(signal.value).toFixed(2)}%`:signal.key==='dxy'?Number(signal.value).toFixed(3):['crypto-total-cap','crypto-volume'].includes(signal.key)?compactDollar(Number(signal.value)):`$${Number(signal.value).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}`;
+  const signalCards=(data?.marketSignals||[]).map(signal=>{const change=Number(signal.changePct),changeText=Number.isFinite(change)?`${change>=0?'+':''}${change.toFixed(2)}%`:tx('日内变化待提供','Change unavailable'),kind=Number.isFinite(change)?(change>=0?'bull':'bear'):'flat';return `<article class="fed-market-signal ${signal.available?'':'unavailable'}"><span>${tx(signal.name,signal.name)}</span>${signal.available?`<b class="${kind}">${changeText}</b><strong>${value(signal)}</strong><small>${signal.source} · ${tx(signal.cadence||'快照',signal.cadence||'Snapshot')}</small>`:`<b class="flat">--</b><strong>${tx('暂不可用','Unavailable')}</strong><small>${tx(signal.detail||'公开数据暂不可用',signal.detail||'Public data unavailable')}</small>`}</article>`}).join('');
+  const marketPanel=signalCards?`<section class="fed-market-panel"><div><h3>${tx('综合指标','Market context')}</h3><span>${tx('公开数据 · 每 10 分钟检查','Public data · checked every 10 min')}</span></div><div class="fed-market-grid">${signalCards}</div></section>`:'';
+  card.innerHTML=`<div class="fed-monitor-head"><div><h2>${tx('BTC × 美联储监控','BTC × Federal Reserve monitor')}</h2><p>${tx('公开日历与跨市场环境数据；事件前后行情波动可能放大，不构成方向预测。','Public event-calendar and cross-market context. Volatility can rise around releases; this is not a directional forecast.')}</p></div><span>${tx('每 10 分钟检查','Checked every 10 min')}</span></div>${marketPanel}<div class="fed-event-grid">${eventCards||`<article class="fed-event unavailable"><span>${tx('公开日历暂不可用','Public calendar unavailable')}</span><small>${tx('下次 10 分钟检查会自动重试。','The next ten-minute check will retry automatically.')}</small></article>`}</div><footer>${nearest?tx(`最近事件：${nearest.name}，请在发布前后降低杠杆和仓位集中度。`,`Nearest event: ${nearest.name}. Consider reducing leverage and concentration around the release.`):tx('使用 Federal Reserve 与 BLS 的公开发布日历。','Uses public Federal Reserve and BLS release calendars.')} <em>${data?.cached?tx('缓存','Cached'):tx('刚更新','Updated')}</em></footer>`;addHelp(card.querySelector('.fed-monitor-head h2'),'显示下一次 FOMC、CPI 与非农等公开日历事件及倒计时。它提示可能放大的波动窗口，不预测事件结果或价格方向。','Shows the next FOMC, CPI and payroll calendar events and countdowns. It flags potentially volatile windows, not event outcomes or price direction.');addHelp(card.querySelector('.fed-market-panel h3'),'综合传统市场与加密市场的公开快照，用于识别宏观环境；各数据更新频率不同，不能视为同一时点的交易信号。','Combines public traditional-market and crypto snapshots for macro context. Update cadences differ, so it is not a single-time trading signal.');const signalTips={gold:'黄金通常被视为避险资产，和 BTC 的短线关系并不稳定；这里仅观察其日内风险偏好变化。','dxy':'美元指数走强时，风险资产可能承压；相关性会随市场阶段变化。','btc-dominance':'BTC 总市值占全加密市场的比例。占比上升常代表资金更偏向 BTC，但不能单独判断涨跌。','crypto-total-cap':'全网加密总市值反映整体风险偏好与资产规模，使用 24 小时快照而非实时买卖信号。','crypto-volume':'全网 24 小时成交额反映市场参与度；放量不代表必然上涨或下跌。','exchange-btc-reserve':'交易所 BTC 钱包余额需要可验证链上数据源；本面板不会用个人账户余额替代。'};(data?.marketSignals||[]).forEach((signal,index)=>addHelp(card.querySelectorAll('.fed-market-signal>span')[index],signalTips[signal.key]||'这是公开市场环境数据，用于辅助研究，不应单独作为开仓或平仓依据。','This is public market-context data for research and should not be used as a stand-alone entry or exit signal.'));
+}
+async function loadFedMonitor(){
+  if(fedCalendarLoading)return;fedCalendarLoading=true;
+  try{const response=await fetch('/api/fed-calendar'),data=await response.json();if(!response.ok)throw new Error(data.detail||data.error);renderFedMonitor(data)}catch{renderFedMonitor(null)}finally{fedCalendarLoading=false}
+}
+loadFedMonitor();
+setInterval(loadFedMonitor,600_000);
+
+/* Fear & Greed is intentionally slow-moving.  It is a market-environment
+   guardrail, not a high-frequency directional input. */
+let fearGreedSentiment=null,fearGreedLoading=false;
+function fearGreedView(value){
+  if(value<=24)return {kind:'bull',label:tx('极度恐慌','Extreme fear'),note:tx('极度恐慌：不追空，等待价格与成交量确认。','Extreme fear: avoid chasing shorts; wait for price and volume confirmation.')};
+  if(value<=44)return {kind:'flat',label:tx('恐慌','Fear'),note:tx('市场偏恐慌：降低追空意愿，仍以趋势确认。','Fearful market: lower the urge to chase shorts; keep trend confirmation.')};
+  if(value<=55)return {kind:'flat',label:tx('中性','Neutral'),note:tx('情绪中性：不额外改变现有研究结论。','Neutral sentiment: no extra adjustment to the research view.')};
+  if(value<=74)return {kind:'flat',label:tx('贪婪','Greed'),note:tx('市场偏贪婪：提高追多门槛，注意资金费率。','Greedy market: raise the bar for chasing longs and watch funding.')};
+  return {kind:'bear',label:tx('极度贪婪','Extreme greed'),note:tx('极度贪婪：不追多，警惕拥挤后的回撤。','Extreme greed: avoid chasing longs; watch for crowded-market pullbacks.')};
+}
+function renderFearGreedGauge(){
+  const sentiment=fearGreedSentiment;
+  let card=$('fearGreedGauge');
+  if(!card){
+    card=document.createElement('article');
+    card.id='fearGreedGauge';card.className='card fear-greed-gauge-card';
+    const indicatorCard=$('indicatorDetailsCard'),dashboardGrid=document.querySelector('.grid');
+    if(indicatorCard)indicatorCard.after(card);
+    else dashboardGrid?.append(card);
+  }
+  if(!card)return;
+  card.hidden=false;
+  if(!Number.isFinite(sentiment?.value)){
+    card.className='card fear-greed-gauge-card flat';
+    card.innerHTML=`<div class="fear-greed-head"><div><h2>${tx('恐惧&贪婪指数','Fear & Greed Index')}</h2><p>${tx('市场情绪环境，不单独作为交易信号。','Market environment; not a standalone trading signal.')}</p></div><span>${tx('每 15 分钟更新','Updates every 15 min')}</span></div><div class="fear-greed-unavailable"><b>${tx('正在加载情绪数据','Loading sentiment data')}</b><p>${tx('公开情绪源暂未返回；卡片会在下一次请求后自动显示读数。','The public sentiment source has not returned yet. This card updates automatically on the next request.')}</p></div>`;
+    addHelp(card.querySelector('.fear-greed-head h2'),tx('恐惧与贪婪指数是日频市场情绪读数，范围 0–100。极端恐惧或贪婪更适合提醒不要追单；它不单独预测短线涨跌。','Fear & Greed is a daily 0–100 market-sentiment reading. Extreme values warn against chasing moves; it does not predict short-term direction by itself.'));
+    return;
+  }
+  const value=Math.max(0,Math.min(100,Number(sentiment.value))),view=fearGreedView(value);
+  const angle=Math.PI-(value/100)*Math.PI,cx=180,cy=168,r=112;
+  const x=(cx+Math.cos(angle)*r).toFixed(1),y=(cy-Math.sin(angle)*r).toFixed(1);
+  const ticks=Array.from({length:21},(_,i)=>{
+    const a=Math.PI-(i/20)*Math.PI,outer=i%5===0?142:138,inner=i%5===0?126:131;
+    return `<line class="fear-greed-tick ${i%5===0?'major':''}" x1="${(cx+Math.cos(a)*inner).toFixed(1)}" y1="${(cy-Math.sin(a)*inner).toFixed(1)}" x2="${(cx+Math.cos(a)*outer).toFixed(1)}" y2="${(cy-Math.sin(a)*outer).toFixed(1)}"/>`;
+  }).join('');
+  card.className=`card fear-greed-gauge-card ${view.kind}`;
+  card.innerHTML=`<div class="fear-greed-head"><div><h2>${tx('恐惧&贪婪指数','Fear & Greed Index')}</h2><p>${tx('市场情绪环境，不单独作为交易信号。','Market environment; not a standalone trading signal.')}</p></div><span>${tx('每 15 分钟更新','Updates every 15 min')}</span></div><div class="fear-greed-layout"><div class="fear-greed-dial"><svg viewBox="0 0 360 210" role="img" aria-label="${tx('恐惧与贪婪指数','Fear and Greed Index')} ${value}"><defs><linearGradient id="fearGreedGradient" x1="0%" x2="100%"><stop offset="0%" stop-color="#20c778"/><stop offset="48%" stop-color="#f5c54e"/><stop offset="100%" stop-color="#fa5575"/></linearGradient></defs><path class="fear-greed-arc" d="M 35 168 A 145 145 0 0 1 325 168"/>${ticks}<line class="fear-greed-pointer" x1="${cx}" y1="${cy}" x2="${x}" y2="${y}"/><circle class="fear-greed-hub" cx="${cx}" cy="${cy}" r="8"/></svg><div class="fear-greed-reading"><strong>${value}</strong><b>${view.label}</b></div></div><div class="fear-greed-summary"><div><span>${tx('极度恐惧','Extreme fear')}</span><b>0–24</b></div><div><span>${tx('恐慌','Fear')}</span><b>25–44</b></div><div><span>${tx('中性','Neutral')}</span><b>45–55</b></div><div><span>${tx('贪婪','Greed')}</span><b>56–74</b></div><div><span>${tx('极度贪婪','Extreme greed')}</span><b>75–100</b></div></div></div><footer>${view.note} <em>${tx('数据：Alternative.me','Data: Alternative.me')}</em></footer>`;addHelp(card.querySelector('.fear-greed-head h2'),'恐惧与贪婪指数是日频市场情绪读数，范围 0–100。极端恐惧或贪婪更适合提醒不要追单；它不单独预测短线涨跌。','Fear & Greed is a daily 0–100 market-sentiment reading. Extreme values warn against chasing moves; it does not predict short-term direction by itself.');
+}
+function renderFearGreedSentiment(){
+  if(!fearGreedSentiment)return;
+  renderFearGreedGauge();
+  if(fixedRuleSignal.candles.length)renderFixedRuleSignal();
+}
+async function loadFearGreedSentiment(){
+  if(fearGreedLoading)return;
+  fearGreedLoading=true;
+  try{
+    const response=await fetch('/api/sentiment'),data=await response.json();
+    if(!response.ok)throw new Error(data.detail||data.error);
+    fearGreedSentiment=data;
+    renderFearGreedSentiment();
+  }catch{ /* Keep the existing sentiment value if the public source is briefly unavailable. */ }
+  finally{fearGreedLoading=false}
+}
+const renderExpandedIndicatorDetailsWithSentiment=renderExpandedIndicatorDetails;
+renderExpandedIndicatorDetails=function(m){
+  renderExpandedIndicatorDetailsWithSentiment(m);
+  const host=$('indicators'),sentiment=fearGreedSentiment;
+  if(!host||!Number.isFinite(sentiment?.value))return;
+  const view=fearGreedView(sentiment.value),row=document.createElement('div');
+  row.className='metric trade-confirmation-row compact-indicator sentiment-indicator';
+  row.dataset.fixedBasis='true';row.dataset.indicator='fear-greed';
+  row.innerHTML=`<span>${tx('恐慌贪婪指数','Fear & Greed')}</span><b>${sentiment.value}/100</b><i class="badge ${view.kind}">${view.label}</i>`;
+  const decision=host.querySelector('.trade-decision');
+  decision?decision.before(row):host.append(row);
+  addHelp(row.querySelector('span'),tx('市场情绪的日频综合读数，范围 0–100。低值表示恐慌、高值表示贪婪。它适合提示“不要追单”的环境风险，不单独预测短线涨跌。','A daily market-sentiment composite from 0–100. Low means fear and high means greed. It flags conditions where chasing a move is risky; it does not predict short-term direction by itself.'),tx('公开情绪源，每 15 分钟更新；数据源：Alternative.me。','Public sentiment source, refreshed every 15 minutes; source: Alternative.me.'));
+  const reason=decision?.querySelector('p');
+  if(reason)reason.textContent=`${reason.textContent} · ${view.note}`;
+  host.classList.add('indicator-adaptive-grid');
+  host.style.setProperty('--indicator-font-scale',host.querySelectorAll('.compact-indicator').length>12?'.78':'.84');
+};
+renderTradingConfirmation=renderExpandedIndicatorDetails;
+const renderFixedRuleSignalWithSentiment=renderFixedRuleSignal;
+renderFixedRuleSignal=function(){
+  renderFixedRuleSignalWithSentiment();
+  if(fixedRuleSignal.candles.length>=30)renderExpandedIndicatorDetails(metrics(fixedRuleSignal.candles));
+};
+loadFearGreedSentiment();
+setInterval(loadFearGreedSentiment,900_000);
+if(fixedRuleSignal.candles.length)renderFixedRuleSignal();
+
+/* Keep technical indicators compact, and give OKX public microstructure a
+   dedicated card so live derivatives evidence is not mistaken for an EMA/RSI. */
+function renderOkxMicrostructure(context){
+  let card=$('okxMicrostructureCard'),anchor=document.querySelector('#mainChartCard .forecast-card')||document.querySelector('.terminal-layout');
+  // This panel redraws frequently; preserve the period panel node while the
+  // live microstructure markup is replaced below.
+  const periodCard=$('periodChangeCard');
+  if(!card){card=document.createElement('section');card.id='okxMicrostructureCard';card.className='card okx-microstructure-card'}
+  // Keep this short-term, live panel directly below probability research in
+  // the wide chart column; it intentionally fills the reserved visual space.
+  if(anchor&&anchor.nextElementSibling!==card)anchor.after(card);
+  else if(!card.isConnected)document.querySelector('main')?.append(card);
+  if(!card)return;
+  if(context?.source!=='okx'){card.hidden=true;return}
+  card.hidden=false;
+  const book=context.orderBook,flow=context.takerFlow,oiChange=context.oiChangePct,fundingChange=context.fundingChangePct,priceChange=context.priceChangePct;
+  const tone=(value,positive=12,negative=-12)=>!Number.isFinite(value)?'flat':value>=positive?'bull':value<=negative?'bear':'flat';
+  const label=kind=>kind==='bull'?tx('偏多','Bullish'):kind==='bear'?tx('偏空','Bearish'):tx('中性','Neutral');
+  const percent=value=>Number.isFinite(value)?`${value>=0?'+':''}${value.toFixed(2)}%`:'--';
+  const bookKind=tone(book?.imbalancePct),flowKind=tone(flow?.imbalancePct,14,-14);
+  const oiKind=Number.isFinite(oiChange)&&Number.isFinite(priceChange)?(oiChange>=.2&&priceChange>=.1?'bull':oiChange>=.2&&priceChange<=-.1?'bear':'flat'):'flat';
+  const fundingKind=Number.isFinite(fundingChange)?(fundingChange>=.001?'bear':fundingChange<=-.001?'bull':'flat'):'flat';
+  const basisKind=Math.abs(context.basisPct||0)>=.12?(context.basisPct>0?'bear':'bull'):'flat';
+  const rows=[
+    {name:tx('盘口失衡','Order-book imbalance'),value:book?`${percent(book.imbalancePct)} · ${Number.isFinite(book.ratio)?book.ratio.toFixed(2)+'×':'--'}`:tx('积累中','Collecting'),note:book?tx(`前 5 档买/卖深度比 ${book.ratio?.toFixed(2)||'--'}×`,`Top-5 bid/ask depth ${book.ratio?.toFixed(2)||'--'}×`):tx('等待 OKX 盘口快照','Waiting for the OKX book snapshot'),kind:bookKind,tip:tx('前 5 档挂单深度的买卖差。挂单可以快速撤销，所以只作为短线确认，不能单独开仓。','Difference between top-five bid and ask depth. Orders can vanish quickly, so use only as short-term confirmation.')},
+    {name:tx('主动成交比','Taker flow'),value:flow?`${flow.buyRatioPct.toFixed(1)}% ${tx('买入','buy')} · ${percent(flow.imbalancePct)}`:tx('积累中','Collecting'),note:flow?tx(`最近 ${flow.windowSeconds} 秒 · ${flow.tradeCount} 笔主动成交`,`Last ${flow.windowSeconds}s · ${flow.tradeCount} taker trades`):tx('正在积累 60 秒成交窗口','Building a 60-second trade window'),kind:flowKind,tip:tx('统计最近 60 秒实际主动买入与卖出成交，不是静态挂单；短线有效，但变化也很快。','Measures executed taker buying and selling over 60 seconds, not resting orders; useful short-term but fast-changing.')},
+    {name:tx('持仓量 OI','Open interest'),value:Number.isFinite(context.oi)?`${context.oi.toLocaleString('en-US',{maximumFractionDigits:2})} ${context.oiUnit||''}`.trim():'--',note:Number.isFinite(oiChange)&&Number.isFinite(priceChange)?tx(`约 5 分钟：OI ${percent(oiChange)} · 价格 ${percent(priceChange)}`,`~5m: OI ${percent(oiChange)} · price ${percent(priceChange)}`):tx('需积累约 5 分钟快照','Needs about five minutes of snapshots'),kind:oiKind,tip:tx('价格与 OI 同涨常代表新多参与；价格跌、OI 升常代表新空参与。OI 下降更多表示去杠杆，并不自动等于反转。','Price and OI rising together can indicate new longs; price down with OI up can indicate new shorts. Falling OI often means deleveraging, not necessarily reversal.')},
+    {name:tx('资金费率趋势','Funding-rate trend'),value:Number.isFinite(context.fundingRate)?formatRate(context.fundingRate):'--',note:Number.isFinite(fundingChange)?tx(`约 ${context.fundingChangeWindowSeconds||0} 秒变化 ${percent(fundingChange)}`,`~${context.fundingChangeWindowSeconds||0}s change ${percent(fundingChange)}`):tx('需积累约 1 小时快照','Needs about one hour of snapshots'),kind:fundingKind,tip:tx('正费率表示多头向空头付费，负费率相反。费率明显单边上升或下降，是拥挤风险提醒而不是方向保证。','Positive funding means longs pay shorts; negative is the reverse. A strong trend flags crowding risk, not a direction guarantee.')},
+    {name:tx('永续价差','Perpetual basis'),value:Number.isFinite(context.basisPct)?percent(context.basisPct):'--',note:Number.isFinite(context.perpPrice)&&Number.isFinite(context.spotPrice)?tx(`永续 ${money(context.perpPrice)} / 现货 ${money(context.spotPrice)}`,`Perp ${money(context.perpPrice)} / spot ${money(context.spotPrice)}`):tx('等待现货与永续报价','Waiting for spot and perpetual quotes'),kind:basisKind,tip:tx('永续相对现货的溢价或贴水。价差过大时，通常说明杠杆一侧更拥挤，应提高追单门槛。','Premium or discount of the perpetual versus spot. An extreme gap can signal leveraged crowding and should raise the bar for chasing.')}
+  ];
+  const directional=[bookKind,flowKind,oiKind],bull=directional.filter(x=>x==='bull').length,bear=directional.filter(x=>x==='bear').length;
+  let conclusion=tx('观望','Wait'),conclusionKind='flat',reason=tx('盘口、主动成交与 OI 尚未形成两个以上同向确认。','Order book, taker flow and OI do not yet have two aligned confirmations.');
+  if(bull>=2){conclusion=tx('短线研究偏多','Short-term research bullish');conclusionKind='bull';reason=tx('盘口、主动成交和 OI 中至少两项偏多；仍需结合 K 线收盘确认。','At least two of order book, taker flow and OI lean bullish; still wait for candle-close confirmation.')}else if(bear>=2){conclusion=tx('短线研究偏空','Short-term research bearish');conclusionKind='bear';reason=tx('盘口、主动成交和 OI 中至少两项偏空；仍需结合 K 线收盘确认。','At least two of order book, taker flow and OI lean bearish; still wait for candle-close confirmation.')}
+  if(fundingKind==='bear')reason+=tx(' 资金费率上升，注意多头拥挤。',' Funding is rising; watch long crowding.');
+  if(fundingKind==='bull')reason+=tx(' 资金费率走低，注意空头拥挤。',' Funding is falling; watch short crowding.');
+  card.innerHTML=`<div class="microstructure-head"><div><h2>${tx('OKX 市场微观结构','OKX market microstructure')} <button class="help-dot" type="button" data-tip="${tx('来自 OKX BTC-USDT 永续的公开 WebSocket：盘口、最新成交、持仓量、资金费率与现货/永续价格。用于 5 分钟到 1 小时的短线确认，不保证预测正确。','Public OKX WebSocket data for BTC-USDT perpetual: order book, recent trades, OI, funding and spot/perpetual prices. It supports 5m–1h confirmation, not guaranteed prediction.')}">!</button></h2><p>${tx('公开数据 · 无需账户授权 · 盘口与成交实时，OI/资金费率持续更新','Public data · no account authorization · live book/trades, continuously updated OI/funding')}</p></div><span>${context.transport==='websocket'?tx('OKX WebSocket','OKX WebSocket'):tx('REST 备用','REST fallback')}</span></div><div class="microstructure-grid">${rows.map(row=>`<article class="microstructure-item ${row.kind}"><div><span>${row.name}<button class="help-dot" type="button" data-tip="${row.tip}" aria-label="${tx('查看说明','Show explanation')}">!</button></span><i class="badge ${row.kind}">${label(row.kind)}</i></div><b>${row.value}</b><small>${row.note}</small></article>`).join('')}</div><div class="microstructure-conclusion ${conclusionKind}"><span>${tx('微观结构结论','Microstructure conclusion')}</span><b>${conclusion}</b><p>${reason} ${tx('仅供研究，不构成交易建议。','Research only; not trading advice.')}</p></div>`;
+  if(periodCard)card.append(periodCard);
+}
+const renderExpandedIndicatorDetailsWithMicrostructure=renderExpandedIndicatorDetails;
+renderExpandedIndicatorDetails=function(m){
+  renderExpandedIndicatorDetailsWithMicrostructure(m);
+  renderOkxMicrostructure(derivativeMarketContext);
+};
+renderTradingConfirmation=renderExpandedIndicatorDetails;
+const renderFixedRuleSignalWithMicrostructure=renderFixedRuleSignal;
+renderFixedRuleSignal=function(){
+  renderFixedRuleSignalWithMicrostructure();
+  if(fixedRuleSignal.candles.length>=30)renderExpandedIndicatorDetails(metrics(fixedRuleSignal.candles));
+};
+if(fixedRuleSignal.candles.length)renderFixedRuleSignal();
+
 /* Make the difference between chart granularity and REST polling explicit. */
 const refreshIntervalMs=1_000;
 const renderTickerWithRefreshFrequency=renderTicker;
@@ -620,3 +853,136 @@ renderTradingConfirmation=renderExpandedIndicatorDetails;
 const renderFixedRuleSignalWithSafeExpandedDetails=renderFixedRuleSignal;
 renderFixedRuleSignal=function(){renderFixedRuleSignalWithSafeExpandedDetails();if(fixedRuleSignal.candles.length>=30){const current=metrics(fixedRuleSignal.candles);renderExpandedIndicatorDetails(current);renderSignalProjection()}};
 if(fixedRuleSignal.candles.length)renderFixedRuleSignal();
+
+/* Install sentiment after the last compatibility wrapper so it cannot be
+   replaced by a legacy indicator renderer during page startup. */
+const renderExpandedIndicatorDetailsWithFinalSentiment=renderExpandedIndicatorDetails;
+renderExpandedIndicatorDetails=function(m){
+  renderExpandedIndicatorDetailsWithFinalSentiment(m);
+  const host=$('indicators'),sentiment=fearGreedSentiment;
+  if(!host||!Number.isFinite(sentiment?.value))return;
+  if(host.querySelector('.sentiment-indicator'))return;
+  const view=fearGreedView(sentiment.value),row=document.createElement('div');
+  row.className='metric trade-confirmation-row compact-indicator sentiment-indicator';
+  row.dataset.fixedBasis='true';row.dataset.indicator='fear-greed';
+  row.innerHTML=`<span>${tx('恐慌贪婪指数','Fear & Greed')}</span><b>${sentiment.value}/100</b><i class="badge ${view.kind}">${view.label}</i>`;
+  const decision=host.querySelector('.trade-decision');
+  decision?decision.before(row):host.append(row);
+  addHelp(row.querySelector('span'),tx('市场情绪的日频综合读数，范围 0–100。低值表示恐慌、高值表示贪婪。它适合提示“不要追单”的环境风险，不单独预测短线涨跌。','A daily market-sentiment composite from 0–100. Low means fear and high means greed. It flags conditions where chasing a move is risky; it does not predict short-term direction by itself.'),tx('公开情绪源，每 15 分钟更新；数据源：Alternative.me。','Public sentiment source, refreshed every 15 minutes; source: Alternative.me.'));
+  const reason=decision?.querySelector('p');
+  if(reason)reason.textContent=`${reason.textContent} · ${view.note}`;
+  host.classList.add('indicator-adaptive-grid');
+  host.style.setProperty('--indicator-font-scale',host.querySelectorAll('.compact-indicator').length>12?'.78':'.84');
+};
+renderTradingConfirmation=renderExpandedIndicatorDetails;
+const renderFixedRuleSignalWithFinalSentiment=renderFixedRuleSignal;
+renderFixedRuleSignal=function(){
+  renderFixedRuleSignalWithFinalSentiment();
+  if(fixedRuleSignal.candles.length>=30)renderExpandedIndicatorDetails(metrics(fixedRuleSignal.candles));
+};
+if(fixedRuleSignal.candles.length)renderFixedRuleSignal();
+
+/* Keep the personal reference quote attached after all late ticker wrappers. */
+const renderTickerWithFinalPersonalEntry=renderTicker;
+renderTicker=function(){renderTickerWithFinalPersonalEntry();renderPersonalEntryCard()};
+renderPersonalEntryCard();
+
+/* Period returns use appropriately sized candle histories instead of treating
+   a fixed number of whichever candles happen to be on screen as "minutes". */
+let periodHistory={},periodHistoryLoading=false,periodHistorySource='';
+const periodReturnDefinitions=[
+  [tx('较 5 分钟前收盘价','vs close 5m ago'),'intraday',5],
+  [tx('较 15 分钟前收盘价','vs close 15m ago'),'intraday',15],
+  [tx('较 1 小时前收盘价','vs close 1h ago'),'intraday',60],
+  [tx('较 4 小时前收盘价','vs close 4h ago'),'intraday',240],
+  [tx('较 1 日前收盘价','vs close 1d ago'),'day',1440],
+  [tx('较 2 日前收盘价','vs close 2d ago'),'day',2880],
+  [tx('较 1 周前收盘价','vs close 1w ago'),'week',10080],
+  [tx('较 1 月前收盘价','vs close 1mo ago'),'halfYear',43200],
+  [tx('较半年前收盘价','vs close 6mo ago'),'halfYear',259200]
+];
+function periodCloseBefore(candles,minutes){if(!Array.isArray(candles)||!candles.length)return NaN;const target=Date.now()-minutes*60_000;for(let i=candles.length-1;i>=0;i--)if(candles[i].time<=target)return candles[i].close;return NaN}
+function renderExtendedPeriodReturns(){const host=$('changeTags'),last=state.ticker?.last||state.candles.at(-1)?.close;if(!host||!Number.isFinite(last))return;host.innerHTML=periodReturnDefinitions.map(([label,bucket,minutes])=>{const close=periodCloseBefore(periodHistory[bucket],minutes),value=Number.isFinite(close)?(last/close-1)*100:NaN;return `<span><small>${label}</small><b class="${Number.isFinite(value)?value>=0?'bull':'bear':'flat'}">${Number.isFinite(value)?pct(value):tx('加载中','Loading')}</b></span>`}).join('')}
+async function loadExtendedPeriodHistories(){const source=state.source||'okx';if(periodHistoryLoading&&periodHistorySource===source)return;if(periodHistorySource===source&&Object.keys(periodHistory).length===4){renderExtendedPeriodReturns();return}periodHistoryLoading=true;periodHistorySource=source;periodHistory={};renderExtendedPeriodReturns();try{const groups=await Promise.all([['intraday','1m',300],['day','15m',300],['week','1h',300],['halfYear','1d',300]].map(async([key,interval,limit])=>{const response=await apiFetch(`/api/market?${new URLSearchParams({source,interval,limit})}`,8_000),data=await response.json();if(!response.ok)throw new Error(data.error||key);return [key,data.candles]}));periodHistory=Object.fromEntries(groups)}catch{ /* Individual period cells remain loading/unavailable until the next refresh. */ }finally{periodHistoryLoading=false;renderExtendedPeriodReturns()}}
+function ensurePeriodChangeCard(){
+  let period=$('periodChangeCard');
+  if(period)return period;
+  period=document.createElement('section');
+  period.id='periodChangeCard';
+  period.className='change-card chart-periods';
+  period.innerHTML=`<h2>${tx('周期涨幅（当前价 vs 历史收盘价）','Period return (current vs historical close)')}</h2><div id="changeTags"></div>`;
+  return period;
+}
+function ensureFearGreedCard(){
+  let card=$('fearGreedGauge');
+  if(card)return card;
+  card=document.createElement('section');
+  card.id='fearGreedGauge';
+  card.className='card fear-greed-gauge-card flat';
+  card.innerHTML=`<div class="fear-greed-head"><div><h2>${tx('恐惧&贪婪指数','Fear & Greed Index')}</h2><p>${tx('市场情绪环境，不单独作为交易信号。','Market environment; not a standalone trading signal.')}</p></div><span>${tx('每 15 分钟更新','Updates every 15 min')}</span></div><div class="fear-greed-unavailable"><b>${tx('正在加载情绪数据','Loading sentiment data')}</b><p>${tx('情绪读数会在公开数据源返回后自动显示。','The reading appears automatically when the public source responds.')}</p></div>`;
+  return card;
+}
+function placePeriodAndSentimentCards(){
+  const period=ensurePeriodChangeCard(),micro=$('okxMicrostructureCard'),sentiment=ensureFearGreedCard(),indicators=$('indicatorDetailsCard');
+  // It is a fixed part of the OKX panel, not a free-floating page card.
+  if(micro&&period.parentElement!==micro)micro.append(period);
+  if(sentiment&&indicators&&indicators.nextElementSibling!==sentiment)indicators.after(sentiment);
+  scheduleMicrostructureAlignment();
+}
+let microstructureAlignmentFrame=0;
+function scheduleMicrostructureAlignment(){
+  cancelAnimationFrame(microstructureAlignmentFrame);
+  microstructureAlignmentFrame=requestAnimationFrame(()=>{
+    const micro=$('okxMicrostructureCard'),fear=$('fearGreedGauge');
+    if(!micro)return;
+    micro.style.minHeight='';
+    // Only equalize the two desktop columns.  Reading layouts on tablets and
+    // phones should retain their natural content height.
+    if(window.innerWidth<1025||!fear||fear.hidden||micro.hidden)return;
+    const microBox=micro.getBoundingClientRect(),fearBox=fear.getBoundingClientRect();
+    const alignedHeight=Math.ceil(fearBox.bottom-microBox.top);
+    if(alignedHeight>micro.offsetHeight)micro.style.minHeight=`${alignedHeight}px`;
+  });
+}
+window.addEventListener('resize',scheduleMicrostructureAlignment,{passive:true});
+const renderAnalysisWithExtendedPeriods=renderAnalysis;
+renderAnalysis=function(){renderAnalysisWithExtendedPeriods();renderExtendedPeriodReturns();loadExtendedPeriodHistories();placePeriodAndSentimentCards()};
+const renderFearGreedGaugeWithPlacement=renderFearGreedGauge;
+renderFearGreedGauge=function(){renderFearGreedGaugeWithPlacement();const card=$('fearGreedGauge');if(!card)return;const explanations=[['极度恐惧','0–24：市场情绪明显低迷。它提示不要盲目追空，仍需价格与成交量确认。','0–24: sentiment is deeply fearful. Avoid blindly chasing shorts; confirm with price and volume.'],['恐慌','25–44：市场偏谨慎，波动与反抽都可能加快。','25–44: sentiment is cautious; volatility and rebounds can accelerate.'],['中性','45–55：情绪没有明显偏向，优先观察趋势、成交量与关键价位。','45–55: no strong sentiment bias; focus on trend, volume and key levels.'],['贪婪','56–74：市场风险偏好较高，提高追多门槛并留意资金费率。','56–74: risk appetite is elevated; raise the bar for chasing longs and watch funding.'],['极度贪婪','75–100：拥挤风险可能上升，避免仅因上涨而追多。','75–100: crowding risk may rise; do not chase longs solely because price is rising.']];card.querySelectorAll('.fear-greed-summary div span').forEach((label,index)=>{const item=explanations[index];if(item)addHelp(label,item[1],item[2])});placePeriodAndSentimentCards()};
+setTimeout(()=>{renderFearGreedGauge();renderExtendedPeriodReturns();loadExtendedPeriodHistories();placePeriodAndSentimentCards()},0);
+/* The responsive shell completes its own rearrangement shortly after boot.
+   A pair of bounded checks is sufficient and avoids observing every live-data
+   DOM update, which can otherwise keep the browser's main thread busy. */
+setTimeout(placePeriodAndSentimentCards,180);
+setTimeout(placePeriodAndSentimentCards,900);
+
+/* Keep the first time label wholly inside the plot after the left scale has
+   been widened for readable price labels. */
+drawChartWithoutDuplicateExtremaText=function(){
+  const proto=CanvasRenderingContext2D.prototype,fill=proto.fillText;
+  proto.fillText=function(text,...args){
+    if(typeof text==='string'&&(text.startsWith('最高选中价')||text.startsWith('最低选中价')||text.startsWith('Highest selected price')||text.startsWith('Lowest selected price')))return;
+    const x=Number(args[0]),isTick=/^\d{2}\/\d{2}\s\d{2}:\d{2}$/.test(text);
+    if(isTick){
+      const previous=this.textAlign,canvasWidth=this.canvas.width/(devicePixelRatio||1);
+      if(x<105){this.textAlign='left';args[0]=52}
+      else if(x>canvasWidth-145){this.textAlign='right';args[0]=canvasWidth-74}
+      const result=fill.call(this,text,...args);this.textAlign=previous;return result;
+    }
+    return fill.call(this,text,...args);
+  };
+  try{drawCloseExtrema()}finally{proto.fillText=fill}
+};
+
+/* The changelog follows the version pill, rather than using a fixed viewport
+   corner that drifts away when the header is centered or resized. */
+$('appVersion')?.addEventListener('click',()=>{
+  requestAnimationFrame(()=>{
+    const version=$('appVersion'),log=$('versionChangelog');
+    if(!version||!log||log.hidden)return;
+    const rect=version.getBoundingClientRect(),width=Math.min(340,innerWidth-28);
+    log.style.top=`${rect.bottom+8}px`;
+    log.style.left=`${Math.max(14,Math.min(innerWidth-width-14,rect.left))}px`;
+    log.style.right='auto';
+  });
+});

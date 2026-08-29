@@ -33,14 +33,43 @@ database.exec(`
     id INTEGER PRIMARY KEY, observed_at INTEGER NOT NULL, source TEXT NOT NULL,
     intraday_count INTEGER NOT NULL, daily_count INTEGER NOT NULL, forced INTEGER NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS derivative_snapshots (
+    id INTEGER PRIMARY KEY, source TEXT NOT NULL, observed_at INTEGER NOT NULL,
+    funding_rate REAL, oi REAL, book_imbalance_pct REAL, book_ratio REAL,
+    taker_buy_ratio_pct REAL, taker_trade_count INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS derivative_snapshots_source_time ON derivative_snapshots(source, observed_at DESC);
+  CREATE TABLE IF NOT EXISTS sentiment_snapshots (
+    id INTEGER PRIMARY KEY, observed_at INTEGER NOT NULL, value REAL NOT NULL,
+    classification TEXT NOT NULL, source TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS sentiment_snapshots_time ON sentiment_snapshots(observed_at DESC);
+  CREATE TABLE IF NOT EXISTS macro_market_snapshots (
+    id INTEGER PRIMARY KEY, observed_at INTEGER NOT NULL, metric_key TEXT NOT NULL,
+    value REAL, change_pct REAL, available INTEGER NOT NULL, source TEXT NOT NULL, cadence TEXT
+  );
+  CREATE INDEX IF NOT EXISTS macro_market_snapshots_key_time ON macro_market_snapshots(metric_key, observed_at DESC);
+  CREATE TABLE IF NOT EXISTS fed_calendar_snapshots (
+    id INTEGER PRIMARY KEY, observed_at INTEGER NOT NULL, event_key TEXT NOT NULL,
+    event_name TEXT NOT NULL, event_at INTEGER NOT NULL, source TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS fed_calendar_snapshots_event_time ON fed_calendar_snapshots(event_key, observed_at DESC);
 `);
 const storeQuote = database.prepare('INSERT INTO quote_snapshots (source, observed_at, last, open24h, change_pct, high24, low24) VALUES (?, ?, ?, ?, ?, ?, ?)');
 const storeCandle = database.prepare('INSERT OR IGNORE INTO candles (source, interval, candle_time, open, high, low, close, volume, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
 const updateCandle = database.prepare('UPDATE candles SET open=?, high=?, low=?, close=?, volume=?, updated_at=? WHERE source=? AND interval=? AND candle_time=?');
 const storeMarketSnapshot = database.prepare('INSERT INTO market_snapshots (source, interval, observed_at, candle_count, last, cached) VALUES (?, ?, ?, ?, ?, ?)');
 const storeTrainingRun = database.prepare('INSERT INTO training_runs (observed_at, source, intraday_count, daily_count, forced) VALUES (?, ?, ?, ?, ?)');
+const storeDerivativeSnapshot = database.prepare('INSERT INTO derivative_snapshots (source, observed_at, funding_rate, oi, book_imbalance_pct, book_ratio, taker_buy_ratio_pct, taker_trade_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+const storeSentimentSnapshot = database.prepare('INSERT INTO sentiment_snapshots (observed_at, value, classification, source) VALUES (?, ?, ?, ?)');
+const storeMacroMarketSnapshot = database.prepare('INSERT INTO macro_market_snapshots (observed_at, metric_key, value, change_pct, available, source, cadence) VALUES (?, ?, ?, ?, ?, ?, ?)');
+const storeFedCalendarSnapshot = database.prepare('INSERT INTO fed_calendar_snapshots (observed_at, event_key, event_name, event_at, source) VALUES (?, ?, ?, ?, ?)');
+const priorOiSnapshot = database.prepare('SELECT observed_at, oi FROM derivative_snapshots WHERE source=? AND observed_at<=? AND oi IS NOT NULL ORDER BY observed_at DESC LIMIT 1');
+const priorFundingSnapshot = database.prepare('SELECT observed_at, funding_rate FROM derivative_snapshots WHERE source=? AND observed_at<=? AND funding_rate IS NOT NULL ORDER BY observed_at DESC LIMIT 1');
+const priorQuoteSnapshot = database.prepare('SELECT observed_at, last FROM quote_snapshots WHERE source=? AND observed_at<=? AND last IS NOT NULL ORDER BY observed_at DESC LIMIT 1');
 let lastStorageCleanup = 0;
 const lastStoredQuote = new Map();
+const lastStoredDerivative = new Map();
 function safelyStore(work) { try { work(); } catch (error) { console.error('SQLite storage error:', error.message); } }
 function cleanStorage(now) {
   if (now - lastStorageCleanup < 3_600_000) return;
@@ -49,6 +78,10 @@ function cleanStorage(now) {
   database.prepare('DELETE FROM market_snapshots WHERE observed_at < ?').run(now - 30 * 86_400_000);
   database.prepare('DELETE FROM candles WHERE updated_at < ?').run(now - 90 * 86_400_000);
   database.prepare('DELETE FROM training_runs WHERE observed_at < ?').run(now - 180 * 86_400_000);
+  database.prepare('DELETE FROM derivative_snapshots WHERE observed_at < ?').run(now - 14 * 86_400_000);
+  database.prepare('DELETE FROM sentiment_snapshots WHERE observed_at < ?').run(now - 365 * 86_400_000);
+  database.prepare('DELETE FROM macro_market_snapshots WHERE observed_at < ?').run(now - 180 * 86_400_000);
+  database.prepare('DELETE FROM fed_calendar_snapshots WHERE observed_at < ?').run(now - 180 * 86_400_000);
   database.exec('PRAGMA wal_checkpoint(PASSIVE)');
 }
 function persistQuote(source, ticker, observedAt) {
@@ -69,6 +102,30 @@ function persistMarket(result, interval) {
 function persistTrainingRun(value, forced) {
   safelyStore(() => storeTrainingRun.run(value.fetchedAt, value.source, value.intraday.length, value.daily.length, forced ? 1 : 0));
 }
+function persistDerivativeSnapshot(source, values, observedAt = Date.now()) {
+  if (observedAt - (lastStoredDerivative.get(source) || 0) < 10_000) return;
+  lastStoredDerivative.set(source, observedAt);
+  const numberOrNull = value => Number.isFinite(value) ? value : null;
+  safelyStore(() => {
+    storeDerivativeSnapshot.run(source, observedAt, numberOrNull(values.fundingRate), numberOrNull(values.oi), numberOrNull(values.bookImbalancePct), numberOrNull(values.bookRatio), numberOrNull(values.takerBuyRatioPct), Number.isFinite(values.takerTradeCount) ? values.takerTradeCount : null);
+    cleanStorage(observedAt);
+  });
+}
+function persistSentimentSnapshot(value, observedAt = Date.now()) {
+  safelyStore(() => { storeSentimentSnapshot.run(observedAt, value.value, value.classification || '', 'Alternative.me'); cleanStorage(observedAt); });
+}
+function persistMacroMarketSnapshots(rows, observedAt = Date.now()) {
+  safelyStore(() => {
+    for (const row of rows) storeMacroMarketSnapshot.run(observedAt, row.key, Number.isFinite(row.value) ? row.value : null, Number.isFinite(row.changePct) ? row.changePct : null, row.available ? 1 : 0, row.source || '—', row.cadence || null);
+    cleanStorage(observedAt);
+  });
+}
+function persistFedCalendarSnapshots(events, observedAt = Date.now()) {
+  safelyStore(() => {
+    for (const event of events) storeFedCalendarSnapshot.run(observedAt, event.key, event.name, event.at, event.source);
+    cleanStorage(observedAt);
+  });
+}
 function storedCandles(source, interval, limit) {
   const rows = database.prepare('SELECT candle_time AS time, open, high, low, close, volume FROM candles WHERE source=? AND interval=? ORDER BY candle_time DESC LIMIT ?').all(source, interval, limit);
   return rows.reverse().map(row => ({ time:+row.time, open:+row.open, high:+row.high, low:+row.low, close:+row.close, volume:+row.volume })).filter(validCandle);
@@ -85,13 +142,16 @@ function persistHistory(source, interval, candles) {
 }
 function storageStatus() {
   const count = table => database.prepare(`SELECT COUNT(*) AS total FROM ${table}`).get().total;
-  return { engine:'SQLite', quoteSnapshots:count('quote_snapshots'), candles:count('candles'), marketSnapshots:count('market_snapshots'), trainingRuns:count('training_runs') };
+  return { engine:'SQLite', quoteSnapshots:count('quote_snapshots'), candles:count('candles'), marketSnapshots:count('market_snapshots'), trainingRuns:count('training_runs'), derivativeSnapshots:count('derivative_snapshots'), sentimentSnapshots:count('sentiment_snapshots'), macroMarketSnapshots:count('macro_market_snapshots'), fedCalendarSnapshots:count('fed_calendar_snapshots') };
 }
 // Layered cache policy.  Quotes are fed by the OKX stream, chart/indicator
 // data is refreshed at a lower cadence, and slow history is retained in SQLite.
 const MARKET_TTL = 10_000;
 const CONTEXT_TTL = 10_000;
 const HISTORY_TTL = 300_000;
+const SENTIMENT_TTL = 900_000;
+const FED_CALENDAR_TTL = 600_000;
+const FED_MARKET_SIGNALS_TTL = 600_000;
 const QUOTE_TTL = 1_000;
 const UPSTREAM_TIMEOUT = 1_200;
 const STALE_QUOTE_MAX_AGE = 60_000;
@@ -120,12 +180,49 @@ const sources = ['okx', 'coinbase', 'gate', 'binance'];
 const okxStream = {
   socket:null, status:'connecting', ticker:null, spotPrice:null,
   fundingRate:null, nextFundingRate:null, oi:null, oiUnit:'BTC',
+  orderBook:null, takerTrades:[], bookAt:0, tradeAt:0,
   lastMessageAt:0, tickerAt:0, contextAt:0, connectedAt:0,
   reconnects:0, lastError:null, retryMs:1_000, heartbeat:null, retryTimer:null
 };
 function streamAge(at, now = Date.now()) { return at ? Math.max(0, now - at) : null; }
 function freshOkxTicker(maxAge = 5_000) {
   return okxStream.ticker && streamAge(okxStream.tickerAt) <= maxAge ? { ...okxStream.ticker } : null;
+}
+function recentTakerFlow(now = Date.now()) {
+  const cutoff = now - 60_000;
+  okxStream.takerTrades = okxStream.takerTrades.filter(trade => trade.time >= cutoff);
+  const buys = okxStream.takerTrades.filter(trade => trade.side === 'buy').reduce((sum, trade) => sum + trade.notional, 0);
+  const sells = okxStream.takerTrades.filter(trade => trade.side === 'sell').reduce((sum, trade) => sum + trade.notional, 0);
+  const total = buys + sells;
+  return total > 0 ? {
+    buyNotional:buys, sellNotional:sells, buyRatioPct:buys / total * 100,
+    imbalancePct:(buys - sells) / total * 100, tradeCount:okxStream.takerTrades.length,
+    windowSeconds:60, updatedAt:okxStream.tradeAt || null
+  } : null;
+}
+function okxDerivativeFeatures(now = Date.now()) {
+  const book = okxStream.orderBook && streamAge(okxStream.bookAt, now) <= 10_000 ? { ...okxStream.orderBook, updatedAt:okxStream.bookAt } : null;
+  const takerFlow = recentTakerFlow(now);
+  const oiBaseline = priorOiSnapshot.get('okx', now - 300_000);
+  const fundingBaseline = priorFundingSnapshot.get('okx', now - 3_600_000);
+  const priceBaseline = priorQuoteSnapshot.get('okx', now - 300_000);
+  const oiChangePct = Number.isFinite(okxStream.oi) && Number.isFinite(+oiBaseline?.oi) && +oiBaseline.oi !== 0 ? (okxStream.oi / +oiBaseline.oi - 1) * 100 : null;
+  const fundingChangePct = Number.isFinite(okxStream.fundingRate) && Number.isFinite(+fundingBaseline?.funding_rate) ? (okxStream.fundingRate - +fundingBaseline.funding_rate) * 100 : null;
+  const priceChangePct = Number.isFinite(okxStream.ticker?.last) && Number.isFinite(+priceBaseline?.last) && +priceBaseline.last !== 0 ? (okxStream.ticker.last / +priceBaseline.last - 1) * 100 : null;
+  return {
+    orderBook:book, takerFlow,
+    oiChangePct, oiChangeWindowSeconds:oiBaseline ? Math.round((now - +oiBaseline.observed_at) / 1000) : null,
+    fundingChangePct, fundingChangeWindowSeconds:fundingBaseline ? Math.round((now - +fundingBaseline.observed_at) / 1000) : null,
+    priceChangePct, priceChangeWindowSeconds:priceBaseline ? Math.round((now - +priceBaseline.observed_at) / 1000) : null
+  };
+}
+function persistOkxDerivativeSnapshot() {
+  const takerFlow = recentTakerFlow(), book = okxStream.orderBook;
+  persistDerivativeSnapshot('okx', {
+    fundingRate:okxStream.fundingRate, oi:okxStream.oi,
+    bookImbalancePct:book?.imbalancePct, bookRatio:book?.ratio,
+    takerBuyRatioPct:takerFlow?.buyRatioPct, takerTradeCount:takerFlow?.tradeCount
+  });
 }
 function freshOkxContext(maxAge = 30_000) {
   if (!freshOkxTicker(maxAge) || !Number.isFinite(okxStream.spotPrice) || !Number.isFinite(okxStream.fundingRate) || !Number.isFinite(okxStream.oi) || streamAge(okxStream.contextAt) > maxAge) return null;
@@ -134,7 +231,7 @@ function freshOkxContext(maxAge = 30_000) {
     source:'okx', fundingRate:okxStream.fundingRate, nextFundingRate:okxStream.nextFundingRate,
     oi:okxStream.oi, oiUnit:okxStream.oiUnit, basisPct:(ticker.last / okxStream.spotPrice - 1) * 100,
     perpPrice:ticker.last, spotPrice:okxStream.spotPrice, fetchedAt:okxStream.contextAt,
-    cached:true, cacheAgeMs:streamAge(okxStream.contextAt), transport:'websocket'
+    cached:true, cacheAgeMs:streamAge(okxStream.contextAt), transport:'websocket', ...okxDerivativeFeatures()
   };
 }
 function clearOkxTimers() {
@@ -151,7 +248,7 @@ function scheduleOkxReconnect() {
 }
 function updateOkxStream(message) {
   const channel = message.arg?.channel, instId = message.arg?.instId;
-  const row = message.data?.[0]; if (!row) return;
+  const rows = message.data; const row = rows?.[0]; if (!row) return;
   const now = Date.now(); okxStream.lastMessageAt = now;
   if (channel === 'tickers' && instId === 'BTC-USDT-SWAP') {
     const ticker = { last:+row.last, open24h:+row.open24h, changePct:(+row.last / +row.open24h - 1) * 100, high24:+row.high24h, low24:+row.low24h };
@@ -163,6 +260,17 @@ function updateOkxStream(message) {
   } else if (channel === 'open-interest') {
     const oi = Number.isFinite(+row.oiCcy) ? +row.oiCcy : +row.oi;
     if (Number.isFinite(oi)) { okxStream.oi = oi; okxStream.oiUnit = Number.isFinite(+row.oiCcy) ? 'BTC' : 'contracts'; okxStream.contextAt = now; }
+  } else if (channel === 'books5') {
+    const depth = values => values.reduce((sum, level) => sum + Math.max(0, +level[0] || 0) * Math.max(0, +level[1] || 0), 0);
+    const bidDepth = depth(row.bids || []), askDepth = depth(row.asks || []), total = bidDepth + askDepth;
+    if (total > 0) { okxStream.orderBook = { bidDepth, askDepth, ratio:askDepth ? bidDepth / askDepth : null, imbalancePct:(bidDepth - askDepth) / total * 100 }; okxStream.bookAt = now; }
+  } else if (channel === 'trades') {
+    for (const trade of rows) {
+      const price = +trade.px, size = +trade.sz, side = trade.side === 'buy' ? 'buy' : trade.side === 'sell' ? 'sell' : null;
+      if (side && Number.isFinite(price) && Number.isFinite(size) && size > 0) okxStream.takerTrades.push({ time:now, side, notional:price * size });
+    }
+    okxStream.tradeAt = now;
+    recentTakerFlow(now);
   }
 }
 function openOkxStream() {
@@ -175,7 +283,8 @@ function openOkxStream() {
       okxStream.status = 'connected'; okxStream.connectedAt = Date.now(); okxStream.retryMs = 1_000; okxStream.lastError = null;
       socket.send(JSON.stringify({ op:'subscribe', args:[
         { channel:'tickers', instId:'BTC-USDT-SWAP' }, { channel:'tickers', instId:'BTC-USDT' },
-        { channel:'funding-rate', instId:'BTC-USDT-SWAP' }, { channel:'open-interest', instType:'SWAP', instId:'BTC-USDT-SWAP' }
+        { channel:'funding-rate', instId:'BTC-USDT-SWAP' }, { channel:'open-interest', instType:'SWAP', instId:'BTC-USDT-SWAP' },
+        { channel:'books5', instId:'BTC-USDT-SWAP' }, { channel:'trades', instId:'BTC-USDT-SWAP' }
       ] }));
       okxStream.heartbeat = setInterval(() => { if (socket.readyState === WebSocket.OPEN) socket.send('ping'); }, 20_000);
       okxStream.heartbeat.unref?.();
@@ -189,6 +298,8 @@ function openOkxStream() {
   } catch (error) { okxStream.status = 'reconnecting'; okxStream.lastError = error.message; scheduleOkxReconnect(); }
 }
 openOkxStream();
+const derivativePersistTimer = setInterval(persistOkxDerivativeSnapshot, 10_000);
+derivativePersistTimer.unref?.();
 // Each API response carries request-scoped timings.  This lets the browser
 // distinguish its route to this server from the server's route to an exchange.
 const requestTiming = new AsyncLocalStorage();
@@ -231,7 +342,7 @@ async function requestText(url, timeout = 8_000) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeout);
   try {
-    const r = await fetch(url, { signal: ctrl.signal, headers: { accept: 'text/csv,text/plain' } });
+    const r = await fetch(url, { signal: ctrl.signal, headers: { accept: 'text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8', 'user-agent':'BTC-Indicator-Research/1.4 (+local public-calendar monitor)' } });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     return await r.text();
   } finally {
@@ -425,6 +536,7 @@ async function marketContext(source = 'okx') {
     const perpPrice=+perp.last, spotPrice=+spot.last;
     value = { source:selected, fundingRate:Number(perp.funding_rate), nextFundingRate:Number(perp.funding_rate), oi:Number(perp.total_size), oiUnit:'contracts', basisPct:(perpPrice / spotPrice - 1) * 100, perpPrice, spotPrice, fetchedAt:Date.now(), cached:false };
   }
+  if (selected === 'okx') Object.assign(value, okxDerivativeFeatures());
   value.transport = 'rest'; value.cacheAgeMs = 0; value.stale = false;
   remember(key, value);
   return value;
@@ -432,6 +544,114 @@ async function marketContext(source = 'okx') {
     if (hit && Date.now() - hit.time <= STALE_QUOTE_MAX_AGE) return { ...cacheResult(hit), transport:hit.value.transport || 'rest', stale:true, fallbackReason:error.name === 'AbortError' ? 'timeout' : error.message };
     throw error;
   }
+}
+async function fearGreedSentiment() {
+  const key = 'fear-greed-sentiment', hit = cache.get(key), now = Date.now();
+  if (hit && now - hit.time < SENTIMENT_TTL) return { ...cacheResult(hit, now), stale:false };
+  try {
+    return await coalesce(key, async () => {
+      const payload = await request('https://api.alternative.me/fng/?limit=1&format=json', 8_000);
+      const row = payload.data?.[0], value = Number(row?.value);
+      if (!Number.isFinite(value) || value < 0 || value > 100) throw new Error('invalid fear and greed payload');
+      const result = {
+        value, classification:String(row.value_classification || ''),
+        observedAt:Number(row.timestamp) * 1000 || now,
+        nextUpdateSeconds:Number(row.time_until_update) || null,
+        fetchedAt:now, cached:false, cacheAgeMs:0, refreshMs:SENTIMENT_TTL
+      };
+      persistSentimentSnapshot(result, now);
+      remember(key, result);
+      return result;
+    });
+  } catch (error) {
+    if (hit && now - hit.time <= 3_600_000) return { ...cacheResult(hit, now), stale:true, fallbackReason:error.name === 'AbortError' ? 'timeout' : error.message };
+    throw error;
+  }
+}
+const monthIndex = { january:0,february:1,march:2,april:3,may:4,june:5,july:6,august:7,september:8,october:9,november:10,december:11,jan:0,feb:1,mar:2,apr:3,jun:5,jul:6,aug:7,sep:8,sept:8,oct:9,nov:10,dec:11 };
+function plainText(html) { return String(html).replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/gi, ' ').replace(/\s+/g, ' ').trim(); }
+function dateAtNoon(year, month, day) { return new Date(Date.UTC(year, month, day, 17, 0, 0)); }
+function nearestDate(text, { range = false } = {}) {
+  const now = Date.now(), candidates = [];
+  const exp = range ? /\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2})(?:\s*(?:-|–|—|to)\s*\d{1,2})?(?:,?\s*(20\d{2}))?/gi : /\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2})(?:,?\s*(20\d{2}))?/gi;
+  for (const match of text.matchAll(exp)) {
+    const month = monthIndex[match[1].toLowerCase()], day = Number(match[2]);
+    let year = Number(match[3]) || new Date().getUTCFullYear();
+    let at = dateAtNoon(year, month, day).getTime();
+    if (!match[3] && at < now - 86_400_000) { year += 1; at = dateAtNoon(year, month, day).getTime(); }
+    if (at >= now - 86_400_000 && at < now + 400 * 86_400_000) candidates.push({ at, label:`${match[1]} ${day}, ${year}` });
+  }
+  candidates.sort((a, b) => a.at - b.at); return candidates[0] || null;
+}
+async function fedCalendar() {
+  const key = 'fed-calendar', hit = cache.get(key), now = Date.now();
+  if (hit && now - hit.time < FED_CALENDAR_TTL) return { ...cacheResult(hit, now), stale:false };
+  try {
+    return await coalesce(key, async () => {
+      const pages = await Promise.allSettled([
+        requestText('https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm', 8_000),
+        requestText('https://www.bls.gov/schedule/news_release/cpi.htm', 8_000),
+        requestText('https://www.bls.gov/schedule/news_release/empsit.htm', 8_000)
+      ]);
+      const textAt = index => pages[index].status === 'fulfilled' ? plainText(pages[index].value) : '';
+      const events = [
+        { key:'fomc', name:'FOMC 利率决议', source:'Federal Reserve', ...nearestDate(textAt(0), { range:true }) },
+        { key:'cpi', name:'美国 CPI', source:'U.S. Bureau of Labor Statistics', ...nearestDate(textAt(1)) },
+        { key:'payrolls', name:'美国非农就业', source:'U.S. Bureau of Labor Statistics', ...nearestDate(textAt(2)) }
+      ].filter(event => Number.isFinite(event.at));
+      if (!events.length) throw new Error('no upcoming public macro events found');
+      const result = { events:events.sort((a,b) => a.at - b.at), fetchedAt:now, cached:false, cacheAgeMs:0, refreshMs:FED_CALENDAR_TTL, unavailable:pages.map((page,index) => page.status === 'rejected' ? ['Federal Reserve','BLS CPI','BLS Employment'][index] : null).filter(Boolean), sources:['https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm','https://www.bls.gov/schedule/news_release/cpi.htm','https://www.bls.gov/schedule/news_release/empsit.htm'] };
+      persistFedCalendarSnapshots(result.events, now);
+      remember(key, result); return result;
+    });
+  } catch (error) {
+    if (hit && now - hit.time <= 3_600_000) return { ...cacheResult(hit, now), stale:true, fallbackReason:error.name === 'AbortError' ? 'timeout' : error.message };
+    throw error;
+  }
+}
+function dailySignal(key, name, quote, source) {
+  const last=Number(quote?.last), previous=Number(quote?.previous);
+  if (!Number.isFinite(last) || last <= 0) return { key, name, available:false, source, detail:'公开数据暂不可用' };
+  return { key, name, available:true, value:last, changePct:Number.isFinite(previous) && previous ? (last / previous - 1) * 100 : null, source, cadence:'日线' };
+}
+async function fedMarketSignals() {
+  const key='fed-market-signals', hit=cache.get(key), now=Date.now();
+  if (hit && now-hit.time<FED_MARKET_SIGNALS_TTL) return cacheResult(hit, now);
+  return coalesce(key, async () => {
+    const [gold,dxy,coingecko,coinlore] = await Promise.allSettled([
+      yahooHistory('GC=F'),
+      yahooHistory('DX-Y.NYB'),
+      request('https://api.coingecko.com/api/v3/global', 8_000),
+      request('https://api.coinlore.net/api/global/', 8_000)
+    ]);
+    const market=[];
+    market.push(gold.status==='fulfilled' ? dailySignal('gold','黄金指数',gold.value.quote,'Yahoo Finance') : { key:'gold', name:'黄金指数', available:false, source:'Yahoo Finance', detail:'公开行情暂不可用' });
+    market.push(dxy.status==='fulfilled' ? dailySignal('dxy','美元指数',dxy.value.quote,'Yahoo Finance') : { key:'dxy', name:'美元指数', available:false, source:'Yahoo Finance', detail:'公开行情暂不可用' });
+    const cg=coingecko.status==='fulfilled' ? coingecko.value?.data : null;
+    const cl=coinlore.status==='fulfilled' ? (Array.isArray(coinlore.value) ? coinlore.value[0] : coinlore.value?.data?.[0]) : null;
+    const dominance=Number(cg?.market_cap_percentage?.btc ?? cl?.btc_d);
+    const source=cg ? 'CoinGecko' : cl ? 'CoinLore' : 'CoinGecko / CoinLore';
+    market.push(Number.isFinite(dominance) ? { key:'btc-dominance', name:'BTC 总市值占比', available:true, value:dominance, changePct:null, source, cadence:'快照' } : { key:'btc-dominance', name:'BTC 总市值占比', available:false, source, detail:'公开数据暂不可用' });
+    const totalMarketCap=Number(cg?.total_market_cap?.usd ?? cl?.total_mcap);
+    const totalVolume=Number(cg?.total_volume?.usd ?? cl?.total_volume);
+    const globalChange=Number(cg?.market_cap_change_percentage_24h_usd ?? cl?.mcap_change);
+    market.push(Number.isFinite(totalMarketCap) && totalMarketCap > 0 ? { key:'crypto-total-cap', name:'全网加密总市值', available:true, value:totalMarketCap, changePct:globalChange, source, cadence:'24h 快照' } : { key:'crypto-total-cap', name:'全网加密总市值', available:false, source, detail:'公开数据暂不可用' });
+    market.push(Number.isFinite(totalVolume) && totalVolume > 0 ? { key:'crypto-volume', name:'全网 24h 成交额', available:true, value:totalVolume, changePct:null, source, cadence:'24h 快照' } : { key:'crypto-volume', name:'全网 24h 成交额', available:false, source, detail:'公开数据暂不可用' });
+    // Full exchange-wallet balances are not available from a reliable public,
+    // keyless source.  Expose that limitation rather than showing a stale or
+    // unverifiable number from a third-party dashboard.
+    market.push({ key:'exchange-btc-reserve', name:'交易所比特币钱包余额', available:false, source:'—', detail:'需要可验证的链上数据订阅；当前未接入 Key' });
+    const result={ market, fetchedAt:now, refreshMs:FED_MARKET_SIGNALS_TTL };
+    persistMacroMarketSnapshots(market, now);
+    remember(key,result); return result;
+  });
+}
+async function fedMonitor() {
+  const calendar=await fedCalendar();
+  let signals;
+  try { signals=await fedMarketSignals(); }
+  catch { signals={ market:[], fetchedAt:Date.now(), refreshMs:FED_MARKET_SIGNALS_TTL }; }
+  return { ...calendar, marketSignals:signals.market, marketSignalsFetchedAt:signals.fetchedAt, marketSignalsRefreshMs:signals.refreshMs };
 }
 async function binanceHistory(interval, limit = 1000) {
   const rows = await request(`https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${interval}&limit=${limit}`, 8_000);
@@ -483,7 +703,9 @@ async function yahooHistory(symbol) {
   const raw = await request(`https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=2y&interval=1d&events=history`);
   const result = raw.chart?.result?.[0]; const closes = result?.indicators?.quote?.[0]?.close;
   if (!result?.timestamp || !closes) throw new Error(`${symbol} history unavailable`);
-  const candles = result.timestamp.map((time, i) => ({ time:time * 1000, close:+closes[i] })).filter(x => Number.isFinite(x.close));
+  // Yahoo occasionally appends the still-forming daily bar as null or 0.
+  // Ignore it so a transient placeholder never turns into a false -100% move.
+  const candles = result.timestamp.map((time, i) => ({ time:time * 1000, close:+closes[i] })).filter(x => Number.isFinite(x.close) && x.close > 0);
   const last = candles.at(-1)?.close, previous = candles.at(-2)?.close;
   return { candles, quote:{ last, previous } };
 }
@@ -547,13 +769,23 @@ http.createServer((req, res) => requestTiming.run({ started:performance.now(), u
     const now = Date.now();
     json(res, 200, {
       sources, cacheEntries: cache.size, storage:storageStatus(), now,
-      refreshPolicy:{ quoteMs:1_000, marketMs:MARKET_TTL, contextMs:CONTEXT_TTL, historyMs:HISTORY_TTL },
+      refreshPolicy:{ quoteMs:1_000, marketMs:MARKET_TTL, contextMs:CONTEXT_TTL, historyMs:HISTORY_TTL, sentimentMs:SENTIMENT_TTL, fedCalendarMs:FED_CALENDAR_TTL },
       websocket:{ provider:'OKX', status:okxStream.status, tickerAgeMs:streamAge(okxStream.tickerAt, now), messageAgeMs:streamAge(okxStream.lastMessageAt, now), contextAgeMs:streamAge(okxStream.contextAt, now), reconnects:okxStream.reconnects, lastError:okxStream.lastError }
     }); return;
   }
   if (url.pathname === '/api/market-context') {
     try { json(res, 200, await marketContext(url.searchParams.get('source') || 'okx')); }
     catch (e) { json(res, 503, { error:'Market context unavailable', detail:e.message }); }
+    return;
+  }
+  if (url.pathname === '/api/sentiment') {
+    try { json(res, 200, await fearGreedSentiment()); }
+    catch (e) { json(res, 503, { error:'Fear and Greed Index unavailable', detail:e.message }); }
+    return;
+  }
+  if (url.pathname === '/api/fed-calendar') {
+    try { json(res, 200, await fedMonitor()); }
+    catch (e) { json(res, 503, { error:'Federal Reserve calendar unavailable', detail:e.message }); }
     return;
   }
   if (url.pathname === '/api/forecast-history') {

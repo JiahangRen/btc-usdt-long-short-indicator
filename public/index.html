@@ -1,10 +1,11 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BTC/USDT 多空指标指示器</title><link rel="icon" type="image/svg+xml" href="/btc-indicator-mark.svg?v=1.4.5"><link rel="stylesheet" href="/styles.css?v=20260825-1340"></head><body>
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BTC/USDT 多空指标指示器</title><link rel="icon" type="image/svg+xml" href="/btc-indicator-mark.svg?v=2.0.0"><link rel="stylesheet" href="/styles.css?v=20260829-v200"></head><body>
 <main><header><div><h1>BTC/USDT 多空指标指示器</h1><p>数据透明 · 按需加载 · 非投资建议</p></div><div class="controls"><label>优先源 <select id="source"><option value="okx" selected>OKX</option><option value="coinbase">Coinbase</option><option value="binance">Binance</option><option value="gate">Gate</option></select></label><button id="refresh">刷新</button></div></header>
 <section class="status"><span id="connection">正在获取首屏数据…</span><span id="freshness"></span></section>
 <section class="hero"><div><span class="muted">BTC / USDT</span><strong id="price">--</strong><span id="change">--</span></div><div class="meta"><span>24h 开盘 <b id="open24">--</b></span><span>24h 高/低 <b id="highlow">--</b></span><span>数据源 <b id="sourceUsed">--</b></span></div></section>
 <section class="card"><div class="toolbar"><div id="intervals"></div><div id="ranges"></div></div><div class="chart-box"><canvas id="chart"></canvas><div id="chartError" hidden></div></div><div class="chart-caption" id="coverage">--</div></section>
 <section class="grid"><article class="card"><h2>当前规则信号</h2><div class="signal" id="signal">--</div><p id="signalReason">等待有效 K 线数据。</p><div class="levels"><span>ATR 止损 <b id="sl">--</b></span><span>ATR 止盈 <b id="tp">--</b></span></div></article><article class="card"><h2>指标明细</h2><div id="indicators" class="metrics"></div></article></section>
+<section id="fearGreedGauge" class="card fear-greed-gauge-card" hidden></section>
 <section class="card optional"><div><h2>多周期共振</h2><p>仅在点击后请求额外 4 个周期。</p></div><button id="loadResonance">计算共振</button><div id="resonance">尚未计算</div></section>
 <section class="card"><h2>研究型回测</h2><p class="muted">基于同一规则的历史演示；未包含手续费、滑点、资金费率，不能代表未来收益。</p><div id="backtest" class="metrics">加载图表后计算。</div></section>
 <section class="card"><h2>数据诊断</h2><pre id="diagnostics">--</pre></section>
-</main><script src="/app.js?v=20260827-exchange-strip"></script></body></html>
+</main><script src="/app.js?v=20260829-v200"></script></body></html>

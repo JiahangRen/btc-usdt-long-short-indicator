@@ -55,7 +55,7 @@ html[data-theme="light"]{--bg-base:#f5f7fa;--bg-surface:#fff;--bg-surface-2:#eef
 .metric .help-dot,.change-card .help-dot,.card h2 .help-dot{display:inline-grid!important;width:16px!important;height:16px!important;min-width:16px!important;margin:0 0 0 6px!important;padding:0!important;border:1px solid var(--accent-cyan)!important;vertical-align:0!important;line-height:1!important;overflow:visible!important}.card:has(.help-dot),.side-stack .card,.optional{overflow:visible}.help-dot:after{max-height:none!important;overflow:visible!important}.chart-point-price{display:block;padding:7px 9px;border:1px solid rgba(255,255,255,.26);border-left:3px solid var(--accent-cyan);border-radius:5px;background:rgba(0,212,170,.10);color:#fff;font:800 16px "SF Mono",monospace;letter-spacing:-.3px}.micro-direction small b{color:var(--accent-cyan);font-weight:700}
 #chartTooltip .chart-live-price{display:block;padding:5px 7px;border-radius:5px;background:rgba(110,138,178,.12);font:700 12px "SF Mono",monospace;color:var(--text-primary)}#chartTooltip .chart-live-price i{margin-left:5px;font-style:normal}.chart-box{overflow:visible!important}#selectionOverlay{position:absolute;z-index:7;left:14px;right:84px;bottom:12px;display:flex;flex-wrap:wrap;align-items:center;gap:7px;padding:9px 10px;border:1px solid rgba(117,183,255,.65);border-radius:8px;background:rgba(16,27,41,.94);box-shadow:0 8px 22px rgba(0,0,0,.3);backdrop-filter:blur(12px);font:11px "SF Mono",monospace;color:var(--text-secondary);pointer-events:none}#selectionOverlay[hidden]{display:none}#selectionOverlay>b{color:#dceaff}#selectionOverlay span{white-space:nowrap}#selectionOverlay em{font-style:normal;font-weight:700}#selectionOverlay .high{color:#ffcb65}#selectionOverlay .low{color:#52d5f4}#selectionOverlay i{font-style:normal}.levels .help-dot,.toolbar .help-dot{display:inline-grid!important;align-self:center;width:15px!important;height:15px!important;min-width:15px!important;margin-left:6px!important;padding:0!important}.res-chip{display:inline-flex;align-items:center;gap:7px;margin:3px 5px 3px 0;padding:6px 8px;border:1px solid var(--border-subtle);border-radius:7px;background:var(--bg-surface-2);font:12px "SF Mono",monospace}.res-chip b{color:var(--text-secondary)}.res-chip em{font-style:normal;font-weight:700}.res-chip small{color:var(--text-muted);font-size:10px}.res-chip.bull{border-color:rgba(0,212,170,.4);background:rgba(0,212,170,.10)}.res-chip.bear{border-color:rgba(255,77,106,.4);background:rgba(255,77,106,.10)}.res-chip.flat{border-color:rgba(154,164,178,.4)}.horizon-forecasts{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:10px;padding-top:10px;border-top:1px solid rgba(111,143,184,.2)}.horizon-forecasts>span{font-size:10px;color:var(--text-muted)}.horizon-forecasts article{display:grid;gap:3px;padding:8px;border-radius:7px;background:rgba(3,12,23,.34);border:1px solid rgba(75,159,255,.22)}.horizon-forecasts small{color:var(--text-secondary);font-size:10px}.horizon-forecasts b{font:800 15px "SF Mono",monospace}.horizon-forecasts span{font-size:10px;color:var(--text-muted)}
 header h1{font-size:30px!important;font-weight:800;letter-spacing:-.9px;color:#f3f7ff;text-shadow:0 1px 18px rgba(80,151,255,.16)}header h1::first-letter{color:var(--accent-cyan)}@media(max-width:680px){header h1{font-size:23px!important}#selectionOverlay{left:8px;right:8px;bottom:8px;font-size:10px}.horizon-forecasts{grid-template-columns:1fr}}
-#exchangeMeta{display:none;gap:6px;min-width:min(100%,720px);margin-left:auto}#exchangeMeta:not(:empty){display:grid}.exchange-row{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:0 13px;padding:7px 9px;border:1px solid var(--border-subtle);border-radius:7px;background:var(--bg-surface-2);font:11px "SF Mono",monospace;color:var(--text-secondary)}.exchange-row>b{min-width:57px;color:var(--text-primary)}.exchange-row span{white-space:nowrap}.exchange-row em{font-style:normal;font-weight:800}.hero{align-items:flex-start}.hero>div:first-child{min-width:300px}header p b{color:var(--accent-cyan);font:700 11px "SF Mono",monospace}@media(max-width:1024px){#exchangeMeta{width:100%;margin:8px 5px 0}.hero{flex-wrap:wrap}}@media(max-width:680px){.exchange-row{justify-content:flex-start;gap:5px 9px;font-size:10px}.hero>div:first-child{min-width:0}}
+#exchangeMeta{display:none;flex:1 1 360px;min-width:280px;max-width:560px;gap:5px;margin-left:auto}#exchangeMeta:not(:empty){display:grid}.exchange-row{display:flex;justify-content:flex-start;flex-wrap:wrap;gap:3px 9px;padding:6px 8px;border:1px solid var(--border-subtle);border-radius:7px;background:var(--bg-surface-2);font:10px/1.25 "SF Mono",monospace;color:var(--text-secondary);min-width:0}.exchange-row>b{min-width:48px;color:var(--text-primary)}.exchange-row span{min-width:0;white-space:normal;overflow-wrap:anywhere}.exchange-row em{font-style:normal;font-weight:800}.hero{align-items:flex-start}.hero>div:first-child{min-width:300px}header p b{color:var(--accent-cyan);font:700 11px "SF Mono",monospace}@media(max-width:1024px){#exchangeMeta{flex-basis:100%;width:100%;max-width:none;margin:8px 5px 0}.hero{flex-wrap:wrap}}@media(max-width:680px){.exchange-row{justify-content:flex-start;gap:5px 9px;font-size:10px}.hero>div:first-child{min-width:0}}
 .optional{display:grid;grid-template-columns:minmax(290px,1fr) 158px minmax(540px,auto);align-items:center;gap:18px}.optional>button{width:158px;min-width:158px;justify-self:center;white-space:nowrap}.optional>#resonance{min-width:0;justify-self:end}.chart-periods #changeTags small{font-size:10px;letter-spacing:0;color:var(--text-muted)}
 .price-digit{display:inline-block;min-width:.6ch}.price-digit.changed-up{animation:digit-flash-up 950ms ease-out}.price-digit.changed-down{animation:digit-flash-down 950ms ease-out}@keyframes digit-flash-up{0%{color:#00d4aa;text-shadow:0 0 18px rgba(0,212,170,.9);transform:translateY(-1px)}100%{color:inherit;text-shadow:none;transform:none}}@keyframes digit-flash-down{0%{color:#ff4d6a;text-shadow:0 0 18px rgba(255,77,106,.85);transform:translateY(-1px)}100%{color:inherit;text-shadow:none;transform:none}}
 #priceSource{margin-left:7px;color:var(--text-muted);font:10px "SF Mono",monospace;letter-spacing:0}
@@ -140,6 +140,22 @@ main>header>div:first-child{display:grid;grid-template-columns:48px minmax(0,1fr
 .connectivity-row strong{display:grid;justify-items:end;font:800 10px "SF Mono",monospace;line-height:1.35;white-space:nowrap}.connectivity-row strong small{color:var(--text-muted);font:8.5px "SF Mono",monospace}.connectivity-row.good strong>span{color:var(--bull)}.connectivity-row.warn strong>span{color:var(--warn)}.connectivity-row.bad strong>span{color:var(--bear)}
 #fullscreenToggle{min-width:72px;white-space:nowrap}
 
+/* The fear-and-greed gauge is a slow-moving context panel.  Keep the
+   compact indicator row hidden so sentiment has one clear visual home. */
+.sentiment-indicator{display:none!important}
+.fear-greed-gauge-card{grid-column:1/-1;padding:24px 28px 20px;overflow:hidden}
+.fear-greed-head{display:flex;align-items:flex-start;justify-content:space-between;gap:18px}.fear-greed-head h2{margin:0}.fear-greed-head p{margin:7px 0 0;color:var(--text-muted)}.fear-greed-head>span{font:700 12px "SF Mono",monospace;color:var(--text-muted);padding:7px 10px;border:1px solid var(--border);border-radius:999px;white-space:nowrap}
+.fear-greed-layout{display:grid;grid-template-columns:minmax(320px,1.1fr) minmax(250px,.9fr);align-items:center;gap:26px;margin-top:6px}.fear-greed-dial{position:relative;max-width:470px;margin:auto;width:100%}.fear-greed-dial svg{display:block;width:100%;height:auto}.fear-greed-arc{fill:none;stroke:url(#fearGreedGradient);stroke-width:7;stroke-linecap:round}.fear-greed-tick{stroke:#617080;stroke-width:2;opacity:.85}.fear-greed-tick.major{stroke:#d7e1ed;stroke-width:3}.fear-greed-pointer{stroke:#f5f8fc;stroke-width:4;stroke-linecap:round;filter:drop-shadow(0 2px 3px rgba(0,0,0,.45))}.fear-greed-hub{fill:#f7fbff;stroke:#273b52;stroke-width:3}.fear-greed-reading{position:absolute;left:50%;top:58%;transform:translate(-50%,-50%);display:grid;justify-items:center;gap:3px}.fear-greed-reading strong{font:800 48px "SF Mono",monospace;letter-spacing:-2px;color:#f2f6fb}.fear-greed-reading b{font-size:21px}.fear-greed-gauge-card.bull .fear-greed-reading b{color:var(--bull)}.fear-greed-gauge-card.bear .fear-greed-reading b{color:var(--bear)}.fear-greed-gauge-card.flat .fear-greed-reading b{color:var(--warn)}
+.fear-greed-summary{display:grid;gap:0;border:1px solid var(--border);border-radius:14px;overflow:hidden;background:rgba(255,255,255,.015)}.fear-greed-summary div{display:flex;align-items:center;justify-content:space-between;padding:11px 14px;border-bottom:1px solid var(--border);gap:10px}.fear-greed-summary div:last-child{border-bottom:0}.fear-greed-summary span{color:var(--text-muted);font-weight:700}.fear-greed-summary b{font:700 12px "SF Mono",monospace;color:var(--text)}.fear-greed-gauge-card footer{border-top:1px solid var(--border);padding-top:14px;color:var(--text-muted);font-size:13px;line-height:1.55}.fear-greed-gauge-card footer em{font-style:normal;color:var(--text);font-weight:700;white-space:nowrap}
+html[data-theme="light"] .fear-greed-reading strong{color:#1d2b3b}@media(prefers-color-scheme:light){html[data-theme="auto"] .fear-greed-reading strong{color:#1d2b3b}}
+@media(max-width:760px){.fear-greed-gauge-card{padding:20px 16px}.fear-greed-head{display:block}.fear-greed-head>span{display:inline-block;margin-top:10px}.fear-greed-layout{grid-template-columns:1fr;gap:12px}.fear-greed-dial{max-width:390px}.fear-greed-summary{grid-template-columns:1fr 1fr}.fear-greed-summary div:nth-last-child(1){grid-column:1/-1}.fear-greed-summary div:nth-child(odd){border-right:1px solid var(--border)}}
+
+.fed-monitor-card{padding:22px 28px}.fed-monitor-head{display:flex;justify-content:space-between;align-items:flex-start;gap:18px}.fed-monitor-head h2{margin:0}.fed-monitor-head p{margin:7px 0 0;color:var(--text-muted)}.fed-monitor-head>span{font:700 12px "SF Mono",monospace;color:var(--text-muted);padding:7px 10px;border:1px solid var(--border);border-radius:999px;white-space:nowrap}.fed-event-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:17px}.fed-event{padding:14px 15px;border:1px solid var(--border);border-radius:12px;background:rgba(255,255,255,.015);display:grid;gap:6px}.fed-event.near{border-color:rgba(255,190,71,.65);box-shadow:inset 3px 0 0 var(--warn)}.fed-event span{font-weight:800;color:var(--text-muted)}.fed-event b{font:800 17px "SF Mono",monospace;color:var(--text)}.fed-event strong{font-size:14px;color:var(--bull)}.fed-event.near strong{color:var(--warn)}.fed-event small{color:var(--text-muted)}.fed-monitor-card footer{margin-top:15px;padding-top:12px;border-top:1px solid var(--border);font-size:13px;color:var(--text-muted)}.fed-monitor-card footer em{font-style:normal;margin-left:8px;font-weight:700;color:var(--text)}
+@media(max-width:760px){.fed-monitor-card{padding:20px 16px}.fed-monitor-head{display:block}.fed-monitor-head>span{display:inline-block;margin-top:10px}.fed-event-grid{grid-template-columns:1fr}.fed-event{grid-template-columns:1fr auto}.fed-event small{grid-column:1/-1}}
+
+.fed-market-panel{margin:19px 0 15px;padding:16px 0 0;border-top:1px solid var(--border-subtle)}.fed-market-panel>div:first-child{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:10px}.fed-market-panel h3{margin:0;font-size:15px;color:var(--text-primary)}.fed-market-panel>div:first-child>span{color:var(--text-muted);font-size:11px}.fed-market-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.fed-market-signal{display:grid;grid-template-columns:1fr auto;align-items:baseline;gap:5px 10px;padding:13px 14px;border:1px solid var(--border-subtle);border-radius:10px;background:var(--bg-surface-2)}.fed-market-signal>span{color:var(--text-secondary);font-weight:700}.fed-market-signal>b{font:800 14px "SF Mono",monospace}.fed-market-signal>strong{grid-column:1/-1;color:var(--text-primary);font:800 20px "SF Mono",monospace;letter-spacing:-.7px}.fed-market-signal small{grid-column:1/-1;color:var(--text-muted);font-size:10px}.fed-market-signal.unavailable{opacity:.8}.fed-market-signal.unavailable strong{font:700 15px ui-sans-serif,system-ui,sans-serif;letter-spacing:0}.fed-market-signal.unavailable small{line-height:1.35}
+@media(max-width:980px){.fed-market-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:560px){.fed-market-panel>div:first-child{display:block}.fed-market-panel>div:first-child>span{display:block;margin-top:5px}.fed-market-grid{grid-template-columns:1fr}.fed-market-signal>strong{font-size:19px}}
+
 /* Light theme readability: override only the earlier dark-surface literals.
    Dark mode keeps its existing palette and contrast unchanged. */
 html[data-theme="light"] .card h2,
@@ -212,4 +228,371 @@ html[data-theme="light"] .range-extreme{background:rgba(20,32,48,.96)!important}
   html[data-theme="auto"] #chartTooltip .chart-live-price .bear{color:#ff8193}
   html[data-theme="auto"] #selectionOverlay b{color:#18314d}
   html[data-theme="auto"] .range-extreme{background:rgba(20,32,48,.96)!important}
+}
+
+/* Personal entry price: a quote-like display until its number is double-clicked. */
+.personal-entry-card{flex:1 1 250px;min-width:220px;display:grid;align-content:center;gap:4px;padding:7px 18px;border-left:1px solid var(--border-subtle);font-family:"SF Mono","JetBrains Mono",monospace}.personal-entry-heading{display:flex;align-items:center;gap:9px;color:var(--text-secondary);font:700 11px ui-sans-serif,system-ui,sans-serif;letter-spacing:.08em;text-transform:uppercase}.personal-side-picker{display:inline-flex;gap:2px;padding:2px;border:1px solid var(--border-subtle);border-radius:999px;font-style:normal}.personal-side-picker button{min-height:0;padding:2px 6px;border:0!important;border-radius:999px;background:transparent!important;color:var(--text-muted)!important;font:700 9px ui-sans-serif,system-ui,sans-serif;letter-spacing:0;box-shadow:none!important}.personal-side-picker button.active[data-entry-side="long"]{background:rgba(0,212,170,.16)!important;color:var(--bull)!important}.personal-side-picker button.active[data-entry-side="short"]{background:rgba(255,77,106,.16)!important;color:var(--bear)!important}.personal-entry-value{justify-self:start;min-height:0;padding:0;border:0!important;background:transparent!important;border-radius:0;color:var(--text-primary)!important;font:800 26px/1.08 "SF Mono","JetBrains Mono",monospace;letter-spacing:-1.3px;cursor:text;box-shadow:none!important}.personal-entry-value:hover{color:var(--accent-cyan)!important}.personal-entry-card>small{color:var(--text-muted);font:11px/1.25 ui-sans-serif,system-ui,sans-serif}.personal-entry-card>b{font:800 15px/1.2 "SF Mono","JetBrains Mono",monospace}.personal-entry-card>b i{margin-right:6px;font:700 10px ui-sans-serif,system-ui,sans-serif;letter-spacing:.02em}.personal-entry-card>b em{font:inherit;font-style:normal;margin-left:5px}.personal-entry-card.profit>b{color:var(--bull)}.personal-entry-card.loss>b{color:var(--bear)}.personal-entry-card.empty .personal-entry-value{color:var(--text-muted)!important}.personal-entry-card input{width:100%;min-width:0;padding:5px 0 6px;border:0;border-bottom:2px solid var(--accent-cyan);border-radius:0;background:transparent;color:var(--text-primary);outline:0;font:800 26px/1.08 "SF Mono","JetBrains Mono",monospace;letter-spacing:-1.3px}.personal-entry-card input::placeholder{font-size:14px;letter-spacing:0;color:var(--text-muted)}
+@media(max-width:1320px){.personal-entry-card{order:3;max-width:none;border-left:0;border-top:1px solid var(--border-subtle);padding:12px 4px 0}.hero{align-items:flex-start}}
+@media(max-width:680px){.personal-entry-card{min-width:0;flex-basis:100%}.personal-entry-value,.personal-entry-card input{font-size:26px}}
+
+/* Keep the live quote on one visual line at desktop widths; its metadata is
+   intentionally compact so it no longer breaks the amount into two rows. */
+@media(min-width:1321px){.hero>div:first-child{min-width:530px}.hero #change{flex-wrap:nowrap;white-space:nowrap;font-size:18px;gap:9px}.hero #change .change-pct{font-size:16px}#priceTime,#priceSource{font-size:9px}}
+.personal-entry-value,.personal-entry-card input{font-size:23px;letter-spacing:-1.1px}.personal-entry-card>b{font-size:14px}.personal-entry-card>b i{font-size:9px}
+@media(max-width:680px){.personal-entry-value,.personal-entry-card input{font-size:23px}}
+.personal-entry-price-row{display:flex;align-items:baseline;gap:8px;min-width:0}.personal-entry-status{font:700 10px ui-sans-serif,system-ui,sans-serif;font-style:normal;letter-spacing:.02em;white-space:nowrap}.personal-entry-card.profit .personal-entry-status{color:var(--bull)}.personal-entry-card.loss .personal-entry-status{color:var(--bear)}
+
+/* Phone-first reading order and touch layout.  Desktop composition deliberately
+   stays untouched; these rules activate only for handset-width screens. */
+@media(max-width:760px){
+  main{padding:14px 12px 30px;overflow:hidden}
+  header{display:grid;gap:11px;padding:0 2px 13px}
+  header h1{font-size:18px;line-height:1.2}
+  header p{margin-top:4px;font-size:10px}
+  .controls{width:100%;display:flex;align-items:stretch;gap:6px;padding:7px;border-radius:10px}
+  .controls label{flex:1 1 120px;min-width:120px}.controls select{width:100%;min-height:36px}
+  .controls button{min-height:36px;padding:7px 9px;font-size:11px}
+  .controls #langToggle{min-width:52px}.controls #themeToggle{min-width:68px}.controls #fullscreenToggle{min-width:60px}
+  #appVersion{order:-1;font-size:10px;padding:5px 7px}
+  #marketClocks{margin:0 2px 9px;line-height:1.4}
+  .hero{display:grid;gap:13px;padding:13px 3px 16px}
+  .hero .muted{font-size:10px}.hero strong{font-size:36px;letter-spacing:-1.8px}
+  .hero #change{margin-top:7px;font-size:18px;gap:8px}.hero #change .change-pct{font-size:15px}
+  .personal-entry-card{order:0;padding:11px 0 0;border-top:1px solid var(--border-subtle);border-left:0}
+  #exchangeMeta{order:2;max-width:none;min-width:0;width:100%;margin-top:0}
+  .exchange-row{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 9px;padding:7px 0;font-size:10px;line-height:1.35}
+  .exchange-row span{overflow-wrap:anywhere}.exchange-row span:first-child{grid-column:1/-1}
+  .terminal-layout.mobile-reading-layout{display:flex;flex-direction:column;gap:14px;margin:0}
+  .terminal-layout.mobile-reading-layout>.card{width:100%;margin:0}
+  .terminal-layout.mobile-reading-layout>.side-stack[hidden]{display:none}
+  #ruleSignalCard{padding:16px}.side-stack .card:first-child{min-height:0}
+  #ruleSignalCard .signal{font-size:34px}.signal-gauge{margin-top:11px}
+  .levels{display:grid;grid-template-columns:1fr 1fr;gap:10px}.levels span:last-child{text-align:right}
+  .chart-box{height:min(56vh,355px);min-height:285px;margin:0 -5px;border-radius:8px}
+  .toolbar{display:block;margin-bottom:9px}.toolbar #intervals,.toolbar #ranges{display:flex;max-width:100%;overflow-x:auto;flex-wrap:nowrap;scrollbar-width:none;overscroll-behavior-x:contain}
+  .toolbar #intervals::-webkit-scrollbar,.toolbar #ranges::-webkit-scrollbar{display:none}
+  .toolbar #intervals button,.toolbar #ranges button{flex:0 0 auto;min-height:36px;padding:7px 10px}
+  .toolbar #ranges{margin-top:7px}.toolbar .control-label{flex:0 0 auto}
+  .zoom-tools{width:100%;margin:8px 0 0!important;justify-content:flex-end}.zoom-tools button{min-height:34px!important}
+  .chart-caption{padding-top:10px;line-height:1.55}
+  #indicatorDetailsCard{margin:14px 0 0;padding:16px}
+  #indicators.indicator-adaptive-grid .compact-indicator{padding:10px 0}
+  #periodChangeCard{margin:14px 0 0;padding:16px}
+  .forecast-card,.optional,.correlation-card,.leverage-card,.fed-monitor-card,.fear-greed-gauge-card{margin-top:14px!important}
+  .forecast-head,.fed-monitor-head{display:block}.forecast-head button{margin-top:11px;width:100%;min-height:40px}
+  .forecast-grid{gap:7px}.forecast-item{padding:9px}.forecast-item b{font-size:14px}
+  .optional{display:grid;gap:10px}.optional button{width:100%;min-height:40px}
+  .pattern-head{display:block!important}.pattern-state{display:block;margin-top:10px;white-space:normal!important;line-height:1.45}
+  .pattern-grid,.pattern-levels{grid-template-columns:1fr!important}.pattern-grid article,.pattern-levels span{min-width:0}
+  .fed-market-grid{grid-template-columns:1fr}.fed-event-grid{grid-template-columns:1fr}
+  .fear-greed-reading strong{font-size:42px}.fear-greed-reading b{font-size:18px}
+  .backtest-details summary{padding:14px;font-size:13px}.correlation-output,.index-ticker-cards{grid-template-columns:1fr}
+  .leverage-grid{overflow-x:auto}.lev-row{min-width:510px}
+  footer{font-size:10px;line-height:1.55}
+}
+
+/* On wide desktop screens, keep the header and the two-column dashboard on
+   one shared edge-to-edge canvas instead of stopping the dashboard at an
+   earlier max-width and leaving a detached dark strip on the right. */
+@media(min-width:1025px){
+  main{width:calc(100% - 48px)!important;max-width:none!important;padding-left:0!important;padding-right:0!important}
+  main>header,.terminal-layout,#periodChangeCard,.pattern-analysis-card{max-width:none!important}
+}
+
+.fear-greed-unavailable{display:grid;gap:7px;min-height:150px;place-content:center;padding:18px;border:1px dashed var(--border-strong);border-radius:10px;background:var(--bg-surface-2);text-align:center}
+.fear-greed-unavailable b{color:var(--text-primary);font-size:16px}.fear-greed-unavailable p{max-width:420px;margin:0;color:var(--text-secondary);line-height:1.55}
+
+/* A resizable browser often lands between phone and desktop widths.  Treat
+   that range as a readable single-column dashboard rather than squeezing the
+   chart, signal and indicator cards into a horizontal overflow strip. */
+/* Prevent the detailed-indicator grid from imposing a fixed minimum width on
+   the right column when labels and values are both present. */
+#indicatorDetailsCard,#indicatorDetailsCard .metrics,#indicatorDetailsCard #indicators{min-width:0}
+#indicatorDetailsCard .metric{min-width:0}
+#indicatorDetailsCard .metric b{min-width:0;overflow:hidden;text-overflow:ellipsis}
+
+@media(max-width:1800px){
+  html,body{max-width:100%;overflow-x:hidden}
+  main{width:100%!important;max-width:none!important;padding:18px 16px 30px!important}
+  main>header{display:grid;grid-template-columns:minmax(0,1fr);gap:11px;border-radius:28px;padding:12px 14px!important}
+  main>header>div:first-child{min-width:0}
+  main>header .controls{width:100%;max-width:100%;flex-wrap:wrap!important;justify-content:flex-start;gap:7px}
+  main>header .controls label{flex:0 1 auto}
+  .hero{flex-wrap:wrap;gap:12px}.hero>div:first-child{min-width:0!important}
+  #exchangeMeta{flex:1 1 100%;width:100%;max-width:none;margin-left:0}
+  .terminal-layout{grid-template-columns:minmax(0,1fr)!important;gap:14px}
+  .terminal-layout>.side-stack{grid-template-columns:minmax(0,1fr)!important;height:auto!important}
+  .terminal-layout>.side-stack>.card{min-width:0!important}
+  .terminal-layout>.side-stack>.card:first-child,.terminal-layout>.side-stack>.card:nth-child(2){min-height:0!important;height:auto!important}
+  .chart-box{height:440px}
+}
+@media(max-width:760px){
+  .chart-box{height:315px}
+  main>header .controls button,main>header .controls select{font-size:12px}
+}
+@media(max-width:390px){
+  main{padding-inline:10px}.hero strong{font-size:33px}.controls{gap:5px}.controls button{padding-inline:7px}
+  #ruleSignalCard .signal{font-size:31px}.chart-box{height:295px;min-height:270px}
+  .personal-entry-value,.personal-entry-card input{font-size:21px}.personal-entry-card>b{font-size:13px}
+}
+
+/* Public OKX derivatives evidence gets its own card rather than being mixed
+   into the technical-indicator list. */
+.okx-microstructure-card{margin-top:18px;padding:20px 22px}
+.microstructure-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px}
+.microstructure-head h2{margin:0}.microstructure-head p{margin:6px 0 0;color:var(--text-muted);font-size:11px;line-height:1.45}
+.microstructure-head>span{flex:0 0 auto;padding:6px 8px;border:1px solid rgba(34,211,238,.32);border-radius:999px;color:var(--accent-cyan);font:700 10px "SF Mono",monospace}
+.microstructure-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:9px;margin-top:15px}
+.microstructure-item{position:relative;display:grid;gap:6px;min-width:0;padding:12px;border:1px solid var(--border-subtle);border-radius:9px;background:var(--bg-surface-2)}
+.microstructure-item>div{display:flex;align-items:center;justify-content:space-between;gap:6px}.microstructure-item span{color:var(--text-secondary);font-size:11px;font-weight:700}.microstructure-item b{min-width:0;overflow:hidden;color:var(--text-primary);font:800 14px/1.2 "SF Mono",monospace;letter-spacing:-.35px;text-overflow:ellipsis;white-space:nowrap}.microstructure-item small{min-height:29px;color:var(--text-muted);font-size:9.5px;line-height:1.4}.microstructure-item>.help-dot{position:absolute;right:9px;bottom:8px;opacity:.7}.microstructure-item.bull{border-top-color:rgba(0,212,170,.48)}.microstructure-item.bear{border-top-color:rgba(255,77,106,.48)}
+.microstructure-conclusion{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;margin-top:12px;padding:11px 13px;border:1px solid var(--border-strong);border-left:3px solid var(--text-muted);border-radius:8px;background:var(--bg-surface-2)}.microstructure-conclusion>span{color:var(--text-muted);font-size:10px}.microstructure-conclusion>b{font-size:17px;justify-self:start}.microstructure-conclusion p{grid-column:1/-1;margin:0;color:var(--text-secondary);font-size:11px;line-height:1.5}.microstructure-conclusion.bull{border-left-color:var(--bull)}.microstructure-conclusion.bull>b{color:var(--bull)}.microstructure-conclusion.bear{border-left-color:var(--bear)}.microstructure-conclusion.bear>b{color:var(--bear)}
+@media(max-width:1080px){.microstructure-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:760px){.okx-microstructure-card{margin-top:14px;padding:16px}.microstructure-head{display:block}.microstructure-head>span{display:inline-block;margin-top:9px}.microstructure-grid{grid-template-columns:1fr 1fr;gap:8px}.microstructure-item{padding:11px}.microstructure-item b{font-size:13px}.microstructure-item small{min-height:0;padding-right:12px}.microstructure-conclusion{grid-template-columns:1fr;gap:5px}.microstructure-conclusion p{font-size:10px}}
+@media(max-width:390px){.microstructure-grid{grid-template-columns:1fr}.microstructure-item small{font-size:10px}}
+
+/* Explanations are rendered in a body-level layer, so they never get clipped by
+   dashboard cards or compete with chart/canvas stacking contexts. */
+.help-dot:after{display:none!important}
+#globalHelpTooltip{position:fixed;z-index:2147483647;max-width:min(340px,calc(100vw - 24px));padding:10px 12px;border:1px solid var(--border-strong);border-radius:9px;background:rgba(20,27,37,.985);box-shadow:0 14px 34px rgba(0,0,0,.48);color:var(--text-primary);font:12px/1.55 ui-sans-serif,system-ui,sans-serif;letter-spacing:0;text-align:left;overflow-wrap:anywhere;pointer-events:none}
+#globalHelpTooltip[hidden]{display:none}
+.help-dot{position:relative!important;inset:auto!important;display:inline-grid!important;place-items:center!important;flex:0 0 auto!important;width:15px!important;height:15px!important;min-width:15px!important;margin:0 0 0 5px!important;padding:0!important;border:1px solid var(--accent-cyan)!important;border-radius:50%!important;background:transparent!important;color:var(--accent-cyan)!important;font:700 9px/1 system-ui!important;line-height:1!important;vertical-align:middle!important;opacity:1!important;transform:none!important}
+.help-dot:hover,.help-dot:focus{background:rgba(34,211,238,.12)!important;color:#dffaff!important}
+.pattern-grid small,.pattern-levels small{display:inline-flex;align-items:center;align-self:start;width:max-content;max-width:100%;white-space:nowrap}
+.microstructure-item>div>span{display:inline-flex;align-items:center;min-width:0;white-space:nowrap}
+.microstructure-item>.help-dot{position:relative!important;right:auto!important;bottom:auto!important}
+.change-card,#periodChangeCard{min-height:0!important;height:auto!important;align-content:start!important}.change-card>div,#periodChangeCard>div{min-height:0!important;align-content:start!important}
+@media(max-width:560px){
+  #globalHelpTooltip{max-width:calc(100vw - 20px);font-size:11px;line-height:1.5}
+  .microstructure-grid{grid-template-columns:1fr!important}
+  .microstructure-item{padding:12px}.microstructure-item small{min-height:0;padding-right:0;font-size:10px}
+  .microstructure-head h2{font-size:17px}.microstructure-head p{font-size:10px}
+  .microstructure-conclusion{padding:10px}.microstructure-conclusion>b{font-size:16px}
+  .chart-periods>div{grid-template-columns:repeat(2,minmax(0,1fr))!important}
+}
+
+/* Keep status badges as compact pills. They must never become narrow circles
+   or wrap their two-character labels onto separate lines. */
+.badge{display:inline-flex!important;align-items:center!important;justify-content:center!important;flex:0 0 auto!important;min-width:max-content!important;white-space:nowrap!important;line-height:1.15!important}
+.microstructure-item>div{align-items:flex-start}.microstructure-item>div>.badge{margin-top:0}
+
+/* The detail panel should end where its real content ends.  Period returns
+   follows immediately instead of inheriting the chart column's height. */
+@media(min-width:1025px){.terminal-layout{align-items:start!important}.terminal-layout>.side-stack{height:auto!important;grid-template-rows:auto auto!important}.terminal-layout>.side-stack>.card:nth-child(2){height:auto!important;min-height:0!important}.terminal-layout>.side-stack>.card:nth-child(2) .metrics{padding-bottom:0!important}}
+
+/* ATR labels keep their explanation icon beside the label rather than below
+   the calculated stop/target value. */
+.levels>span{position:relative}.levels .level-label{display:inline-flex;align-items:center;white-space:nowrap}.levels .level-label+.help-dot{margin-left:5px!important}
+
+/* Heading-level explanations are available for slow-moving sentiment and
+   market-context panels, with the same compact visual rhythm as other cards. */
+.fear-greed-head h2,.fed-monitor-head h2,.fed-market-panel h3{display:inline-flex;align-items:center;flex-wrap:wrap}.fed-market-signal>span{display:inline-flex;align-items:center;min-width:0}
+
+/* The return strip sits between the live-evidence card and pattern analysis.
+   Its cells wrap by available width rather than forcing a horizontal scroll. */
+#periodChangeCard.chart-periods{display:block!important;min-height:0!important;margin:18px 0!important;padding:17px 19px!important;border:1px solid var(--border-subtle)!important;border-radius:12px!important;background:var(--bg-surface)!important}
+#periodChangeCard.chart-periods h2{font-size:15px;margin:0 0 12px}
+#periodChangeCard.chart-periods>#changeTags{display:grid!important;grid-template-columns:repeat(auto-fit,minmax(125px,1fr));gap:8px}
+#periodChangeCard.chart-periods #changeTags span{display:grid;gap:4px;min-width:0;padding:8px 10px!important;border-radius:8px;background:var(--bg-surface-2)}
+#periodChangeCard.chart-periods #changeTags small{overflow-wrap:anywhere;line-height:1.35}
+#periodChangeCard.chart-periods #changeTags b{font-size:13px;white-space:nowrap}
+
+/* A small version dropdown keeps release notes available without consuming the
+   dashboard itself. */
+main>header .controls #appVersion{cursor:pointer;font:700 10px/1 "SF Mono",monospace}
+#versionChangelog{position:fixed;z-index:2147483646;top:76px;right:22px;width:min(340px,calc(100vw - 28px));padding:13px 15px;border:1px solid var(--border-strong);border-radius:11px;background:rgba(20,27,37,.985);box-shadow:0 16px 38px rgba(0,0,0,.48);color:var(--text-primary);font-size:12px;line-height:1.55}
+#versionChangelog[hidden]{display:none}#versionChangelog>b{color:var(--accent-cyan)}#versionChangelog ul{margin:7px 0 0;padding-left:18px;color:var(--text-secondary)}
+@media(max-width:760px){#periodChangeCard.chart-periods{margin:14px 0!important;padding:15px!important}#periodChangeCard.chart-periods>#changeTags{grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}#periodChangeCard.chart-periods #changeTags span{padding:8px!important}#versionChangelog{top:70px;right:12px;left:12px;width:auto}}
+@media(max-width:360px){#periodChangeCard.chart-periods>#changeTags{grid-template-columns:1fr}}
+
+/* Keep the header and both dashboard columns inside one shared desktop frame.
+   The right stack must not create a second, wider visual edge. */
+main{width:min(calc(100% - 48px),1520px)!important;max-width:1520px!important;margin-inline:auto!important}
+main>header,.terminal-layout{width:100%;min-width:0}
+.terminal-layout{grid-template-columns:minmax(0,1.58fr) minmax(360px,1fr)!important}
+.terminal-layout>.side-stack{width:100%;min-width:0;max-width:100%}
+
+/* Tiny evidence cards retain one-line labels and compact status pills. */
+.microstructure-item>div{display:grid!important;grid-template-columns:minmax(0,1fr) auto!important;align-items:center!important;gap:4px!important}
+.microstructure-item>div>span{min-width:0;overflow:hidden;font-size:10px!important;line-height:1.2!important;text-overflow:ellipsis}
+.microstructure-item>div>.badge{min-width:32px!important;margin:0!important;padding:3px 5px!important;font-size:9px!important;letter-spacing:0!important}
+.microstructure-item>div>span .help-dot{width:12px!important;height:12px!important;min-width:12px!important;margin-left:3px!important;font-size:7px!important}
+
+/* The horizontal return strip is always anchored directly before pattern
+   analysis, even while the right column rerenders. */
+#periodChangeCard.chart-periods{width:100%!important;clear:both;order:initial!important}
+
+@media(max-width:760px){
+  main{width:100%!important;padding-inline:12px!important}
+  .terminal-layout{grid-template-columns:1fr!important}
+  .microstructure-item>div>span{font-size:10px!important}
+}
+
+@media(min-width:1025px){
+  main{width:calc(100% - 48px)!important;max-width:none!important}
+  main>header,.terminal-layout,#periodChangeCard,.pattern-analysis-card{max-width:none!important}
+}
+
+/* Final responsive override: this must follow the desktop grid declarations
+   above so a resized browser cannot retain their two-column minimum widths. */
+#indicatorDetailsCard,#indicatorDetailsCard .metrics,#indicatorDetailsCard #indicators,#indicatorDetailsCard .metric{min-width:0}
+#indicatorDetailsCard .metric b{min-width:0;overflow:hidden;text-overflow:ellipsis}
+@media(max-width:1800px){
+  html,body{max-width:100%;overflow-x:hidden}
+  main{width:100%!important;max-width:none!important;padding:18px 16px 30px!important}
+  main>header{display:grid;grid-template-columns:minmax(0,1fr);gap:11px;border-radius:28px;padding:12px 14px!important}
+  main>header>div:first-child{min-width:0}
+  main>header .controls{width:100%;max-width:100%;flex-wrap:wrap!important;justify-content:flex-start;gap:7px}
+  main>header .controls label{flex:0 1 auto}
+  .hero{flex-wrap:wrap;gap:12px}.hero>div:first-child{min-width:0!important}
+  #exchangeMeta{flex:1 1 100%;width:100%;max-width:none;margin-left:0}
+  .terminal-layout{grid-template-columns:minmax(0,1fr)!important;gap:14px}
+  .terminal-layout>.side-stack{grid-template-columns:minmax(0,1fr)!important;height:auto!important}
+  .terminal-layout>.side-stack>.card{min-width:0!important}
+  .terminal-layout>.side-stack>.card:first-child,.terminal-layout>.side-stack>.card:nth-child(2){min-height:0!important;height:auto!important}
+  .chart-box{height:440px}
+}
+@media(max-width:760px){.chart-box{height:315px}main>header .controls button,main>header .controls select{font-size:12px}}
+
+/* Tablet / narrowed desktop: retain a compact two-card row so the sentiment
+   gauge remains near the signal instead of being pushed far below it. */
+@media(min-width:901px) and (max-width:1800px){
+  .terminal-layout>.side-stack{grid-template-columns:repeat(2,minmax(0,1fr))!important;align-items:start}
+  .terminal-layout>.side-stack>#fearGreedGauge{grid-column:1/-1}
+  .terminal-layout>.side-stack>.card{padding:clamp(14px,1.5vw,20px)}
+  #ruleSignalCard .signal{font-size:clamp(30px,3.4vw,40px)}
+  #indicatorDetailsCard .metric{font-size:clamp(11px,1.05vw,13px)}
+  #indicatorDetailsCard .metric span{font-size:clamp(9px,.9vw,11px)}
+  .fear-greed-layout{gap:clamp(14px,2vw,26px)}
+}
+@media(max-width:900px){
+  .terminal-layout>.side-stack{grid-template-columns:1fr!important}
+  .terminal-layout>.side-stack>#fearGreedGauge{grid-column:auto}
+}
+
+/* Compact sentiment card for resized desktop/tablet layouts. */
+@media(min-width:901px) and (max-width:1800px){
+  .terminal-layout>.side-stack>#fearGreedGauge{width:min(100%,720px);justify-self:start;padding:16px}
+  .fear-greed-head{align-items:start}.fear-greed-head h2{font-size:17px}.fear-greed-head p{font-size:11px}
+  .fear-greed-layout{grid-template-columns:1fr;gap:10px;max-width:560px;margin-top:4px}
+  .fear-greed-dial{max-width:310px;margin:0 auto}
+  .fear-greed-reading strong{font-size:39px}.fear-greed-reading b{font-size:17px}
+  .fear-greed-summary{grid-template-columns:repeat(5,minmax(0,1fr));gap:5px;padding:0;background:transparent}
+  .fear-greed-summary div{display:grid;gap:2px;min-width:0;padding:7px 5px;border:1px solid var(--border-subtle);border-radius:7px;background:var(--bg-surface-2)}
+  .fear-greed-summary div span{font-size:9px;line-height:1.25;overflow-wrap:anywhere}.fear-greed-summary div b{font-size:10px;white-space:nowrap}
+  .fear-greed-gauge-card footer{margin-top:11px;font-size:10px;line-height:1.45}
+}
+
+/* Restore the familiar chart-left / information-right dashboard as soon as
+   there is enough real space for it.  Below this breakpoint the rules above
+   keep all cards beneath the chart instead. */
+@media(min-width:1300px){
+  .terminal-layout{grid-template-columns:minmax(0,1.58fr) minmax(430px,.92fr)!important;align-items:start!important}
+  .terminal-layout>.side-stack{grid-template-columns:minmax(0,1fr)!important;align-items:start}
+  .terminal-layout>.side-stack>#fearGreedGauge{grid-column:auto;width:100%;max-width:none;justify-self:stretch}
+  .terminal-layout>.side-stack>#fearGreedGauge .fear-greed-layout{grid-template-columns:1fr;max-width:none}
+  .terminal-layout>.side-stack>#fearGreedGauge .fear-greed-dial{max-width:280px}
+  .terminal-layout>.side-stack>#fearGreedGauge .fear-greed-summary{grid-template-columns:repeat(2,minmax(0,1fr));width:100%}
+  .terminal-layout>.side-stack>#fearGreedGauge .fear-greed-summary div:last-child{grid-column:1/-1}
+}
+
+/* Restored dashboard behaviour: the desktop view remains a stable left/right
+   workspace.  Only tablet and phone widths switch to the reading flow. */
+@media(min-width:1025px){
+  main{width:min(calc(100% - 48px),1360px)!important;max-width:1360px!important;padding:20px 30px 32px!important}
+  main>header,.terminal-layout{width:100%;min-width:0}
+  .terminal-layout{grid-template-columns:minmax(0,1.45fr) minmax(430px,1fr)!important;align-items:start!important}
+  .terminal-layout>.side-stack{grid-template-columns:1fr!important;align-items:start}
+  .terminal-layout>.side-stack>#fearGreedGauge{grid-column:auto;width:100%;max-width:none;justify-self:stretch}
+}
+@media(max-width:1024px){
+  main{width:100%!important;max-width:none!important;padding:18px 16px 30px!important}
+  .terminal-layout{grid-template-columns:1fr!important}
+  .terminal-layout>.side-stack{grid-template-columns:1fr!important}
+}
+
+/* Wide desktop: actions belong to the far end of the title bar, while the
+   exchange comparison remains aligned to the far end of the price row. */
+@media(min-width:1200px){
+  main>header{display:flex!important;align-items:center!important;justify-content:space-between!important;gap:20px}
+  main>header .controls{width:auto!important;max-width:none!important;margin-left:auto;flex-wrap:nowrap!important;justify-content:flex-end!important}
+  .hero{display:flex!important;align-items:center!important;flex-wrap:nowrap!important}
+  #exchangeMeta{flex:0 1 720px!important;width:min(55%,720px)!important;max-width:720px!important;margin-left:auto!important}
+}
+
+/* Desktop price strip: keep the quote, personal position and venue quotes in
+   distinct columns.  This prevents the personal-card helper text from ever
+   entering the live-price column, and anchors the venue rows to the right. */
+@media(min-width:1200px){
+  .hero{
+    display:grid!important;
+    grid-template-columns:minmax(280px,.95fr) minmax(230px,280px) minmax(410px,1.1fr);
+    align-items:center!important;
+    column-gap:16px;
+    row-gap:0;
+  }
+  .hero>div:first-child{min-width:0!important}
+  .personal-entry-card{
+    min-width:0!important;
+    width:100%;
+    max-width:none!important;
+    align-self:stretch;
+    overflow:hidden;
+    border-top:0!important;
+    border-left:1px solid var(--border-subtle)!important;
+    padding:8px 16px!important;
+  }
+  .personal-entry-card>small{
+    align-self:end;
+    white-space:normal;
+    overflow-wrap:anywhere;
+  }
+  #exchangeMeta{
+    width:100%!important;
+    min-width:0!important;
+    max-width:720px!important;
+    margin-left:0!important;
+    justify-self:end;
+    align-self:center;
+  }
+  .exchange-row{justify-content:flex-end;text-align:right}
+}
+@media(min-width:1200px) and (max-width:1320px){
+  .hero{grid-template-columns:minmax(260px,.9fr) minmax(220px,250px) minmax(390px,1.05fr);column-gap:12px}
+  .personal-entry-card{padding-inline:12px!important}
+  .personal-entry-card>small{font-size:10px}
+  .exchange-row{gap:3px 6px;padding-inline:6px;font-size:9px}
+}
+
+/* Period returns live inside the OKX panel. Their own grid wraps as needed,
+   while their parent stays in one predictable place during live refreshes. */
+.okx-microstructure-card{display:flex;flex-direction:column}
+.okx-microstructure-card>#periodChangeCard.chart-periods{
+  display:block!important;
+  width:100%!important;
+  margin:auto 0 0!important;
+  padding:15px 0 0!important;
+  border:0!important;
+  border-top:1px solid var(--border-subtle)!important;
+  border-radius:0!important;
+  background:transparent!important;
+}
+.okx-microstructure-card>#periodChangeCard.chart-periods h2{font-size:14px;margin:0 0 10px}
+.okx-microstructure-card>#periodChangeCard.chart-periods>#changeTags{grid-template-columns:repeat(auto-fit,minmax(112px,1fr));gap:7px}
+
+/* Scale the sentiment gauge from the width of its actual side column. This
+   avoids abrupt full-page layout switches when the browser is resized. */
+.terminal-layout>.side-stack{container-type:inline-size}
+@container (max-width:620px){
+  #fearGreedGauge{padding:clamp(14px,3cqw,20px)!important}
+  #fearGreedGauge .fear-greed-dial{max-width:min(280px,82cqw)!important}
+  #fearGreedGauge .fear-greed-summary{grid-template-columns:repeat(2,minmax(0,1fr))!important}
+  #fearGreedGauge .fear-greed-summary div:last-child{grid-column:1/-1}
+  #fearGreedGauge .fear-greed-reading strong{font-size:clamp(36px,10cqw,46px)}
+  #fearGreedGauge .fear-greed-reading b{font-size:clamp(16px,4cqw,19px)}
+}
+@container (min-width:621px){
+  #fearGreedGauge .fear-greed-dial{max-width:min(360px,48cqw)!important}
+  #fearGreedGauge .fear-greed-layout{grid-template-columns:minmax(250px,.9fr) minmax(230px,1.1fr)!important}
+  #fearGreedGauge .fear-greed-summary{grid-template-columns:1fr!important}
+  #fearGreedGauge .fear-greed-summary div:last-child{grid-column:auto}
 }
