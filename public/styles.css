@@ -420,6 +420,7 @@ main>header,.terminal-layout{width:100%;min-width:0}
 
 /* Live evidence values must remain readable rather than being ellipsized. */
 .microstructure-grid{gap:8px!important}.microstructure-item{gap:5px!important;padding:10px!important}.microstructure-item b{overflow:visible!important;white-space:normal!important;overflow-wrap:anywhere!important;text-overflow:clip!important;font-size:clamp(11px,.95vw,14px)!important;letter-spacing:-.65px!important;line-height:1.22!important}.microstructure-item small{min-height:0!important;font-size:9px!important;line-height:1.35!important}
+.microstructure-item b .microstructure-value-main{display:block;color:var(--text-primary);font:800 1em/1.15 "SF Mono","JetBrains Mono",monospace;letter-spacing:inherit}.microstructure-item.bull b .microstructure-value-main{color:var(--bull)}.microstructure-item.bear b .microstructure-value-main{color:var(--bear)}.microstructure-item b .microstructure-value-sub{display:block;margin-top:3px;color:var(--text-secondary);font:700 .78em/1.2 ui-sans-serif,system-ui,sans-serif;letter-spacing:0}.microstructure-item b .microstructure-value-sub::before{content:"";display:inline-block;width:4px;height:4px;margin:0 5px 1px 0;border-radius:50%;background:currentColor;opacity:.65}
 
 /* The horizontal return strip is always anchored directly before pattern
    analysis, even while the right column rerenders. */
