@@ -951,12 +951,13 @@ function scheduleMicrostructureAlignment(){
     const micro=$('okxMicrostructureCard'),fear=$('fearGreedGauge');
     if(!micro)return;
     micro.style.minHeight='';
+    fear?.style.removeProperty('min-height');
     // Only equalize the two desktop columns.  Reading layouts on tablets and
     // phones should retain their natural content height.
     if(window.innerWidth<1025||!fear||fear.hidden||micro.hidden)return;
-    const microBox=micro.getBoundingClientRect(),fearBox=fear.getBoundingClientRect();
-    const alignedHeight=Math.ceil(fearBox.bottom-microBox.top);
-    if(alignedHeight>micro.offsetHeight)micro.style.minHeight=`${alignedHeight}px`;
+    const microBox=micro.getBoundingClientRect(),fearBox=fear.getBoundingClientRect(),sharedBottom=Math.max(microBox.bottom,fearBox.bottom);
+    micro.style.minHeight=`${Math.ceil(micro.offsetHeight+sharedBottom-microBox.bottom)}px`;
+    fear.style.minHeight=`${Math.ceil(fear.offsetHeight+sharedBottom-fearBox.bottom)}px`;
   });
 }
 window.addEventListener('resize',scheduleMicrostructureAlignment,{passive:true});
