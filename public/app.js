@@ -670,7 +670,8 @@ setInterval(loadFedMonitor,600_000);
 
 /* Fear & Greed is intentionally slow-moving.  It is a market-environment
    guardrail, not a high-frequency directional input. */
-let fearGreedSentiment=null,fearGreedLoading=false;
+const fearGreedRefreshMs=120_000,fearGreedRetryMs=30_000;
+let fearGreedSentiment=null,fearGreedLoading=false,fearGreedError=null,fearGreedRetryTimer=null;
 function fearGreedView(value){
   if(value<=24)return {kind:'bull',label:tx('极度恐慌','Extreme fear'),note:tx('极度恐慌：不追空，等待价格与成交量确认。','Extreme fear: avoid chasing shorts; wait for price and volume confirmation.')};
   if(value<=44)return {kind:'flat',label:tx('恐慌','Fear'),note:tx('市场偏恐慌：降低追空意愿，仍以趋势确认。','Fearful market: lower the urge to chase shorts; keep trend confirmation.')};
@@ -692,7 +693,9 @@ function renderFearGreedGauge(){
   card.hidden=false;
   if(!Number.isFinite(sentiment?.value)){
     card.className='card fear-greed-gauge-card flat';
-    card.innerHTML=`<div class="fear-greed-head"><div><h2>${tx('恐惧&贪婪指数','Fear & Greed Index')}</h2><p>${tx('市场情绪环境，不单独作为交易信号。','Market environment; not a standalone trading signal.')}</p></div><span>${tx('每 15 分钟更新','Updates every 15 min')}</span></div><div class="fear-greed-unavailable"><b>${tx('正在加载情绪数据','Loading sentiment data')}</b><p>${tx('公开情绪源暂未返回；卡片会在下一次请求后自动显示读数。','The public sentiment source has not returned yet. This card updates automatically on the next request.')}</p></div>`;
+    const unavailable=fearGreedError;
+    card.innerHTML=`<div class="fear-greed-head"><div><h2>${tx('恐惧&贪婪指数','Fear & Greed Index')}</h2><p>${tx('市场情绪环境，不单独作为交易信号。','Market environment; not a standalone trading signal.')}</p></div><span>${tx('每 2 分钟更新','Updates every 2 min')}</span></div><div class="fear-greed-unavailable ${unavailable?'is-error':''}"><b>${unavailable?tx('情绪数据暂不可用','Sentiment unavailable'):tx('正在加载情绪数据','Loading sentiment data')}</b><p>${unavailable?tx('公开情绪源暂未返回，将在约 30 秒后自动重试。','The public sentiment source did not respond. Retrying in about 30 seconds.'):tx('情绪读数会在公开数据源返回后自动显示。','The reading appears automatically when the public source responds.')}</p>${unavailable?`<button type="button" class="fear-greed-retry">${tx('重试','Retry')}</button>`:''}</div>`;
+    card.querySelector('.fear-greed-retry')?.addEventListener('click',()=>loadFearGreedSentiment(true));
     addHelp(card.querySelector('.fear-greed-head h2'),tx('恐惧与贪婪指数是日频市场情绪读数，范围 0–100。极端恐惧或贪婪更适合提醒不要追单；它不单独预测短线涨跌。','Fear & Greed is a daily 0–100 market-sentiment reading. Extreme values warn against chasing moves; it does not predict short-term direction by itself.'));
     return;
   }
@@ -704,22 +707,27 @@ function renderFearGreedGauge(){
     return `<line class="fear-greed-tick ${i%5===0?'major':''}" x1="${(cx+Math.cos(a)*inner).toFixed(1)}" y1="${(cy-Math.sin(a)*inner).toFixed(1)}" x2="${(cx+Math.cos(a)*outer).toFixed(1)}" y2="${(cy-Math.sin(a)*outer).toFixed(1)}"/>`;
   }).join('');
   card.className=`card fear-greed-gauge-card ${view.kind}`;
-  card.innerHTML=`<div class="fear-greed-head"><div><h2>${tx('恐惧&贪婪指数','Fear & Greed Index')}</h2><p>${tx('市场情绪环境，不单独作为交易信号。','Market environment; not a standalone trading signal.')}</p></div><span>${tx('每 15 分钟更新','Updates every 15 min')}</span></div><div class="fear-greed-layout"><div class="fear-greed-dial"><svg viewBox="0 0 360 210" role="img" aria-label="${tx('恐惧与贪婪指数','Fear and Greed Index')} ${value}"><defs><linearGradient id="fearGreedGradient" x1="0%" x2="100%"><stop offset="0%" stop-color="#20c778"/><stop offset="48%" stop-color="#f5c54e"/><stop offset="100%" stop-color="#fa5575"/></linearGradient></defs><path class="fear-greed-arc" d="M 35 168 A 145 145 0 0 1 325 168"/>${ticks}<line class="fear-greed-pointer" x1="${cx}" y1="${cy}" x2="${x}" y2="${y}"/><circle class="fear-greed-hub" cx="${cx}" cy="${cy}" r="8"/></svg><div class="fear-greed-reading"><strong>${value}</strong><b>${view.label}</b></div></div><div class="fear-greed-summary"><div><span>${tx('极度恐惧','Extreme fear')}</span><b>0–24</b></div><div><span>${tx('恐慌','Fear')}</span><b>25–44</b></div><div><span>${tx('中性','Neutral')}</span><b>45–55</b></div><div><span>${tx('贪婪','Greed')}</span><b>56–74</b></div><div><span>${tx('极度贪婪','Extreme greed')}</span><b>75–100</b></div></div></div><footer>${view.note} <em>${tx('数据：Alternative.me','Data: Alternative.me')}</em></footer>`;addHelp(card.querySelector('.fear-greed-head h2'),'恐惧与贪婪指数是日频市场情绪读数，范围 0–100。极端恐惧或贪婪更适合提醒不要追单；它不单独预测短线涨跌。','Fear & Greed is a daily 0–100 market-sentiment reading. Extreme values warn against chasing moves; it does not predict short-term direction by itself.');
+  card.innerHTML=`<div class="fear-greed-head"><div><h2>${tx('恐惧&贪婪指数','Fear & Greed Index')}</h2><p>${tx('市场情绪环境，不单独作为交易信号。','Market environment; not a standalone trading signal.')}</p></div><span>${tx('每 2 分钟更新','Updates every 2 min')}</span></div><div class="fear-greed-layout"><div class="fear-greed-dial"><svg viewBox="0 0 360 210" role="img" aria-label="${tx('恐惧与贪婪指数','Fear and Greed Index')} ${value}"><defs><linearGradient id="fearGreedGradient" x1="0%" x2="100%"><stop offset="0%" stop-color="#20c778"/><stop offset="48%" stop-color="#f5c54e"/><stop offset="100%" stop-color="#fa5575"/></linearGradient></defs><path class="fear-greed-arc" d="M 35 168 A 145 145 0 0 1 325 168"/>${ticks}<line class="fear-greed-pointer" x1="${cx}" y1="${cy}" x2="${x}" y2="${y}"/><circle class="fear-greed-hub" cx="${cx}" cy="${cy}" r="8"/></svg><div class="fear-greed-reading"><strong>${value}</strong><b>${view.label}</b></div></div><div class="fear-greed-summary"><div><span>${tx('极度恐惧','Extreme fear')}</span><b>0–24</b></div><div><span>${tx('恐慌','Fear')}</span><b>25–44</b></div><div><span>${tx('中性','Neutral')}</span><b>45–55</b></div><div><span>${tx('贪婪','Greed')}</span><b>56–74</b></div><div><span>${tx('极度贪婪','Extreme greed')}</span><b>75–100</b></div></div></div><footer>${view.note} <em>${tx('数据：Alternative.me','Data: Alternative.me')}</em></footer>`;addHelp(card.querySelector('.fear-greed-head h2'),'恐惧与贪婪指数是日频市场情绪读数，范围 0–100。极端恐惧或贪婪更适合提醒不要追单；它不单独预测短线涨跌。','Fear & Greed is a daily 0–100 market-sentiment reading. Extreme values warn against chasing moves; it does not predict short-term direction by itself.');
 }
 function renderFearGreedSentiment(){
   if(!fearGreedSentiment)return;
   renderFearGreedGauge();
   if(fixedRuleSignal.candles.length)renderFixedRuleSignal();
 }
-async function loadFearGreedSentiment(){
+async function loadFearGreedSentiment(force=false){
   if(fearGreedLoading)return;
+  if(force&&fearGreedRetryTimer){clearTimeout(fearGreedRetryTimer);fearGreedRetryTimer=null}
   fearGreedLoading=true;
   try{
     const response=await fetch('/api/sentiment'),data=await response.json();
     if(!response.ok)throw new Error(data.detail||data.error);
-    fearGreedSentiment=data;
+    fearGreedSentiment=data;fearGreedError=null;
     renderFearGreedSentiment();
-  }catch{ /* Keep the existing sentiment value if the public source is briefly unavailable. */ }
+  }catch(error){
+    fearGreedError=error;
+    if(!fearGreedSentiment)renderFearGreedGauge();
+    if(!fearGreedRetryTimer)fearGreedRetryTimer=setTimeout(()=>{fearGreedRetryTimer=null;loadFearGreedSentiment()},fearGreedRetryMs);
+  }
   finally{fearGreedLoading=false}
 }
 const renderExpandedIndicatorDetailsWithSentiment=renderExpandedIndicatorDetails;
@@ -733,7 +741,7 @@ renderExpandedIndicatorDetails=function(m){
   row.innerHTML=`<span>${tx('恐慌贪婪指数','Fear & Greed')}</span><b>${sentiment.value}/100</b><i class="badge ${view.kind}">${view.label}</i>`;
   const decision=host.querySelector('.trade-decision');
   decision?decision.before(row):host.append(row);
-  addHelp(row.querySelector('span'),tx('市场情绪的日频综合读数，范围 0–100。低值表示恐慌、高值表示贪婪。它适合提示“不要追单”的环境风险，不单独预测短线涨跌。','A daily market-sentiment composite from 0–100. Low means fear and high means greed. It flags conditions where chasing a move is risky; it does not predict short-term direction by itself.'),tx('公开情绪源，每 15 分钟更新；数据源：Alternative.me。','Public sentiment source, refreshed every 15 minutes; source: Alternative.me.'));
+  addHelp(row.querySelector('span'),tx('市场情绪的日频综合读数，范围 0–100。低值表示恐慌、高值表示贪婪。它适合提示“不要追单”的环境风险，不单独预测短线涨跌。','A daily market-sentiment composite from 0–100. Low means fear and high means greed. It flags conditions where chasing a move is risky; it does not predict short-term direction by itself.'),tx('公开情绪源，每 2 分钟更新；数据源：Alternative.me。','Public sentiment source, refreshed every 2 minutes; source: Alternative.me.'));
   const reason=decision?.querySelector('p');
   if(reason)reason.textContent=`${reason.textContent} · ${view.note}`;
   host.classList.add('indicator-adaptive-grid');
@@ -746,7 +754,7 @@ renderFixedRuleSignal=function(){
   if(fixedRuleSignal.candles.length>=30)renderExpandedIndicatorDetails(metrics(fixedRuleSignal.candles));
 };
 loadFearGreedSentiment();
-setInterval(loadFearGreedSentiment,900_000);
+setInterval(loadFearGreedSentiment,fearGreedRefreshMs);
 if(fixedRuleSignal.candles.length)renderFixedRuleSignal();
 
 /* Keep technical indicators compact, and give OKX public microstructure a
@@ -868,7 +876,7 @@ renderExpandedIndicatorDetails=function(m){
   row.innerHTML=`<span>${tx('恐慌贪婪指数','Fear & Greed')}</span><b>${sentiment.value}/100</b><i class="badge ${view.kind}">${view.label}</i>`;
   const decision=host.querySelector('.trade-decision');
   decision?decision.before(row):host.append(row);
-  addHelp(row.querySelector('span'),tx('市场情绪的日频综合读数，范围 0–100。低值表示恐慌、高值表示贪婪。它适合提示“不要追单”的环境风险，不单独预测短线涨跌。','A daily market-sentiment composite from 0–100. Low means fear and high means greed. It flags conditions where chasing a move is risky; it does not predict short-term direction by itself.'),tx('公开情绪源，每 15 分钟更新；数据源：Alternative.me。','Public sentiment source, refreshed every 15 minutes; source: Alternative.me.'));
+  addHelp(row.querySelector('span'),tx('市场情绪的日频综合读数，范围 0–100。低值表示恐慌、高值表示贪婪。它适合提示“不要追单”的环境风险，不单独预测短线涨跌。','A daily market-sentiment composite from 0–100. Low means fear and high means greed. It flags conditions where chasing a move is risky; it does not predict short-term direction by itself.'),tx('公开情绪源，每 2 分钟更新；数据源：Alternative.me。','Public sentiment source, refreshed every 2 minutes; source: Alternative.me.'));
   const reason=decision?.querySelector('p');
   if(reason)reason.textContent=`${reason.textContent} · ${view.note}`;
   host.classList.add('indicator-adaptive-grid');
@@ -919,7 +927,7 @@ function ensureFearGreedCard(){
   card=document.createElement('section');
   card.id='fearGreedGauge';
   card.className='card fear-greed-gauge-card flat';
-  card.innerHTML=`<div class="fear-greed-head"><div><h2>${tx('恐惧&贪婪指数','Fear & Greed Index')}</h2><p>${tx('市场情绪环境，不单独作为交易信号。','Market environment; not a standalone trading signal.')}</p></div><span>${tx('每 15 分钟更新','Updates every 15 min')}</span></div><div class="fear-greed-unavailable"><b>${tx('正在加载情绪数据','Loading sentiment data')}</b><p>${tx('情绪读数会在公开数据源返回后自动显示。','The reading appears automatically when the public source responds.')}</p></div>`;
+  card.innerHTML=`<div class="fear-greed-head"><div><h2>${tx('恐惧&贪婪指数','Fear & Greed Index')}</h2><p>${tx('市场情绪环境，不单独作为交易信号。','Market environment; not a standalone trading signal.')}</p></div><span>${tx('每 2 分钟更新','Updates every 2 min')}</span></div><div class="fear-greed-unavailable"><b>${tx('正在加载情绪数据','Loading sentiment data')}</b><p>${tx('情绪读数会在公开数据源返回后自动显示。','The reading appears automatically when the public source responds.')}</p></div>`;
   return card;
 }
 function placePeriodAndSentimentCards(){

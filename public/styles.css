@@ -301,6 +301,7 @@ html[data-theme="light"] .range-extreme{background:rgba(20,32,48,.96)!important}
 
 .fear-greed-unavailable{display:grid;gap:7px;min-height:150px;place-content:center;padding:18px;border:1px dashed var(--border-strong);border-radius:10px;background:var(--bg-surface-2);text-align:center}
 .fear-greed-unavailable b{color:var(--text-primary);font-size:16px}.fear-greed-unavailable p{max-width:420px;margin:0;color:var(--text-secondary);line-height:1.55}
+.fear-greed-unavailable.is-error{border-color:rgba(255,77,106,.5)}.fear-greed-retry{justify-self:center;min-width:86px;padding:7px 12px;border:1px solid var(--accent-cyan);border-radius:7px;background:rgba(34,211,238,.08);color:var(--accent-cyan);font-weight:700;cursor:pointer}.fear-greed-retry:hover{background:rgba(34,211,238,.16);color:var(--text-primary)}
 
 /* A resizable browser often lands between phone and desktop widths.  Treat
    that range as a readable single-column dashboard rather than squeezing the
@@ -569,7 +570,7 @@ main>header,.terminal-layout{width:100%;min-width:0}
 .okx-microstructure-card>#periodChangeCard.chart-periods{
   display:block!important;
   width:100%!important;
-  margin:auto 0 0!important;
+  margin:15px 0 0!important;
   padding:15px 0 0!important;
   border:0!important;
   border-top:1px solid var(--border-subtle)!important;

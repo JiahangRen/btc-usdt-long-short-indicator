@@ -149,7 +149,7 @@ function storageStatus() {
 const MARKET_TTL = 10_000;
 const CONTEXT_TTL = 10_000;
 const HISTORY_TTL = 300_000;
-const SENTIMENT_TTL = 900_000;
+const SENTIMENT_TTL = 120_000;
 const FED_CALENDAR_TTL = 600_000;
 const FED_MARKET_SIGNALS_TTL = 600_000;
 const QUOTE_TTL = 1_000;
