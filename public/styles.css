@@ -569,8 +569,9 @@ main>header,.terminal-layout{width:100%;min-width:0}
 .okx-microstructure-card{display:flex;flex-direction:column}
 .okx-microstructure-card>#periodChangeCard.chart-periods{
   display:block!important;
+  flex:0 0 auto!important;
   width:100%!important;
-  margin:15px 0 0!important;
+  margin:12px 0 0!important;
   padding:15px 0 0!important;
   border:0!important;
   border-top:1px solid var(--border-subtle)!important;
