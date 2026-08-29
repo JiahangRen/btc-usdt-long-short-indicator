@@ -772,9 +772,9 @@ function renderOkxMicrostructure(context){
   // live microstructure markup is replaced below.
   const periodCard=$('periodChangeCard');
   if(!card){card=document.createElement('section');card.id='okxMicrostructureCard';card.className='card okx-microstructure-card'}
-  // Keep this short-term, live panel directly below probability research in
-  // the wide chart column; it intentionally fills the reserved visual space.
-  if(anchor&&anchor.nextElementSibling!==card)anchor.after(card);
+  // Put live market structure before the slower probability research in the
+  // wide chart column, so the current market evidence is read first.
+  if(anchor&&anchor.previousElementSibling!==card)anchor.before(card);
   else if(!card.isConnected)document.querySelector('main')?.append(card);
   if(!card)return;
   if(context?.source!=='okx'){card.hidden=true;return}
