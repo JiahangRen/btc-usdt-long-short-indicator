@@ -952,12 +952,9 @@ function scheduleMicrostructureAlignment(){
     if(!micro)return;
     micro.style.minHeight='';
     fear?.style.removeProperty('min-height');
-    // Only equalize the two desktop columns.  Reading layouts on tablets and
-    // phones should retain their natural content height.
-    if(window.innerWidth<1025||!fear||fear.hidden||micro.hidden)return;
-    const microBox=micro.getBoundingClientRect(),fearBox=fear.getBoundingClientRect(),sharedBottom=Math.max(microBox.bottom,fearBox.bottom);
-    micro.style.minHeight=`${Math.ceil(micro.offsetHeight+sharedBottom-microBox.bottom)}px`;
-    fear.style.minHeight=`${Math.ceil(fear.offsetHeight+sharedBottom-fearBox.bottom)}px`;
+    // Keep each column at its content height.  This keeps the probability
+    // forecast immediately after the period-return strip even if sentiment
+    // data is still loading in the adjacent column.
   });
 }
 window.addEventListener('resize',scheduleMicrostructureAlignment,{passive:true});
