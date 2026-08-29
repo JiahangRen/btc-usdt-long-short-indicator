@@ -67,6 +67,7 @@ const storeFedCalendarSnapshot = database.prepare('INSERT INTO fed_calendar_snap
 const priorOiSnapshot = database.prepare('SELECT observed_at, oi FROM derivative_snapshots WHERE source=? AND observed_at<=? AND oi IS NOT NULL ORDER BY observed_at DESC LIMIT 1');
 const priorFundingSnapshot = database.prepare('SELECT observed_at, funding_rate FROM derivative_snapshots WHERE source=? AND observed_at<=? AND funding_rate IS NOT NULL ORDER BY observed_at DESC LIMIT 1');
 const priorQuoteSnapshot = database.prepare('SELECT observed_at, last FROM quote_snapshots WHERE source=? AND observed_at<=? AND last IS NOT NULL ORDER BY observed_at DESC LIMIT 1');
+const latestSentimentSnapshot = database.prepare('SELECT observed_at, value, classification, source FROM sentiment_snapshots ORDER BY observed_at DESC LIMIT 1');
 let lastStorageCleanup = 0;
 const lastStoredQuote = new Map();
 const lastStoredDerivative = new Map();
@@ -545,9 +546,20 @@ async function marketContext(source = 'okx') {
     throw error;
   }
 }
-async function fearGreedSentiment() {
+function storedFearGreedSentiment(now = Date.now()) {
+  const row = latestSentimentSnapshot.get();
+  if (!row || !Number.isFinite(+row.value)) return null;
+  return {
+    value:+row.value, classification:String(row.classification || ''), observedAt:+row.observed_at,
+    fetchedAt:now, cached:true, storageCached:true, stale:true, cacheAgeMs:Math.max(0, now - +row.observed_at),
+    refreshMs:SENTIMENT_TTL, source:row.source || 'SQLite'
+  };
+}
+async function fearGreedSentiment({ refresh = false } = {}) {
   const key = 'fear-greed-sentiment', hit = cache.get(key), now = Date.now();
-  if (hit && now - hit.time < SENTIMENT_TTL) return { ...cacheResult(hit, now), stale:false };
+  if (!refresh && hit && now - hit.time < SENTIMENT_TTL) return { ...cacheResult(hit, now), stale:false };
+  const stored = !refresh && !hit ? storedFearGreedSentiment(now) : null;
+  if (stored) return stored;
   try {
     return await coalesce(key, async () => {
       const payload = await request('https://api.alternative.me/fng/?limit=1&format=json', 8_000);
@@ -565,6 +577,7 @@ async function fearGreedSentiment() {
     });
   } catch (error) {
     if (hit && now - hit.time <= 3_600_000) return { ...cacheResult(hit, now), stale:true, fallbackReason:error.name === 'AbortError' ? 'timeout' : error.message };
+    if (stored) return { ...stored, fallbackReason:error.name === 'AbortError' ? 'timeout' : error.message };
     throw error;
   }
 }
@@ -779,7 +792,7 @@ http.createServer((req, res) => requestTiming.run({ started:performance.now(), u
     return;
   }
   if (url.pathname === '/api/sentiment') {
-    try { json(res, 200, await fearGreedSentiment()); }
+    try { json(res, 200, await fearGreedSentiment({ refresh:url.searchParams.get('refresh') === '1' })); }
     catch (e) { json(res, 503, { error:'Fear and Greed Index unavailable', detail:e.message }); }
     return;
   }

@@ -726,14 +726,16 @@ async function loadFearGreedSentiment(force=false){
   if(force&&fearGreedRetryTimer){clearTimeout(fearGreedRetryTimer);fearGreedRetryTimer=null}
   fearGreedLoading=true;
   try{
-    const response=await fetch('/api/sentiment'),data=await response.json();
+    const response=await fetch(`/api/sentiment${force?'?refresh=1':''}`),data=await response.json();
     if(!response.ok)throw new Error(data.detail||data.error);
     fearGreedSentiment=data;fearGreedError=null;
     renderFearGreedSentiment();
+    return data;
   }catch(error){
     fearGreedError=error;
     if(!fearGreedSentiment)renderFearGreedGauge();
     if(!fearGreedRetryTimer)fearGreedRetryTimer=setTimeout(()=>{fearGreedRetryTimer=null;loadFearGreedSentiment()},fearGreedRetryMs);
+    return null;
   }
   finally{fearGreedLoading=false}
 }
@@ -760,8 +762,8 @@ renderFixedRuleSignal=function(){
   renderFixedRuleSignalWithSentiment();
   if(fixedRuleSignal.candles.length>=30)renderExpandedIndicatorDetails(metrics(fixedRuleSignal.candles));
 };
-loadFearGreedSentiment();
-setInterval(loadFearGreedSentiment,fearGreedRefreshMs);
+loadFearGreedSentiment().then(data=>{if(data?.storageCached)setTimeout(()=>loadFearGreedSentiment(true),0)});
+setInterval(()=>loadFearGreedSentiment(true),fearGreedRefreshMs);
 if(fixedRuleSignal.candles.length)renderFixedRuleSignal();
 
 /* Keep technical indicators compact, and give OKX public microstructure a
