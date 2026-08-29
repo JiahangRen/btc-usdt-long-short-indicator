@@ -389,7 +389,37 @@ $('chart')?.closest('.chart-box')?.addEventListener('wheel',event=>{if(!event.me
 renderRangeExtremaPoints=function(){const box=$('chart')?.closest('.chart-box'),cv=$('chart'),d=visibleCandles();if(!box||!cv||d.length<2)return;let high=$('rangeHighPoint'),low=$('rangeLowPoint');if(!high){high=document.createElement('div');high.id='rangeHighPoint';high.className='range-extreme high';box.append(high)}if(!low){low=document.createElement('div');low.id='rangeLowPoint';low.className='range-extreme low';box.append(low)}const series=state.chartSeries||{candles:true,close:false},highValue=v=>series.candles?v.high:v.close,lowValue=v=>series.candles?v.low:v.close,hiI=d.reduce((best,v,i)=>highValue(v)>highValue(d[best])?i:best,0),loI=d.reduce((best,v,i)=>lowValue(v)<lowValue(d[best])?i:best,0),values=d.flatMap(v=>[v.low,v.high]),closes=d.map(v=>v.close);[ema(closes,20),ema(closes,50),ema(closes,200)].forEach(a=>a.forEach(v=>{if(Number.isFinite(v))values.push(v)}));let min=Math.min(...values),max=Math.max(...values),pad=(max-min||1)*.075;min-=pad;max+=pad;const rect=cv.getBoundingClientRect(),P={l:18,r:74,t:15,b:30},cw=rect.width-P.l-P.r,ch=rect.height-P.t-P.b,x=i=>P.l+i/(d.length-1)*cw,y=v=>P.t+ch-(v-min)/(max-min)*ch,label=state.range||state.interval,point=(el,i,value,kind)=>{el.style.left=`${Math.max(8,Math.min(rect.width-160,x(i)))}px`;el.style.top=`${Math.max(6,Math.min(rect.height-28,y(value)+(kind==='high'?-25:8)))}px`;el.textContent=`${label}${kind==='high'?tx('最高点',' high'):tx('最低点',' low')} ${money(value)} · ${pointTime(d[i].time)}`};point(high,hiI,highValue(d[hiI]),'high');point(low,loI,lowValue(d[loI]),'low')};
 
 /* Header version is deliberately independent from the selected market source. */
-(()=>{const controls=document.querySelector('main>header .controls');if(!controls||$('appVersion'))return;const version=document.createElement('button');version.type='button';version.id='appVersion';version.textContent='v2.0.1';version.title='查看更新日志';version.setAttribute('aria-expanded','false');const sourceLabel=controls.querySelector('label');if(sourceLabel)controls.insertBefore(version,sourceLabel);else controls.prepend(version);const log=document.createElement('section');log.id='versionChangelog';log.hidden=true;log.innerHTML='<b>v2.0.1 更新日志</b><p>情绪数据、连通性诊断与仪表盘布局优化。</p><ul><li><strong>情绪指数：</strong>首屏先读取 SQLite 中最近一次成功数据，再自动从 Alternative.me 拉取新值替换；请求失败时显示“暂不可用＋重试”，约 30 秒后自动重试，刷新频率调整为 2 分钟。</li><li><strong>连通性：</strong>页面打开 5 秒后自动检测，OKX WebSocket 置于首项；检测扩展为 10 项，覆盖市场、历史样本、Alternative.me 与 Fed/BLS、Yahoo、CoinGecko、CoinLore 宏观数据链路。</li><li><strong>微观结构：</strong>长数值通过压缩字号、间距与按需换行完整展示，不再截断省略。</li><li><strong>布局：</strong>OKX 市场微观结构调整至多周期概率预测上方，周期涨幅紧跟其后，移除中间空白；桌面端多周期概率预测与恐惧&贪婪指数卡底边对齐。</li></ul>';document.body.append(log);version.onclick=()=>{const open=log.hidden;if(open){const rect=version.getBoundingClientRect(),width=Math.min(390,window.innerWidth-28);log.style.top=`${Math.min(window.innerHeight-80,rect.bottom+8)}px`;log.style.left=`${Math.max(14,Math.min(window.innerWidth-width-14,rect.left))}px`;log.style.right='auto'}log.hidden=!open;version.setAttribute('aria-expanded',String(open))};document.addEventListener('click',event=>{if(!log.hidden&&!log.contains(event.target)&&event.target!==version){log.hidden=true;version.setAttribute('aria-expanded','false')}})})();
+(() => {
+  const controls = document.querySelector('main>header .controls');
+  if (!controls || $('appVersion')) return;
+  const version = document.createElement('button');
+  version.type = 'button'; version.id = 'appVersion'; version.textContent = 'v2.0.1';
+  version.title = '查看更新日志'; version.setAttribute('aria-expanded', 'false');
+  const sourceLabel = controls.querySelector('label');
+  if (sourceLabel) controls.insertBefore(version, sourceLabel); else controls.prepend(version);
+  const log = document.createElement('section');
+  log.id = 'versionChangelog'; log.hidden = true;
+  log.innerHTML = `<b>v2.0.1 更新日志</b><ol><li>情绪指数首屏优先从 SQLite 读取最近一次成功数据，再自动请求 Alternative.me 新数据替换。</li><li>情绪源失败时显示“暂不可用＋重试”，并约 30 秒后自动重试；刷新频率改为 2 分钟。</li><li>连通性测试改为页面打开 5 秒后自动执行，OKX WebSocket 作为第一项。</li><li>连通性检测从原先市场／历史样本扩展到 10 项，加入 Alternative.me、Fed/BLS、Yahoo、CoinGecko、CoinLore 宏观数据链路。</li><li>微观结构卡片中的长数值不再被省略；压缩字号与间距，必要时换行完整显示。</li><li>布局调整：OKX 微观结构移到多周期概率预测上方；周期涨幅紧跟微观结构；移除了无意义空白。</li><li>多周期概率预测卡与恐惧&贪婪指数卡在桌面端底边齐平。</li></ol><hr><b>v2.0.0 新增／更新</b><dl><dt>OKX 微观结构</dt><dd>新增盘口失衡、主动成交比、持仓量 OI、资金费率趋势、永续价差；基于至少两项同向证据给出短线研究结论。</dd><dt>实时数据</dt><dd>OKX WebSocket 新订阅盘口前五档与成交数据；计算近 60 秒主动买卖流；保存 OI、资金费率、盘口和成交快照以支持趋势比较。</dd><dt>情绪指标</dt><dd>新增恐惧&贪婪仪表盘、五档情绪解释，并在指标明细中显示情绪读数。</dd><dt>宏观监控</dt><dd>新增 BTC × 美联储监控：FOMC、CPI、非农日历及倒计时；增加黄金、美元指数、BTC 市值占比、加密总市值和成交额等公开环境指标。</dd><dt>周期涨幅</dt><dd>从较短周期扩展为：5 分钟、15 分钟、1 小时、4 小时、1 日、2 日、1 周、1 月、半年；改为按相应 K 线历史精确取值。</dd><dt>预测与持仓</dt><dd>补充 15 分钟与 24 小时方向预测展示；增加个人持仓参考／价差相关展示。</dd><dt>页面布局</dt><dd>重构为桌面双栏终端式布局；手机端优先展示规则信号；图表、预测、微观结构和周期涨幅重新编排。</dd><dt>可用性</dt><dd>新增全局说明浮层、版本更新日志入口；修复窗口缩放时周期涨幅跳位、贪婪卡片尺寸突变、说明浮层遮挡、顶部行情文字重叠等问题。</dd><dt>数据存储</dt><dd>SQLite 新增衍生品快照、情绪快照、宏观快照、美联储日历快照，并设置相应保留期和索引。</dd></dl>`;
+  document.body.append(log);
+  version.onclick = () => {
+    const open = log.hidden;
+    if (open) {
+      const rect = version.getBoundingClientRect();
+      const width = Math.min(480, window.innerWidth - 28);
+      log.style.top = `${Math.min(window.innerHeight - 80, rect.bottom + 8)}px`;
+      log.style.left = `${Math.max(14, Math.min(window.innerWidth - width - 14, rect.left))}px`;
+      log.style.right = 'auto';
+    }
+    log.hidden = !open;
+    version.setAttribute('aria-expanded', String(open));
+  };
+  document.addEventListener('click', event => {
+    if (!log.hidden && !log.contains(event.target) && event.target !== version) {
+      log.hidden = true;
+      version.setAttribute('aria-expanded', 'false');
+    }
+  });
+})();
 
 /* Apply the fixed rule basis after every legacy analysis wrapper has run. */
 const renderAnalysisFinalFixedRuleSignal=renderAnalysis;
