@@ -56,6 +56,12 @@ database.exec(`
     event_name TEXT NOT NULL, event_at INTEGER NOT NULL, source TEXT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS fed_calendar_snapshots_event_time ON fed_calendar_snapshots(event_key, observed_at DESC);
+  CREATE TABLE IF NOT EXISTS btc_news_snapshots (
+    id INTEGER PRIMARY KEY, observed_at INTEGER NOT NULL, published_at INTEGER,
+    title TEXT NOT NULL, url TEXT, source TEXT, sentiment INTEGER NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS btc_news_snapshots_title_time ON btc_news_snapshots(title, published_at);
+  CREATE INDEX IF NOT EXISTS btc_news_snapshots_observed_time ON btc_news_snapshots(observed_at DESC);
 `);
 const storeQuote = database.prepare('INSERT INTO quote_snapshots (source, observed_at, last, open24h, change_pct, high24, low24) VALUES (?, ?, ?, ?, ?, ?, ?)');
 const storeCandle = database.prepare('INSERT OR IGNORE INTO candles (source, interval, candle_time, open, high, low, close, volume, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
@@ -66,6 +72,7 @@ const storeDerivativeSnapshot = database.prepare('INSERT INTO derivative_snapsho
 const storeSentimentSnapshot = database.prepare('INSERT INTO sentiment_snapshots (observed_at, value, classification, source) VALUES (?, ?, ?, ?)');
 const storeMacroMarketSnapshot = database.prepare('INSERT INTO macro_market_snapshots (observed_at, metric_key, value, change_pct, available, source, cadence) VALUES (?, ?, ?, ?, ?, ?, ?)');
 const storeFedCalendarSnapshot = database.prepare('INSERT INTO fed_calendar_snapshots (observed_at, event_key, event_name, event_at, source) VALUES (?, ?, ?, ?, ?)');
+const storeNewsSnapshot = database.prepare('INSERT OR IGNORE INTO btc_news_snapshots (observed_at, published_at, title, url, source, sentiment) VALUES (?, ?, ?, ?, ?, ?)');
 const priorOiSnapshot = database.prepare('SELECT observed_at, oi FROM derivative_snapshots WHERE source=? AND observed_at<=? AND oi IS NOT NULL ORDER BY observed_at DESC LIMIT 1');
 const priorFundingSnapshot = database.prepare('SELECT observed_at, funding_rate FROM derivative_snapshots WHERE source=? AND observed_at<=? AND funding_rate IS NOT NULL ORDER BY observed_at DESC LIMIT 1');
 const priorQuoteSnapshot = database.prepare('SELECT observed_at, last FROM quote_snapshots WHERE source=? AND observed_at<=? AND last IS NOT NULL ORDER BY observed_at DESC LIMIT 1');
@@ -85,6 +92,7 @@ function cleanStorage(now) {
   database.prepare('DELETE FROM sentiment_snapshots WHERE observed_at < ?').run(now - 365 * 86_400_000);
   database.prepare('DELETE FROM macro_market_snapshots WHERE observed_at < ?').run(now - 180 * 86_400_000);
   database.prepare('DELETE FROM fed_calendar_snapshots WHERE observed_at < ?').run(now - 180 * 86_400_000);
+  database.prepare('DELETE FROM btc_news_snapshots WHERE observed_at < ?').run(now - 30 * 86_400_000);
   database.exec('PRAGMA wal_checkpoint(PASSIVE)');
 }
 function persistQuote(source, ticker, observedAt) {
@@ -129,6 +137,12 @@ function persistFedCalendarSnapshots(events, observedAt = Date.now()) {
     cleanStorage(observedAt);
   });
 }
+function persistNewsSnapshots(items, observedAt = Date.now()) {
+  safelyStore(() => {
+    for (const item of items) storeNewsSnapshot.run(observedAt, Number.isFinite(item.publishedAt) ? item.publishedAt : null, item.title, item.url || null, item.source || 'Google News', item.sentiment);
+    cleanStorage(observedAt);
+  });
+}
 function storedCandles(source, interval, limit) {
   const rows = database.prepare('SELECT candle_time AS time, open, high, low, close, volume FROM candles WHERE source=? AND interval=? ORDER BY candle_time DESC LIMIT ?').all(source, interval, limit);
   return rows.reverse().map(row => ({ time:+row.time, open:+row.open, high:+row.high, low:+row.low, close:+row.close, volume:+row.volume })).filter(validCandle);
@@ -145,7 +159,7 @@ function persistHistory(source, interval, candles) {
 }
 function storageStatus() {
   const count = table => database.prepare(`SELECT COUNT(*) AS total FROM ${table}`).get().total;
-  return { engine:'SQLite', quoteSnapshots:count('quote_snapshots'), candles:count('candles'), marketSnapshots:count('market_snapshots'), trainingRuns:count('training_runs'), derivativeSnapshots:count('derivative_snapshots'), sentimentSnapshots:count('sentiment_snapshots'), macroMarketSnapshots:count('macro_market_snapshots'), fedCalendarSnapshots:count('fed_calendar_snapshots') };
+  return { engine:'SQLite', quoteSnapshots:count('quote_snapshots'), candles:count('candles'), marketSnapshots:count('market_snapshots'), trainingRuns:count('training_runs'), derivativeSnapshots:count('derivative_snapshots'), sentimentSnapshots:count('sentiment_snapshots'), macroMarketSnapshots:count('macro_market_snapshots'), fedCalendarSnapshots:count('fed_calendar_snapshots'), newsSnapshots:count('btc_news_snapshots') };
 }
 // 分层缓存策略：报价由 OKX 流持续推送，图表/指标以较低频率刷新，慢速历史保留在 SQLite。
 // Layered cache policy: quotes come from the OKX stream, chart/indicator data
@@ -156,6 +170,7 @@ const HISTORY_TTL = 300_000;
 const SENTIMENT_TTL = 120_000;
 const FED_CALENDAR_TTL = 600_000;
 const FED_MARKET_SIGNALS_TTL = 600_000;
+const NEWS_TTL = 900_000;
 const QUOTE_TTL = 1_000;
 const UPSTREAM_TIMEOUT = 1_200;
 const STALE_QUOTE_MAX_AGE = 60_000;
@@ -721,6 +736,92 @@ async function forecastHistory(interval) {
   }
   throw new Error(failures.join('; '));
 }
+// 公开新闻只用于给历史价格模型增加有限的环境权重；标题情绪不是事实核验，也不能单独产生交易结论。
+// Public headlines only add a limited context weight to the price-history model. Headline sentiment is not fact verification and never produces a trading call by itself.
+const newsBullTerms=['etf approval','etf inflow','institutional buy','accumulation','adoption','partnership','bullish','rally','surge','all-time high','rate cut','regulatory clarity','approval','inflow','买入','增持','采用','合作','利好','上涨','反弹','降息','获批','流入'];
+const newsBearTerms=['etf outflow','hack','exploit','breach','lawsuit','ban','crackdown','liquidation','sell-off','selloff','plunge','outflow','rate hike','fraud','scam','hacked','调查','禁令','监管打击','黑客','漏洞','清算','抛售','下跌','利空','加息','流出','诉讼'];
+function newsSentimentScore(title) {
+  const normalized=String(title || '').toLowerCase();
+  const count=terms => terms.reduce((total, term) => total + (normalized.includes(term) ? 1 : 0), 0);
+  const bull=count(newsBullTerms), bear=count(newsBearTerms);
+  return bull === bear ? 0 : bull > bear ? 1 : -1;
+}
+function decodeXml(text) { return String(text || '').replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').replace(/&amp;/gi, '&').replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'").replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code))).trim(); }
+function xmlField(block, tag) { const matched=String(block).match(new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${tag}>`, 'i')); return matched ? decodeXml(matched[1]).replace(/<[^>]+>/g, '').trim() : ''; }
+function parseBitcoinNews(xml) {
+  const seen=new Set(), items=[];
+  for (const matched of String(xml).matchAll(/<item>([\s\S]*?)<\/item>/gi)) {
+    const block=matched[1], title=xmlField(block, 'title');
+    if (!title || seen.has(title)) continue;
+    seen.add(title);
+    const publishedAt=Date.parse(xmlField(block, 'pubDate'));
+    items.push({ title, url:xmlField(block, 'link'), source:xmlField(block, 'source') || 'Google News', publishedAt:Number.isFinite(publishedAt) ? publishedAt : null, sentiment:newsSentimentScore(title) });
+    if (items.length >= 24) break;
+  }
+  return items;
+}
+function storedBitcoinNews(now = Date.now()) {
+  const rows=database.prepare('SELECT title, url, source, published_at AS publishedAt, sentiment FROM btc_news_snapshots WHERE observed_at >= ? ORDER BY COALESCE(published_at, observed_at) DESC LIMIT 24').all(now - 24 * 86_400_000);
+  return rows.map(row => ({ title:String(row.title), url:row.url || '', source:row.source || 'SQLite', publishedAt:Number(row.publishedAt) || null, sentiment:Number(row.sentiment) || 0 }));
+}
+async function bitcoinNews({ refresh = false } = {}) {
+  const key='btc-news', hit=cache.get(key), now=Date.now();
+  if (!refresh && hit && now-hit.time<NEWS_TTL) return { ...cacheResult(hit, now), stale:false };
+  const stored=storedBitcoinNews(now);
+  try {
+    return await coalesce(key, async () => {
+      const xml=await requestText('https://news.google.com/rss/search?q=Bitcoin%20when%3A1d&hl=en-US&gl=US&ceid=US:en', 8_000);
+      const items=parseBitcoinNews(xml);
+      if (!items.length) throw new Error('no Bitcoin news headlines found');
+      persistNewsSnapshots(items, now);
+      const result={ items, fetchedAt:now, refreshMs:NEWS_TTL, source:'Google News RSS', cached:false, cacheAgeMs:0 };
+      remember(key,result); return result;
+    });
+  } catch (error) {
+    if (hit && now-hit.time<=3_600_000) return { ...cacheResult(hit, now), stale:true, fallbackReason:error.message };
+    if (stored.length) return { items:stored, fetchedAt:now, refreshMs:NEWS_TTL, source:'SQLite news snapshots', cached:true, stale:true, cacheAgeMs:null, fallbackReason:error.message };
+    throw error;
+  }
+}
+function percentChange(closes, end, span) { const start=closes[Math.max(0,end-span)], current=closes[end]; return Number.isFinite(start) && start > 0 && Number.isFinite(current) ? current / start - 1 : 0; }
+function historicalProjection(candles, horizon) {
+  const closes=candles.map(candle => +candle.close).filter(value => Number.isFinite(value) && value > 0), end=closes.length-1;
+  if (end < Math.max(80, horizon + 30)) throw new Error('insufficient price-history samples');
+  const featureAt=index => ({ short:percentChange(closes,index,Math.max(2,Math.round(horizon/2))), medium:percentChange(closes,index,Math.max(6,horizon*2)), volatility:closes.slice(Math.max(1,index-20),index+1).reduce((total,value,offset,rows) => offset ? total + Math.abs(value / rows[offset-1] - 1) : total,0)/20 });
+  const target=featureAt(end), candidates=[];
+  for (let index=30;index<=end-horizon;index++) {
+    const row=featureAt(index), distance=Math.abs(row.short-target.short)*20 + Math.abs(row.medium-target.medium)*12 + Math.abs(row.volatility-target.volatility)*10;
+    candidates.push({ distance, change:closes[index+horizon]/closes[index]-1 });
+  }
+  const neighbors=candidates.sort((a,b)=>a.distance-b.distance).slice(0,Math.min(100,candidates.length));
+  const weighted=neighbors.reduce((sum,row)=>sum+row.change/(row.distance+.002),0)/neighbors.reduce((sum,row)=>sum+1/(row.distance+.002),0);
+  const up=neighbors.filter(row=>row.change>0).length/neighbors.length;
+  return { expectedReturn:Number.isFinite(weighted) ? weighted : 0, upProbability:up, samples:neighbors.length, momentum:target.medium, volatility:target.volatility };
+}
+function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
+async function researchOutlook({ refresh = false } = {}) {
+  const key='research-outlook', hit=cache.get(key), now=Date.now();
+  if (!refresh && hit && now-hit.time<NEWS_TTL) return { ...cacheResult(hit, now), stale:false };
+  return coalesce(key, async () => {
+    const [intraday,daily,news,sentiment]=await Promise.all([forecastHistory('15m'),forecastHistory('1d'),bitcoinNews({ refresh }),fearGreedSentiment({ refresh }).catch(()=>null)]);
+    const newsItems=news.items || [], bullish=newsItems.filter(item=>item.sentiment>0).length, bearish=newsItems.filter(item=>item.sentiment<0).length;
+    const newsScore=newsItems.length ? clamp((bullish-bearish)/Math.max(4,newsItems.length*.35),-1,1) : 0;
+    const sentimentScore=Number.isFinite(sentiment?.value) ? clamp((sentiment.value-50)/50,-1,1) : 0;
+    const last=intraday.candles.at(-1)?.close || daily.candles.at(-1)?.close;
+    const definitions=[{ key:'1h', label:'约 1 小时', candles:intraday.candles, horizon:4, cap:.03 },{ key:'4h', label:'约 4 小时', candles:intraday.candles, horizon:16, cap:.05 },{ key:'1d', label:'约 1 天', candles:daily.candles, horizon:1, cap:.12 }];
+    const windows=definitions.map(definition => {
+      const history=historicalProjection(definition.candles,definition.horizon);
+      const newsWeight=definition.key==='1d'?.25:.12, sentimentWeight=definition.key==='1d'?.08:.04;
+      const adjustedReturn=clamp(history.expectedReturn + newsScore * newsWeight * Math.max(history.volatility,.002) + sentimentScore * sentimentWeight * Math.max(history.volatility,.002),-definition.cap,definition.cap);
+      const upProbability=clamp(history.upProbability + newsScore*.06 + sentimentScore*.025,.05,.95);
+      const direction=upProbability>=.53?'up':upProbability<=.47?'down':'flat';
+      return { ...definition, upProbability, expectedReturn:adjustedReturn, expectedMove:last*adjustedReturn, expectedPrice:last*(1+adjustedReturn), direction, samples:history.samples };
+    });
+    const primary=windows[1];
+    const result={ price:last, windows, news:{ source:news.source, fetchedAt:news.fetchedAt, bullish, bearish, neutral:newsItems.length-bullish-bearish, score:newsScore, items:newsItems.slice(0,6) }, sentiment:sentiment?{ value:sentiment.value, source:sentiment.source || 'Alternative.me' }:null, historical:{ intradaySource:intraday.source, dailySource:daily.source, intradaySamples:intraday.candles.length, dailySamples:daily.candles.length }, primary, fetchedAt:now, refreshMs:NEWS_TTL, cached:false, disclaimer:'Historical-pattern and public-headline research only; not investment advice.' };
+    remember(key,result); return result;
+  });
+}
 async function yahooHistory(symbol) {
   const raw = await request(`https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=2y&interval=1d&events=history`);
   const result = raw.chart?.result?.[0]; const closes = result?.indicators?.quote?.[0]?.close;
@@ -820,6 +921,11 @@ http.createServer((req, res) => requestTiming.run({ started:performance.now(), u
       const value = { intraday:intradayResult.candles, daily:dailyResult.candles, source:`${intradayResult.source}/${dailyResult.source}`, fetchedAt:Date.now(), cached:false };
       remember(key, value); persistTrainingRun(value, force); json(res, 200, value);
     } catch (e) { json(res, 503, { error:'Forecast history unavailable', detail:e.message }); }
+    return;
+  }
+  if (url.pathname === '/api/research-outlook') {
+    try { json(res, 200, await researchOutlook({ refresh:url.searchParams.get('refresh') === '1' })); }
+    catch (e) { json(res, 503, { error:'Research outlook unavailable', detail:e.message }); }
     return;
   }
   if (url.pathname === '/api/correlation-history') {

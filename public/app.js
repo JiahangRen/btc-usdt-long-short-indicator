@@ -1041,6 +1041,43 @@ setTimeout(()=>{renderFearGreedGauge();renderExtendedPeriodReturns();loadExtende
 setTimeout(placePeriodAndSentimentCards,180);
 setTimeout(placePeriodAndSentimentCards,900);
 
+/* 历史价格 + 公开新闻研究预测：显示概率、预测窗口与预期价格变化，不生成下单建议。
+   Historical-price + public-news research outlook: shows probability, horizon, and expected price change; it never generates an order recommendation. */
+let researchOutlookLoading=false;
+const safeText=value=>String(value ?? '').replace(/[&<>'"]/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
+function ensureResearchOutlookCard(){
+  let card=$('researchOutlookCard');
+  if(card)return card;
+  card=document.createElement('section');
+  card.id='researchOutlookCard';
+  card.className='card research-outlook-card';
+  const forecast=document.querySelector('#mainChartCard .forecast-card')||document.querySelector('.forecast-card');
+  if(forecast)forecast.after(card);else document.querySelector('main')?.append(card);
+  return card;
+}
+function researchDirectionText(direction){return direction==='up'?tx('预期上涨','Expected up'):direction==='down'?tx('预期下跌','Expected down'):tx('预期震荡','Expected range')}
+function researchDirectionClass(direction){return direction==='up'?'bull':direction==='down'?'bear':'flat'}
+function researchAge(value){return Number.isFinite(value)?pointTime(value):tx('刚刚','Just now')}
+function renderResearchOutlook(data){
+  const card=ensureResearchOutlookCard();if(!card)return;
+  const headlineRows=(data.news?.items||[]).slice(0,4).map(item=>`<li class="${item.sentiment>0?'bull':item.sentiment<0?'bear':'flat'}"><i>${item.sentiment>0?tx('利好','Positive'):item.sentiment<0?tx('利空','Negative'):tx('中性','Neutral')}</i><span title="${safeText(item.title)}">${safeText(item.title)}</span><small>${safeText(item.source||'')}</small></li>`).join('')||`<li class="flat"><span>${tx('暂无可用公开 BTC 新闻标题。','No public BTC news headlines are available.')}</span></li>`;
+  const windows=(data.windows||[]).map(window=>{const kind=researchDirectionClass(window.direction),move=Number(window.expectedMove),ret=Number(window.expectedReturn)*100,prob=Number(window.upProbability)*100;return `<article class="research-window ${kind}"><span>${safeText(window.label)}</span><b>${researchDirectionText(window.direction)}</b><strong>${tx('上涨概率','Up probability')} ${prob.toFixed(1)}%</strong><em>${tx('预期变动','Expected move')} ${move>=0?'+':'−'}${money(Math.abs(move))} (${ret>=0?'+':'−'}${Math.abs(ret).toFixed(2)}%)</em><small>${tx('预计价格','Expected price')} ${money(window.expectedPrice)} · n=${window.samples}</small></article>`}).join('');
+  const news=data.news||{},history=data.historical||{},sentiment=data.sentiment;
+  card.innerHTML=`<div class="research-outlook-head"><div><h2>${tx('历史 + 新闻研究预测','History + news research outlook')}</h2><p>${tx('历史相似状态叠加近 24 小时公开 BTC 新闻标题情绪；结果为条件概率与价格区间，不是买卖建议。','Historical analogues plus recent public BTC headline sentiment. Results are conditional probabilities and price ranges, not buy/sell advice.')}</p></div><button type="button" id="refreshResearchOutlook">${tx('更新研究','Refresh research')}</button></div><div class="research-outlook-summary"><span>${tx('新闻情绪','News sentiment')}：<b class="bull">${news.bullish||0} ${tx('利好','positive')}</b> · <b class="bear">${news.bearish||0} ${tx('利空','negative')}</b> · <b class="flat">${news.neutral||0} ${tx('中性','neutral')}</b></span><span>${tx('情绪指数','Fear & Greed')}：<b>${Number.isFinite(sentiment?.value)?`${sentiment.value}/100`:'--'}</b></span><span>${tx('样本','Samples')}：15m ${history.intradaySamples||0} · 1d ${history.dailySamples||0}</span></div><div class="research-window-grid">${windows}</div><div class="research-news"><h3>${tx('近期 BTC 新闻标题','Recent BTC headlines')}</h3><ul>${headlineRows}</ul></div><footer>${tx('更新时间','Updated')} ${researchAge(data.fetchedAt)} · ${safeText(news.source||'')} · ${tx('新闻标题仅作情绪代理；新闻真实性、影响和时效需自行核验。','Headlines are only a sentiment proxy; verify their accuracy, impact, and timeliness independently.')}</footer>`;
+  card.querySelector('#refreshResearchOutlook')?.addEventListener('click',()=>loadResearchOutlook(true));
+  addHelp(card.querySelector('h2'),tx('模型从本机 SQLite 与公开行情中使用所有可用的 15 分钟、日线历史样本，寻找与当前动量和波动接近的历史片段；新闻仅对结果施加有限权重。预计金额是 BTC 价格变动（美元），不是你的账户盈亏。','The model uses all available 15-minute and daily samples in local SQLite/public market history to find past states similar in momentum and volatility. News has limited weight only. Expected amount is the BTC price move in USD, not your account P&L.'),tx('刷新会重新读取缓存/公开数据源；公开新闻源最多每 15 分钟更新一次。','Refreshes cache/public sources; the public news source updates at most every 15 minutes.'));
+}
+async function loadResearchOutlook(force=false){
+  if(researchOutlookLoading)return;researchOutlookLoading=true;
+  const card=ensureResearchOutlookCard();
+  if(card&&!card.innerHTML)card.innerHTML=`<div class="research-outlook-head"><div><h2>${tx('历史 + 新闻研究预测','History + news research outlook')}</h2><p>${tx('正在读取历史样本与公开新闻…','Reading history samples and public news…')}</p></div></div>`;
+  try{const response=await apiFetch(`/api/research-outlook${force?'?refresh=1':''}`,20_000),data=await response.json();if(!response.ok)throw new Error(data.detail||data.error||'request failed');renderResearchOutlook(data)}
+  catch(error){if(card)card.innerHTML=`<div class="research-outlook-head"><div><h2>${tx('历史 + 新闻研究预测','History + news research outlook')}</h2><p class="bear">${tx('研究数据暂不可用：','Research data unavailable: ')}${safeText(error.message)}</p></div><button type="button" id="refreshResearchOutlook">${tx('重试','Retry')}</button></div>`;card?.querySelector('#refreshResearchOutlook')?.addEventListener('click',()=>loadResearchOutlook(true))}
+  finally{researchOutlookLoading=false}
+}
+setTimeout(()=>loadResearchOutlook(),2_500);
+setInterval(()=>loadResearchOutlook(),900_000);
+
 /* Keep the first time label wholly inside the plot after the left scale has
    been widened for readable price labels. */
 drawChartWithoutDuplicateExtremaText=function(){
