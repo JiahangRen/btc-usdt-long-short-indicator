@@ -201,7 +201,7 @@ const sources = ['okx', 'coinbase', 'gate', 'binance'];
 const okxStream = {
   socket:null, status:'connecting', ticker:null, spotPrice:null,
   fundingRate:null, nextFundingRate:null, oi:null, oiUnit:'BTC',
-  orderBook:null, takerTrades:[], bookAt:0, tradeAt:0,
+  orderBook:null, takerTrades:[], cvdNotional:0, bookAt:0, tradeAt:0,
   lastMessageAt:0, tickerAt:0, contextAt:0, connectedAt:0,
   reconnects:0, lastError:null, retryMs:1_000, heartbeat:null, retryTimer:null
 };
@@ -218,6 +218,7 @@ function recentTakerFlow(now = Date.now()) {
   return total > 0 ? {
     buyNotional:buys, sellNotional:sells, buyRatioPct:buys / total * 100,
     imbalancePct:(buys - sells) / total * 100, tradeCount:okxStream.takerTrades.length,
+    cvd60Notional:buys-sells, cvdSessionNotional:okxStream.cvdNotional,
     windowSeconds:60, updatedAt:okxStream.tradeAt || null
   } : null;
 }
@@ -288,7 +289,7 @@ function updateOkxStream(message) {
   } else if (channel === 'trades') {
     for (const trade of rows) {
       const price = +trade.px, size = +trade.sz, side = trade.side === 'buy' ? 'buy' : trade.side === 'sell' ? 'sell' : null;
-      if (side && Number.isFinite(price) && Number.isFinite(size) && size > 0) okxStream.takerTrades.push({ time:now, side, notional:price * size });
+      if (side && Number.isFinite(price) && Number.isFinite(size) && size > 0) { const notional=price*size;okxStream.takerTrades.push({ time:now, side, notional });okxStream.cvdNotional+=side==='buy'?notional:-notional; }
     }
     okxStream.tradeAt = now;
     recentTakerFlow(now);
@@ -744,25 +745,30 @@ function newsSentimentScore(title) {
   const normalized=String(title || '').toLowerCase();
   const count=terms => terms.reduce((total, term) => total + (normalized.includes(term) ? 1 : 0), 0);
   const bull=count(newsBullTerms), bear=count(newsBearTerms);
-  return bull === bear ? 0 : bull > bear ? 1 : -1;
+  return clamp((bull-bear)/3,-1,1);
 }
 function decodeXml(text) { return String(text || '').replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').replace(/&amp;/gi, '&').replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'").replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code))).trim(); }
 function xmlField(block, tag) { const matched=String(block).match(new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${tag}>`, 'i')); return matched ? decodeXml(matched[1]).replace(/<[^>]+>/g, '').trim() : ''; }
+function normalizedHeadline(title) { return String(title || '').toLowerCase().replace(/\s+[|–—-]\s+[^|–—-]{2,}$/,'').replace(/[^a-z0-9\u4e00-\u9fff]+/g,' ').trim(); }
+function headlineSimilarity(a,b) { const left=new Set(normalizedHeadline(a).split(/\s+/).filter(Boolean)), right=new Set(normalizedHeadline(b).split(/\s+/).filter(Boolean)); const union=new Set([...left,...right]).size, overlap=[...left].filter(word=>right.has(word)).length; return union ? overlap/union : 0; }
+function classifyNewsEvent(title) { const value=String(title || '').toLowerCase(); if(/etf|inflow|outflow|blackrock|fidelity/.test(value))return 'etf-flow';if(/hack|exploit|breach|scam|fraud|bankrupt/.test(value))return 'security';if(/regulat|sec |lawsuit|ban|approval/.test(value))return 'regulation';if(/whale|wallet|transfer|holder/.test(value))return 'whale-flow';if(/cpi|fomc|rate |fed |inflation/.test(value))return 'macro';return 'market'; }
+function sourceWeight(source) { const value=String(source || '').toLowerCase(); if(/reuters|bloomberg|financial times|wall street journal/.test(value))return 1.35;if(/coindesk|the block|cointelegraph/.test(value))return 1.1;if(/yahoo finance|cnbc/.test(value))return .9;if(/motley fool|benzinga/.test(value))return .75;if(/stocktwits|reddit|x\.com|twitter/.test(value))return .5;return .7; }
+function eventWeight(category) { return ({'etf-flow':1.3,security:1.25,regulation:1.15,'whale-flow':.8,macro:1.05,market:.7})[category] || .7; }
 function parseBitcoinNews(xml) {
-  const seen=new Set(), items=[];
+  const items=[];
   for (const matched of String(xml).matchAll(/<item>([\s\S]*?)<\/item>/gi)) {
     const block=matched[1], title=xmlField(block, 'title');
-    if (!title || seen.has(title)) continue;
-    seen.add(title);
+    if (!title || items.some(item=>headlineSimilarity(item.title,title)>=.72)) continue;
     const publishedAt=Date.parse(xmlField(block, 'pubDate'));
-    items.push({ title, url:xmlField(block, 'link'), source:xmlField(block, 'source') || 'Google News', publishedAt:Number.isFinite(publishedAt) ? publishedAt : null, sentiment:newsSentimentScore(title) });
+    const source=xmlField(block, 'source') || 'Google News', category=classifyNewsEvent(title);
+    items.push({ title, url:xmlField(block, 'link'), source, publishedAt:Number.isFinite(publishedAt) ? publishedAt : null, sentiment:newsSentimentScore(title), category, sourceWeight:sourceWeight(source), eventWeight:eventWeight(category) });
     if (items.length >= 24) break;
   }
   return items;
 }
 function storedBitcoinNews(now = Date.now()) {
   const rows=database.prepare('SELECT title, url, source, published_at AS publishedAt, sentiment FROM btc_news_snapshots WHERE observed_at >= ? ORDER BY COALESCE(published_at, observed_at) DESC LIMIT 24').all(now - 24 * 86_400_000);
-  return rows.map(row => ({ title:String(row.title), url:row.url || '', source:row.source || 'SQLite', publishedAt:Number(row.publishedAt) || null, sentiment:Number(row.sentiment) || 0 }));
+  return rows.map(row => { const title=String(row.title), source=row.source || 'SQLite', category=classifyNewsEvent(title); return { title, url:row.url || '', source, publishedAt:Number(row.publishedAt) || null, sentiment:Number(row.sentiment) || 0, category, sourceWeight:sourceWeight(source), eventWeight:eventWeight(category) }; });
 }
 async function bitcoinNews({ refresh = false } = {}) {
   const key='btc-news', hit=cache.get(key), now=Date.now();
@@ -787,38 +793,46 @@ function percentChange(closes, end, span) { const start=closes[Math.max(0,end-sp
 function historicalProjection(candles, horizon) {
   const closes=candles.map(candle => +candle.close).filter(value => Number.isFinite(value) && value > 0), end=closes.length-1;
   if (end < Math.max(80, horizon + 30)) throw new Error('insufficient price-history samples');
-  const featureAt=index => ({ short:percentChange(closes,index,Math.max(2,Math.round(horizon/2))), medium:percentChange(closes,index,Math.max(6,horizon*2)), volatility:closes.slice(Math.max(1,index-20),index+1).reduce((total,value,offset,rows) => offset ? total + Math.abs(value / rows[offset-1] - 1) : total,0)/20 });
+  const featureAt=index => { const volatility=closes.slice(Math.max(1,index-20),index+1).reduce((total,value,offset,rows) => offset ? total + Math.abs(value / rows[offset-1] - 1) : total,0)/20, trend=percentChange(closes,index,Math.max(20,horizon*4)); return { short:percentChange(closes,index,Math.max(2,Math.round(horizon/2))), medium:percentChange(closes,index,Math.max(6,horizon*2)), volatility, trend, regime:trend>.015?'bull':trend<-.015?'bear':'range' }; };
   const target=featureAt(end), candidates=[];
   for (let index=30;index<=end-horizon;index++) {
-    const row=featureAt(index), distance=Math.abs(row.short-target.short)*20 + Math.abs(row.medium-target.medium)*12 + Math.abs(row.volatility-target.volatility)*10;
-    candidates.push({ distance, change:closes[index+horizon]/closes[index]-1 });
+    const row=featureAt(index), distance=Math.abs(row.short-target.short)*20 + Math.abs(row.medium-target.medium)*12 + Math.abs(row.volatility-target.volatility)*18 + Math.abs(row.trend-target.trend)*8;
+    candidates.push({ distance, change:closes[index+horizon]/closes[index]-1, regime:row.regime });
   }
-  const neighbors=candidates.sort((a,b)=>a.distance-b.distance).slice(0,Math.min(100,candidates.length));
-  const weighted=neighbors.reduce((sum,row)=>sum+row.change/(row.distance+.002),0)/neighbors.reduce((sum,row)=>sum+1/(row.distance+.002),0);
-  const up=neighbors.filter(row=>row.change>0).length/neighbors.length;
-  return { expectedReturn:Number.isFinite(weighted) ? weighted : 0, upProbability:up, samples:neighbors.length, momentum:target.medium, volatility:target.volatility };
+  const sameRegime=candidates.filter(row=>row.regime===target.regime), pool=sameRegime.length>=60?sameRegime:candidates;
+  const sorted=[...pool].sort((a,b)=>a.distance-b.distance), scale=Math.max(.001,sorted[Math.floor(sorted.length*.35)]?.distance || .01);
+  const weighted=pool.map(row=>({...row,weight:Math.exp(-row.distance/scale)})), weightTotal=weighted.reduce((sum,row)=>sum+row.weight,0);
+  const expected=weighted.reduce((sum,row)=>sum+row.change*row.weight,0)/weightTotal, up=weighted.filter(row=>row.change>0).reduce((sum,row)=>sum+row.weight,0)/weightTotal;
+  const normalized=weighted.map(row=>({...row,weight:row.weight/weightTotal})).sort((a,b)=>a.change-b.change), quantile=q=>{let cumulative=0;for(const row of normalized){cumulative+=row.weight;if(cumulative>=q)return row.change}return normalized.at(-1)?.change || 0};
+  const effectiveSamples=1/normalized.reduce((sum,row)=>sum+row.weight**2,0), medianDistance=sorted[Math.floor(sorted.length*.5)]?.distance || scale;
+  return { expectedReturn:Number.isFinite(expected) ? expected : 0, upProbability:up, samples:Math.round(effectiveSamples), candidateCount:pool.length, momentum:target.medium, volatility:target.volatility, regime:target.regime, matchQuality:clamp(Math.exp(-medianDistance/Math.max(scale,.001)),0,1), distribution:{p10:quantile(.1),p50:quantile(.5),p90:quantile(.9)} };
 }
 function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
 async function researchOutlook({ refresh = false } = {}) {
   const key='research-outlook', hit=cache.get(key), now=Date.now();
   if (!refresh && hit && now-hit.time<NEWS_TTL) return { ...cacheResult(hit, now), stale:false };
   return coalesce(key, async () => {
-    const [intraday,daily,news,sentiment]=await Promise.all([forecastHistory('15m'),forecastHistory('1d'),bitcoinNews({ refresh }),fearGreedSentiment({ refresh }).catch(()=>null)]);
+    const [intraday,daily,news,sentiment,derivatives]=await Promise.all([forecastHistory('15m'),forecastHistory('1d'),bitcoinNews({ refresh }),fearGreedSentiment({ refresh }).catch(()=>null),marketContext('okx').catch(()=>null)]);
     const newsItems=news.items || [], bullish=newsItems.filter(item=>item.sentiment>0).length, bearish=newsItems.filter(item=>item.sentiment<0).length;
-    const newsScore=newsItems.length ? clamp((bullish-bearish)/Math.max(4,newsItems.length*.35),-1,1) : 0;
+    const newsScore=newsItems.length ? clamp(newsItems.reduce((sum,item)=>{const ageHours=Number.isFinite(item.publishedAt)?Math.max(0,(now-item.publishedAt)/3_600_000):6, timeWeight=Math.exp(-ageHours/4);return sum+item.sentiment*(item.sourceWeight||.7)*(item.eventWeight||.7)*timeWeight},0)/Math.max(1,newsItems.reduce((sum,item)=>sum+(item.sourceWeight||.7),0)),-1,1) : 0;
     const sentimentScore=Number.isFinite(sentiment?.value) ? clamp((sentiment.value-50)/50,-1,1) : 0;
+    const microstructureScore=derivatives ? clamp((Number(derivatives.orderBook?.imbalancePct)||0)/30*.32 + (Number(derivatives.takerFlow?.imbalancePct)||0)/35*.38 + (Number(derivatives.oiChangePct)||0)/.8*(Number(derivatives.priceChangePct)||0>=0?1:-1)*.18 - (Number(derivatives.fundingRate)||0)/.001*.08 - (Number(derivatives.basisPct)||0)/.25*.04,-1,1) : 0;
     const last=intraday.candles.at(-1)?.close || daily.candles.at(-1)?.close;
     const definitions=[{ key:'1h', label:'约 1 小时', candles:intraday.candles, horizon:4, cap:.03 },{ key:'4h', label:'约 4 小时', candles:intraday.candles, horizon:16, cap:.05 },{ key:'1d', label:'约 1 天', candles:daily.candles, horizon:1, cap:.12 }];
     const windows=definitions.map(definition => {
       const history=historicalProjection(definition.candles,definition.horizon);
-      const newsWeight=definition.key==='1d'?.25:.12, sentimentWeight=definition.key==='1d'?.08:.04;
-      const adjustedReturn=clamp(history.expectedReturn + newsScore * newsWeight * Math.max(history.volatility,.002) + sentimentScore * sentimentWeight * Math.max(history.volatility,.002),-definition.cap,definition.cap);
-      const upProbability=clamp(history.upProbability + newsScore*.06 + sentimentScore*.025,.05,.95);
-      const direction=upProbability>=.53?'up':upProbability<=.47?'down':'flat';
-      return { ...definition, upProbability, expectedReturn:adjustedReturn, expectedMove:last*adjustedReturn, expectedPrice:last*(1+adjustedReturn), direction, samples:history.samples };
+      const newsWeight=definition.key==='1d'?.25:.12, sentimentWeight=definition.key==='1d'?.08:.04, microWeight=definition.key==='1h'?.12:definition.key==='4h'?.09:.025;
+      const adjustment=(newsScore*newsWeight + sentimentScore*sentimentWeight + microstructureScore*microWeight)*Math.max(history.volatility,.002);
+      const adjustedReturn=clamp(history.expectedReturn + adjustment,-definition.cap,definition.cap), volatilityUnit=Math.max(history.volatility*Math.sqrt(definition.horizon),.001);
+      const rawProbability=history.upProbability + newsScore*.06 + sentimentScore*.025 + microstructureScore*(definition.key==='1d'?.015:.045);
+      const upProbability=clamp((rawProbability*Math.max(1,history.samples)+.5*24)/(Math.max(1,history.samples)+24),.05,.95);
+      const direction=Math.abs(adjustedReturn)<volatilityUnit*.5?'flat':adjustedReturn>0?'up':'down';
+      const distribution=Object.fromEntries(Object.entries(history.distribution).map(([key,value])=>[key,clamp(value+adjustment,-definition.cap,definition.cap)]));
+      return { ...definition, upProbability, expectedReturn:adjustedReturn, expectedMove:last*adjustedReturn, expectedPrice:last*(1+adjustedReturn), direction, samples:history.samples, candidateCount:history.candidateCount, matchQuality:history.matchQuality, regime:history.regime, volatilityUnit, distribution, priceRange:{p10:last*(1+distribution.p10),p50:last*(1+distribution.p50),p90:last*(1+distribution.p90)} };
     });
     const primary=windows[1];
-    const result={ price:last, windows, news:{ source:news.source, fetchedAt:news.fetchedAt, bullish, bearish, neutral:newsItems.length-bullish-bearish, score:newsScore, items:newsItems.slice(0,6) }, sentiment:sentiment?{ value:sentiment.value, source:sentiment.source || 'Alternative.me' }:null, historical:{ intradaySource:intraday.source, dailySource:daily.source, intradaySamples:intraday.candles.length, dailySamples:daily.candles.length }, primary, fetchedAt:now, refreshMs:NEWS_TTL, cached:false, disclaimer:'Historical-pattern and public-headline research only; not investment advice.' };
+    const eventRisk=await fedCalendar().then(calendar=>calendar.events.some(event=>event.at-now>=0&&event.at-now<=24*3_600_000)?calendar.events.filter(event=>event.at-now>=0&&event.at-now<=24*3_600_000).map(event=>event.name):[]).catch(()=>[]);
+    const result={ price:last, windows, news:{ source:news.source, fetchedAt:news.fetchedAt, bullish, bearish, neutral:newsItems.length-bullish-bearish, score:newsScore, halfLifeHours:4, items:newsItems.slice(0,6) }, sentiment:sentiment?{ value:sentiment.value, source:sentiment.source || 'Alternative.me' }:null, derivatives:derivatives?{ source:derivatives.source, score:microstructureScore, fundingRate:derivatives.fundingRate, oiChangePct:derivatives.oiChangePct, bookImbalancePct:derivatives.orderBook?.imbalancePct, takerImbalancePct:derivatives.takerFlow?.imbalancePct, cvdSessionNotional:derivatives.takerFlow?.cvdSessionNotional, coverage:['funding','oi-change','order-book','taker-flow','cvd','basis'], unavailable:['funding term structure / long-short ratio','options PCR / 25Δ skew / IV term structure','liquidation heatmap','spot ETF net flows','on-chain exchange / whale flows','Coinbase and Kimchi premiums'] }:null, eventRisk, historical:{ intradaySource:intraday.source, dailySource:daily.source, intradaySamples:intraday.candles.length, dailySamples:daily.candles.length }, primary, fetchedAt:now, refreshMs:NEWS_TTL, cached:false, disclaimer:'Historical-pattern and public-headline research only; not investment advice.' };
     remember(key,result); return result;
   });
 }
