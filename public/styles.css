@@ -602,3 +602,40 @@ main>header,.terminal-layout{width:100%;min-width:0}
   #fearGreedGauge .fear-greed-summary{grid-template-columns:1fr!important}
   #fearGreedGauge .fear-greed-summary div:last-child{grid-column:auto}
 }
+
+/* Keep price change primary and place source / refresh metadata below it. */
+.hero #change{display:grid!important;grid-template-columns:max-content max-content;align-items:baseline;gap:2px 11px;white-space:normal!important}
+.hero #change .price-market-meta{grid-column:1/-1;display:flex;align-items:center;min-width:0;margin-top:2px;font-size:10px;line-height:1.35}
+.hero #change .price-market-meta #priceTime{margin-left:0}
+.hero #change .price-market-meta #priceSource{margin-left:8px}
+.hero #change .price-market-meta #priceSource:before{content:"·";margin-right:8px;color:var(--border-strong)}
+
+/* Two independent personal entries allow a simultaneous long and short. */
+.personal-entry-card{flex:1 1 420px;min-width:360px;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;padding:7px 18px;border-left:1px solid var(--border-subtle);font-family:"SF Mono","JetBrains Mono",monospace}
+.personal-entry-slot{display:grid;align-content:center;gap:4px;min-width:0;padding:2px 8px}
+.personal-entry-slot+.personal-entry-slot{border-left:1px solid var(--border-subtle)}
+.personal-entry-heading{display:block;color:var(--text-secondary);font:700 11px ui-sans-serif,system-ui,sans-serif;letter-spacing:.06em}
+.personal-entry-slot.long .personal-entry-heading:before,.personal-entry-slot.short .personal-entry-heading:before{content:"";display:inline-block;width:6px;height:6px;margin:0 6px 1px 0;border-radius:50%;background:var(--bull)}
+.personal-entry-slot.short .personal-entry-heading:before{background:var(--bear)}
+.personal-entry-value{justify-self:start;min-height:0;padding:0;border:0!important;background:transparent!important;border-radius:0;color:var(--text-primary)!important;font:800 23px/1.08 "SF Mono","JetBrains Mono",monospace;letter-spacing:-1.1px;cursor:text;box-shadow:none!important}
+.personal-entry-value:hover{color:var(--accent-cyan)!important}
+.personal-entry-slot>small{color:var(--text-muted);font:10px/1.25 ui-sans-serif,system-ui,sans-serif}
+.personal-entry-slot>b{font:800 14px/1.2 "SF Mono","JetBrains Mono",monospace}.personal-entry-slot>b em{font:inherit;font-style:normal;margin-left:5px}
+.personal-entry-slot.profit>b{color:var(--bull)}.personal-entry-slot.loss>b{color:var(--bear)}.personal-entry-slot.empty .personal-entry-value{color:var(--text-muted)!important}
+.personal-entry-slot input{width:100%;min-width:0;padding:5px 0 6px;border:0;border-bottom:2px solid var(--accent-cyan);border-radius:0;background:transparent;color:var(--text-primary);outline:0;font:800 20px/1.08 "SF Mono","JetBrains Mono",monospace;letter-spacing:-1px}
+.personal-entry-slot input::placeholder{font-size:12px;letter-spacing:0;color:var(--text-muted)}
+@media(min-width:1200px){.hero{grid-template-columns:minmax(260px,.82fr) minmax(410px,480px) minmax(330px,1fr)}.personal-entry-card{min-width:0!important;width:100%;max-width:none!important;align-self:stretch;border-top:0!important;border-left:1px solid var(--border-subtle)!important;padding:8px 12px!important}.personal-entry-card>small{display:none}}
+@media(min-width:1200px) and (max-width:1320px){.hero{grid-template-columns:minmax(240px,.8fr) minmax(390px,440px) minmax(320px,1fr)}}
+@media(max-width:680px){.personal-entry-card{min-width:0;grid-template-columns:1fr;gap:8px}.personal-entry-slot{padding:7px 0}.personal-entry-slot+.personal-entry-slot{border-top:1px solid var(--border-subtle);border-left:0}.personal-entry-value{font-size:23px}}
+
+/* Restore the original entry-card look in both independent slots. */
+.personal-entry-card{grid-template-columns:repeat(2,minmax(0,1fr));gap:0}
+.personal-entry-slot{display:grid;align-content:center;gap:4px;min-width:0;padding:2px 12px}
+.personal-entry-slot+.personal-entry-slot{border-left:1px solid var(--border-subtle)}
+.personal-entry-heading{display:flex;align-items:center;gap:9px;color:var(--text-secondary);font:700 11px ui-sans-serif,system-ui,sans-serif;letter-spacing:.08em;text-transform:uppercase}
+.personal-entry-slot.long .personal-entry-heading:before,.personal-entry-slot.short .personal-entry-heading:before{display:none}
+.personal-side-picker{display:inline-flex;gap:2px;padding:2px;border:1px solid var(--border-subtle);border-radius:999px;font-style:normal}
+.personal-side-picker button{min-height:0;padding:2px 6px;border:0!important;border-radius:999px;background:transparent!important;color:var(--text-muted)!important;font:700 9px ui-sans-serif,system-ui,sans-serif;letter-spacing:0;box-shadow:none!important}
+.personal-side-picker button.active[data-entry-side="long"]{background:rgba(0,212,170,.16)!important;color:var(--bull)!important}.personal-side-picker button.active[data-entry-side="short"]{background:rgba(255,77,106,.16)!important;color:var(--bear)!important}
+.personal-entry-slot>small{color:var(--text-muted);font:10px/1.25 ui-sans-serif,system-ui,sans-serif}.personal-entry-slot>b{font:800 14px/1.2 "SF Mono","JetBrains Mono",monospace}.personal-entry-slot.profit>b{color:var(--bull)}.personal-entry-slot.loss>b{color:var(--bear)}
+@media(max-width:680px){.personal-entry-card{grid-template-columns:1fr;gap:8px}.personal-entry-slot{padding:7px 0}.personal-entry-slot+.personal-entry-slot{border-top:1px solid var(--border-subtle);border-left:0}}
