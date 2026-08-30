@@ -648,3 +648,25 @@ main>header,.terminal-layout{width:100%;min-width:0}
 .personal-entry-slot>small{color:var(--text-muted);font:10px/1.25 ui-sans-serif,system-ui,sans-serif}.personal-entry-slot>b{font:800 14px/1.2 "SF Mono","JetBrains Mono",monospace}.personal-entry-slot.profit>b{color:var(--bull)}.personal-entry-slot.loss>b{color:var(--bear)}
 .personal-entry-slot.profit .personal-entry-status{color:var(--bull)}.personal-entry-slot.loss .personal-entry-status{color:var(--bear)}
 @media(max-width:680px){.personal-entry-card{grid-template-columns:1fr;gap:8px}.personal-entry-slot{padding:7px 0}.personal-entry-slot+.personal-entry-slot{border-top:1px solid var(--border-subtle);border-left:0}}
+
+/* 移动端帮助图标必须是不可伸缩的圆形；标题/工具栏的弹性或网格布局不能改变其比例。
+   Mobile help icons must stay non-shrinking circles; flex/grid layout in headings and toolbars must not distort them. */
+.help-dot,.metric .help-dot,.change-card .help-dot,.card h2 .help-dot,.levels .help-dot,.toolbar .help-dot,.signal-projection .help-dot{
+  box-sizing:border-box!important;
+  display:inline-grid!important;
+  place-items:center!important;
+  inline-size:16px!important;
+  block-size:16px!important;
+  width:16px!important;
+  height:16px!important;
+  min-width:16px!important;
+  min-height:16px!important;
+  max-width:16px!important;
+  max-height:16px!important;
+  aspect-ratio:1 / 1!important;
+  flex:0 0 16px!important;
+  align-self:center!important;
+  padding:0!important;
+  line-height:14px!important;
+  border-radius:50%!important;
+}
