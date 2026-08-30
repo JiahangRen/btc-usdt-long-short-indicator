@@ -1,4 +1,6 @@
 const $ = id => document.getElementById(id);
+// 前端控制器：维护首屏状态、定时请求、图表绘制和所有用户交互。
+// Frontend controller: owns initial state, scheduled requests, chart drawing, and user interactions.
 var quoteStripBusy=false;
 const state = { interval:'15m', limit:96, range:'1D', source:'okx', candles:[], ticker:null, lastGood:null, loading:false, zoom:1 };
 const intervals = [['1m','1 分'],['5m','5 分'],['15m','15 分'],['30m','30 分'],['1h','1 时'],['2h','2 时'],['4h','4 时'],['1d','1 日']];
@@ -30,7 +32,7 @@ let quoteLoading=false;
 async function loadQuote(){if(quoteLoading||!state.ticker)return;quoteLoading=true;const started=performance.now();try{const r=await fetch('/api/quote?'+new URLSearchParams({source:state.source||'okx'})),data=await r.json();if(!r.ok)throw data;requestLatency=Math.round(performance.now()-started);state.ticker=data.ticker;state.lastGood={...(state.lastGood||{}),source:data.source,ticker:data.ticker,fetchedAt:data.fetchedAt,transport:data.transport,cacheAgeMs:data.cacheAgeMs,stale:data.stale};renderTicker();$('freshness').textContent=pointTime(data.fetchedAt)}catch{}finally{quoteLoading=false}}
 $('source').onchange=e=>{state.source=e.target.value;loadCurrent()};$('refresh').onclick=()=>loadCurrent();$('loadResonance').onclick=resonance;buttons();setTimeout(()=>loadCurrent(),0);setInterval(()=>loadCurrent(),10_000);setInterval(()=>loadQuote(),1_000);
 
-/* Enhanced chart and signal presentation */
+/* 图表与信号增强展示 / Enhanced chart and signal presentation */
 let hoverIndex = null;
 function renderAnalysis() {
   const m=metrics(state.candles),[label,cls]=classification(m.score),direction=m.score>=0?'做多':'做空',strength=Math.min(100,Math.abs(m.score));
@@ -93,7 +95,7 @@ function nyseState(){const parts=new Intl.DateTimeFormat('en-US',{timeZone:'Amer
 function updateClocks(){const el=$('marketClocks');if(!el)return;const zh=uiLang==='zh';el.innerHTML=`<span>${zh?'北京时间':'Beijing'} <b>${formatZone('Asia/Shanghai')} GMT+8</b></span><i></i><span>${zh?'纽约（美股）':'New York (NYSE)'} <b>${formatZone('America/New_York')}</b> · <em class="${nyseState()?'open':'closed'}">${nyseState()?(zh?'开市中':'Market open'):(zh?'09:30 开盘':'Opens 09:30')}</em></span>`}
 (() => {const header=document.querySelector('header'),controls=header.querySelector('.controls'),clocks=document.createElement('div');clocks.id='marketClocks';header.after(clocks);const lang=document.createElement('button');lang.id='langToggle';const fullscreen=document.createElement('button');fullscreen.id='fullscreenToggle';fullscreen.type='button';const theme=document.createElement('button');theme.id='themeToggle';controls.append(lang,fullscreen,theme);lang.onclick=()=>{uiLang=uiLang==='zh'?'en':'zh';localStorage.setItem('btc_lang',uiLang);applyLanguage();updateClocks()};fullscreen.onclick=toggleFullscreen;theme.onclick=()=>{themeMode={auto:'light',light:'dark',dark:'auto'}[themeMode];applyTheme()};document.addEventListener('fullscreenchange',syncFullscreenButton);document.addEventListener('webkitfullscreenchange',syncFullscreenButton);applyLanguage();updateClocks();setInterval(updateClocks,1000)})();
 
-/* Interaction, explanations, and complete language layer */
+/* 交互、说明与完整语言层 / Interaction, explanations, and complete language layer */
 let chartSelection=null, requestLatency=0;
 const tx=(zh,en)=>uiLang==='zh'?zh:en;
 function pointTime(ms){return new Intl.DateTimeFormat(uiLang==='zh'?'zh-CN':'en-US',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(ms)}
@@ -187,6 +189,7 @@ loadForecasts=async function(force=false){const grid=$('forecastGrid'),status=$(
 if($('refreshForecast'))$('refreshForecast').onclick=loadForecasts;
 $('chart')?.addEventListener('mousemove',()=>{const tip=$('chartTooltip'),d=visibleCandles(),v=d[hoverIndex];if(!tip||!v||!state.ticker)return;const delta=(v.close/v.open-1)*100;tip.innerHTML=`<b>${pointTime(v.time)}</b><span>${tx('实时价','Live')} <strong>${money(state.ticker.last)}</strong></span><span>${tx('开','Open')} ${money(v.open)}　${tx('高','High')} ${money(v.high)}</span><span>${tx('低','Low')} ${money(v.low)}　${tx('收','Close')} ${money(v.close)}</span><span class="${delta>=0?'bull':'bear'}">${pct(delta)}　${tx('量','Vol')} ${v.volume.toLocaleString('en-US',{maximumFractionDigits:2})}</span>`});
 
+// 悬停时保持图表稳定；离开绘图区才清除十字线，让下一次实时刷新重绘。
 // Keep a hovered chart visually stable; leaving the plotting surface clears the
 // crosshair and lets the next live refresh redraw it.
 let chartPaused=false,frozenCandles=null;
@@ -215,7 +218,8 @@ $('chart')?.addEventListener('mousemove',()=>{const tip=$('chartTooltip'),v=visi
 $('chart')?.addEventListener('pointerup',()=>{if(!chartSelection)return;const d=visibleCandles(),a=Math.min(chartSelection.start,chartSelection.end),b=Math.max(chartSelection.start,chartSelection.end),s=d.slice(a,b+1),hi=Math.max(...s.map(v=>v.high)),lo=Math.min(...s.map(v=>v.low)),ret=(s.at(-1).close/s[0].open-1)*100,duration=Math.max(0,s.at(-1).time-s[0].time)/60000,el=$('selectionStats');if(el)el.innerHTML=`<b>${tx('已选时间段','Selected period')}</b> ${pointTime(s[0].time)} — ${pointTime(s.at(-1).time)} · ${s.length} ${tx('根','candles')} / ${duration.toFixed(0)} ${tx('分钟','min')} · <span class="high">${tx('最高','High')} ${money(hi)}</span> · <span class="low">${tx('最低','Low')} ${money(lo)}</span> · <span class="${ret>=0?'bull':'bear'}">${tx('涨跌幅','Return')} ${pct(ret)}</span>`});
 if(state.candles.length)renderAnalysis();
 
-/* The rule-signal panel deliberately uses its own closed-candle data stream.
+/* 规则信号面板刻意使用独立的已收盘 K 线流，避免未收盘 K 线造成结论抖动。
+   The rule-signal panel deliberately uses its own closed-candle data stream.
    Chart range and chart interval are presentation controls, not a signal input. */
 const fixedRuleSignal={interval:localStorage.getItem('btc_rule_signal_interval')||'15m',candles:[],source:'',closedAt:0,loading:false};
 function fixedRuleBasisText(){const source={okx:'OKX',coinbase:'Coinbase',binance:'Binance',gate:'Gate'}[fixedRuleSignal.source||state.source]||'--',label={"5m":'5分钟',"15m":'15分钟',"30m":'30分钟',"1h":'1小时',"3h":'3小时'}[fixedRuleSignal.interval]||fixedRuleSignal.interval;return `基准：${source} · ${label} · 最近 200 根已收盘 K 线`}
@@ -247,7 +251,8 @@ async function loadFixedRuleSignal(force=false){if(fixedRuleSignal.loading)retur
 const renderAnalysisWithFixedRuleSignal=renderAnalysis;
 renderAnalysis=function(){renderAnalysisWithFixedRuleSignal();renderFixedRuleSignal()};
 
-/* Main chart: render true OHLC candles (body + high/low wicks) rather than a
+/* 主图渲染真实 OHLC 蜡烛（实体与上下影线），而不是只画收盘价折线。
+   Main chart: render true OHLC candles (body + high/low wicks) rather than a
    close-only line.  This preserves hammer / shooting-star shapes directly in
    the price data while keeping the existing MA, range-selection and tooltip UI. */
 function drawCandlestickChart(){
@@ -282,11 +287,13 @@ draw=function(){if(!chartPaused)drawCandlestickChart()};
 ['mousemove','pointermove','pointerdown','mouseleave'].forEach(type=>$('chart')?.addEventListener(type,()=>drawCandlestickChart()));
 if(state.candles.length)drawCandlestickChart();
 
-// Each item in the pattern card gets a plain-language explanation.  Add these
+// 形态卡片每一项都提供通俗说明；必须在渲染器之后添加，避免数据刷新时被覆盖。
+// Each item in the pattern card gets a plain-language explanation. Add these
 // after the renderer so a data refresh cannot remove them.
 const renderPatternAnalysisWithPlainHelp=renderPatternAnalysis;
 renderPatternAnalysis=function(){renderPatternAnalysisWithPlainHelp();const card=$('patternAnalysis');if(!card)return;const attach=(selector,zh,en)=>{const label=card.querySelector(selector);if(label)addHelp(label,zh,en)};attach('.pattern-grid article:nth-child(1) small','趋势与均线：把 MA5、MA10、MA20 想成不同速度的平均价格线。短线均线在上、长一点的均线在下，代表最近价格整体偏强；反过来则偏弱。它只描述目前走势，不保证下一根 K 线继续涨或跌。','Trend and moving averages: MA5, MA10 and MA20 are average-price lines of different speeds. Faster lines above slower ones indicate recent strength; the reverse indicates weakness. This describes the current trend, not the next candle.');attach('.pattern-grid article:nth-child(2) small','近期关键高 / 低：这是前 20 根已经完成的 K 线里，价格到过的最高和最低位置。很多人会把它们当成可能遇到卖压或买盘的位置，但价格也可能直接突破。','Recent high / low: the highest and lowest prices across the prior 20 completed candles. They can act as areas of selling or buying interest, but price can also break through them.');attach('.pattern-grid article:nth-child(3) small','当前 K 线信号：看这一根 K 线的上下影线和成交量。长上影表示冲高后被卖下来，长下影表示跌下去后有人接；单独一根 K 线不能确认趋势。','Current-candle signal: reads this candle\'s wicks and volume. A long upper wick shows selling after a push up; a long lower wick shows buying after a dip. One candle cannot confirm a trend.');attach('.pattern-levels span:nth-child(1) small','阻力参考：价格靠近这里时，可能遇到较多卖单或前期套牢盘。站上并收稳才说明压力可能被突破。','Resistance: an area where selling or trapped holders may appear. Holding above it after a close suggests the pressure may be breaking.');attach('.pattern-levels span:nth-child(2) small','短线支撑：离当前价格较近、值得观察的承接位置。跌破不代表一定继续跌，但说明短线买盘需要重新确认。','Near support: a nearby area where buyers may step in. A break does not guarantee further decline, but means short-term demand needs reassessment.');attach('.pattern-levels span:nth-child(3) small','关键支撑：比短线支撑更重要的观察位置。若价格在这里也守不住，原来的上涨或震荡结构可能变弱。','Key support: a more important level than near support. Losing it can weaken the prior uptrend or range structure.');attach('.pattern-levels span:nth-child(4) small','结构失效参考：这是当前这套“偏多、偏空或震荡”解读不再适用的价格附近。它是复盘用的风险参考，不是自动下单价。','Structure invalidation: a nearby price where the current bullish, bearish, or range interpretation no longer fits. It is a risk reference, not an order price.');attach('.pattern-scenario b','情景观察：页面把当前数据整理成“如果发生 A，就重点观察 B”的条件句，帮助你做计划；不是对未来的保证。','Scenario watch: conditional planning from current data—if A happens, watch B. It is not a prediction or guarantee.')};
 
+// 保留原有六项技术指标；仅在当前交易所提供数据时追加市场环境确认项。
 // Keep the original six technical indicators and append market-context
 // confirmations only when the selected exchange supplies them.
 renderTradingConfirmation=function(m){const indicators=$('indicators'),candles=fixedRuleSignal.candles;if(!indicators||candles.length<30)return;const latest=candles.at(-1),averageVolume=candles.slice(-21,-1).reduce((sum,c)=>sum+c.volume,0)/20,volumeRatio=averageVolume?latest.volume/averageVolume:NaN,vwap=fixedSessionVwap(candles),context=derivativeMarketContext?.source===(fixedRuleSignal.source||state.source)?derivativeMarketContext:null,funding=context?.fundingRate,basis=context?.basisPct,oi=context?.oi;const trendBull=m.close>m.e20&&m.e20>m.e50&&m.e50>m.e200,trendBear=m.close<m.e20&&m.e20<m.e50&&m.e50<m.e200,vwapBull=Number.isFinite(vwap)&&m.close>vwap,vwapBear=Number.isFinite(vwap)&&m.close<vwap,crowdedLong=Number.isFinite(funding)&&funding>=.0005,crowdedShort=Number.isFinite(funding)&&funding<=-.0005,extremeBasis=Number.isFinite(basis)&&Math.abs(basis)>=.12,rows=[];const add=(key,name,value,kind,label,help)=>rows.push({key,name,value,kind,label,help}),signal=(bull,bear)=>bull?'bull':bear?'bear':'flat';add('ema20','EMA20',money(m.e20),signal(m.close>=m.e20,m.close<m.e20),m.close>=m.e20?tx('看多','Bullish'):tx('看空','Bearish'),['当前选中价相对 EMA20 的位置；EMA20 用于观察短线趋势。','Selected price relative to EMA20; EMA20 is a short-term trend reference.']);add('ema50','EMA50',money(m.e50),signal(m.close>=m.e50,m.close<m.e50),m.close>=m.e50?tx('看多','Bullish'):tx('看空','Bearish'),['当前选中价相对 EMA50 的位置；EMA50 用于观察中短线趋势。','Selected price relative to EMA50; EMA50 is a medium-short trend reference.']);if(Number.isFinite(m.e200))add('ema200','EMA200',money(m.e200),signal(m.close>=m.e200,m.close<m.e200),m.close>=m.e200?tx('看多','Bullish'):tx('看空','Bearish'),['当前选中价相对 EMA200 的位置；EMA200 常用于长趋势过滤。','Selected price relative to EMA200; EMA200 is commonly used as a long-trend filter.']);const rsiKind=m.rsi>55?'bull':m.rsi<45?'bear':'flat';add('rsi','RSI(14)',m.rsi.toFixed(2),rsiKind,rsiKind==='bull'?tx('看多','Bullish'):rsiKind==='bear'?tx('看空','Bearish'):tx('中性','Neutral'),['RSI(14) 衡量近期涨跌动能；这里按 55/45 作为偏多或偏空的温和阈值，不等同超买超卖。','RSI(14) measures recent momentum. 55/45 are mild directional thresholds, not overbought/oversold calls.']);const bollKind=m.boll>55?'bull':m.boll<45?'bear':'flat';add('boll',tx('布林位置','Bollinger position'),`${m.boll.toFixed(2)}%`,bollKind,bollKind==='bull'?tx('看多','Bullish'):bollKind==='bear'?tx('看空','Bearish'):tx('中性','Neutral'),['价格在布林带中的相对位置；接近上/下沿并不单独构成开仓信号。','Relative position within Bollinger Bands; being near either band is not an entry signal on its own.']);add('atr','ATR(14)',money(m.atr),'flat',tx('中性','Neutral'),['ATR(14) 衡量波动幅度，适合用于止损和仓位大小；它本身不判断方向。','ATR(14) measures volatility and is useful for stops and sizing; it is not directional by itself.']);const volumeKind=volumeRatio>=1.2?'bull':volumeRatio<.8?'bear':'flat';if(Number.isFinite(volumeRatio))add('volume',tx('成交量确认','Volume confirmation'),`${volumeRatio.toFixed(2)}×`,volumeKind,volumeKind==='bull'?tx('确认','Confirmed'):volumeKind==='bear'?tx('偏弱','Weak'):tx('一般','Normal'),['最新已收盘 K 线成交量相对前 20 根均量。≥1.2× 为放量确认，<0.8× 为量能偏弱。','Latest closed-candle volume relative to the prior 20-candle average. ≥1.2× confirms participation; <0.8× is weak.']);if(Number.isFinite(vwap))add('vwap',tx('日内 VWAP','Session VWAP'),money(vwap),signal(vwapBull,vwapBear),vwapBull?tx('偏多','Bullish'):tx('偏空','Bearish'),['UTC 自然日成交量加权平均价。价格在其上/下仅说明日内位置，仍需趋势与成交量确认。','UTC-session VWAP. Price above/below only indicates intraday position and still needs trend and volume confirmation.']);if(Number.isFinite(funding))add('funding',tx('资金费率','Funding rate'),formatRate(funding),crowdedLong?'bear':crowdedShort?'bull':'flat',crowdedLong?tx('多头拥挤','Long crowded'):crowdedShort?tx('空头拥挤','Short crowded'):tx('中性','Neutral'),['永续资金费率反映多空持仓的定期费用。费率极端时，拥挤方向的追单风险更高。','Funding reflects periodic perp-position payments. Extreme readings increase the risk of chasing the crowded side.']);if(Number.isFinite(oi))add('oi',tx('持仓量 OI','Open interest'),`${oi.toLocaleString('en-US',{maximumFractionDigits:2})} ${context.oiUnit||''}`.trim(),'flat',tx('中性','Neutral'),['交易所公开的未平仓合约量，反映杠杆参与规模；需结合价格和成交量判断。','Public open interest reflects leveraged participation and should be read with price and volume.']);if(Number.isFinite(basis))add('basis',tx('永续价差','Perp basis'),`${basis>=0?'+':''}${basis.toFixed(3)}%`,extremeBasis?(basis>0?'bear':'bull'):'flat',extremeBasis?tx('注意','Caution'):tx('中性','Neutral'),['永续相对现货的百分比价差。较大的溢价或贴水可能提示杠杆市场拥挤。','Perpetual price relative to spot. A large premium or discount can indicate crowded derivatives positioning.','']);let action=trendBull&&vwapBull&&volumeRatio>=1?tx('研究偏多','Bullish bias'):trendBear&&vwapBear&&volumeRatio>=1?tx('研究偏空','Bearish bias'):tx('观望','Wait'),decisionKind=action===tx('研究偏多','Bullish bias')?'bull':action===tx('研究偏空','Bearish bias')?'bear':'flat';if((decisionKind==='bull'&&crowdedLong)||(decisionKind==='bear'&&crowdedShort)){action=tx('观望','Wait');decisionKind='flat'}const row=({key,name,value,kind,label})=>`<div class="metric trade-confirmation-row compact-indicator" data-fixed-basis="true" data-indicator="${key}"><span>${name}</span><b>${value}</b><i class="badge ${kind}">${label}</i></div>`;indicators.classList.add('trade-confirmation-metrics','indicator-adaptive-grid');indicators.style.setProperty('--indicator-font-scale',rows.length>10?'.84':rows.length>8?'.92':'1');indicators.innerHTML=rows.map(row).join('')+`<div class="trade-decision ${decisionKind}"><span>${tx('综合研究结论','Research view')}</span><b>${action}</b><p>${tx('仅在趋势、VWAP 与成交量同向时给出研究倾向；资金费率与永续价差用于识别拥挤风险。','A directional bias requires trend, VWAP and volume agreement; funding and basis flag crowding risk.')}${context?` · ${String(context.source).toUpperCase()}`:''}</p></div>`;indicators.querySelectorAll('.compact-indicator').forEach(el=>{const copy=rows.find(item=>item.key===el.dataset.indicator)?.help;if(copy)addHelp(el.querySelector('span'),copy[0],copy[1])})};
@@ -344,7 +351,8 @@ renderFixedRuleSignal=function(){renderFixedRuleSignalWithTradingConfirmation();
 $('source')?.addEventListener('change',()=>{derivativeMarketContext=null;loadDerivativeMarketContext(true)});
 loadDerivativeMarketContext(true);setInterval(()=>loadDerivativeMarketContext(true),10_000);
 
-/* Connectivity diagnostics begin shortly after startup, with the server's
+/* 连通性诊断在启动稍后执行，并将服务器给出的本地与上游耗时分别呈现。
+   Connectivity diagnostics begin shortly after startup, with the server's
    persistent OKX WebSocket checked before REST-backed data routes. */
 setTimeout(()=>{const controls=document.querySelector('main>header .controls'),version=$('appVersion');if(!controls||!version||$('connectivityToggle'))return;const wrap=document.createElement('div');wrap.className='connectivity-wrap';wrap.innerHTML='<button id="connectivityToggle" class="connectivity-toggle" type="button" aria-expanded="false"></button><section id="connectivityPanel" class="connectivity-panel" hidden><div class="connectivity-head"><div><b id="connectivityTitle"></b><small id="connectivityScope"></small></div><button id="rerunConnectivity" type="button"></button></div><div id="connectivitySummary" class="connectivity-summary"></div><div id="connectivityRows" class="connectivity-rows"></div><p id="connectivityFoot"></p></section>';version.after(wrap);const toggle=$('connectivityToggle'),panel=$('connectivityPanel'),rows=$('connectivityRows'),summary=$('connectivitySummary');let hasRun=false,running=false;
 const copy=()=>{toggle.childNodes[0]?.remove();toggle.prepend(document.createTextNode(tx('连通性测试','Connectivity')+' '));$('connectivityTitle').textContent=tx('数据连通性','Data connectivity');$('connectivityScope').textContent=tx('浏览器 → 本站，与服务器 → 数据上游分开统计','Browser → site and server → upstream measured separately');$('rerunConnectivity').textContent=tx('重新检测','Test again');$('connectivityFoot').textContent=tx('本地到本站 = 浏览器总耗时减去服务端处理；服务器到上游 = 实际 REST 等待。OKX WebSocket 会显示数据年龄；缓存命中时上游为 0 ms。','Browser → site = total browser time minus server processing. Server → upstream is REST wait time. OKX WebSocket shows data age; cached responses show 0 ms upstream.')};
@@ -388,7 +396,7 @@ $('chart')?.closest('.chart-box')?.addEventListener('wheel',event=>{if(!event.me
    mode: candle chart uses wick high/low, close-line chart uses close high/low. */
 renderRangeExtremaPoints=function(){const box=$('chart')?.closest('.chart-box'),cv=$('chart'),d=visibleCandles();if(!box||!cv||d.length<2)return;let high=$('rangeHighPoint'),low=$('rangeLowPoint');if(!high){high=document.createElement('div');high.id='rangeHighPoint';high.className='range-extreme high';box.append(high)}if(!low){low=document.createElement('div');low.id='rangeLowPoint';low.className='range-extreme low';box.append(low)}const series=state.chartSeries||{candles:true,close:false},highValue=v=>series.candles?v.high:v.close,lowValue=v=>series.candles?v.low:v.close,hiI=d.reduce((best,v,i)=>highValue(v)>highValue(d[best])?i:best,0),loI=d.reduce((best,v,i)=>lowValue(v)<lowValue(d[best])?i:best,0),values=d.flatMap(v=>[v.low,v.high]),closes=d.map(v=>v.close);[ema(closes,20),ema(closes,50),ema(closes,200)].forEach(a=>a.forEach(v=>{if(Number.isFinite(v))values.push(v)}));let min=Math.min(...values),max=Math.max(...values),pad=(max-min||1)*.075;min-=pad;max+=pad;const rect=cv.getBoundingClientRect(),P={l:18,r:74,t:15,b:30},cw=rect.width-P.l-P.r,ch=rect.height-P.t-P.b,x=i=>P.l+i/(d.length-1)*cw,y=v=>P.t+ch-(v-min)/(max-min)*ch,label=state.range||state.interval,point=(el,i,value,kind)=>{el.style.left=`${Math.max(8,Math.min(rect.width-160,x(i)))}px`;el.style.top=`${Math.max(6,Math.min(rect.height-28,y(value)+(kind==='high'?-25:8)))}px`;el.textContent=`${label}${kind==='high'?tx('最高点',' high'):tx('最低点',' low')} ${money(value)} · ${pointTime(d[i].time)}`};point(high,hiI,highValue(d[hiI]),'high');point(low,loI,lowValue(d[loI]),'low')};
 
-/* Header version is deliberately independent from the selected market source. */
+/* 顶部版本信息与用户选定的数据源刻意解耦 / Header version is deliberately independent from the selected market source. */
 (() => {
   const controls = document.querySelector('main>header .controls');
   if (!controls || $('appVersion')) return;
@@ -428,7 +436,8 @@ renderFixedRuleSignal();
 
 /* Chart display controls: persist an intentional, uncluttered line setup. */
 (()=>{const toolbar=$('chart')?.closest('.card')?.querySelector('.toolbar'),chartBox=$('chart')?.closest('.chart-box');if(!toolbar||$('chartDisplayControls'))return;const saved=JSON.parse(localStorage.getItem('btc_chart_display')||'{}');state.chartSeries={candles:saved.candles??saved.mode!=='line',close:saved.close??(saved.mode==='line')};state.chartLines={ma20:saved.ma20??true,ma50:saved.ma50??true,ma200:saved.ma200??true};const legend=document.createElement('div');legend.id='chartPatternLegend';legend.className='chart-pattern-legend';legend.innerHTML='<span><b>H</b> 锤子线：长下影线，表示低位承接形态</span><span><b>S</b> 流星线：长上影线，表示高位抛压形态</span>';chartBox.after(legend);const panel=document.createElement('div');panel.id='chartDisplayControls';panel.className='chart-display-controls';const sync=()=>{panel.querySelectorAll('[data-series]').forEach(b=>b.classList.toggle('active',state.chartSeries[b.dataset.series]));panel.querySelectorAll('[data-line]').forEach(b=>b.classList.toggle('off',!state.chartLines[b.dataset.line]));legend.hidden=!state.chartSeries.candles;localStorage.setItem('btc_chart_display',JSON.stringify({...state.chartSeries,...state.chartLines}));drawCandlestickChart()};panel.innerHTML=`<span>${tx('图表','Chart')}</span><button type="button" data-series="candles">${tx('K线图','Candlestick')}</button><button type="button" data-series="close">${tx('收盘价折线','Close line')}</button><div class="chart-line-toggles"><button type="button" data-line="ma20">MA20</button><button type="button" data-line="ma50">MA50</button><button type="button" data-line="ma200">MA200</button></div>`;panel.addEventListener('click',event=>{const series=event.target.dataset.series,line=event.target.dataset.line;if(series)state.chartSeries[series]=!state.chartSeries[series];if(line)state.chartLines[line]=!state.chartLines[line];if(series||line)sync()});toolbar.append(panel);sync()})();
-/* The selected source is always a perpetual contract; say so explicitly so
+/* 当前所选来源始终为永续合约，应明确标出，避免被误认为现货。
+   The selected source is always a perpetual contract; say so explicitly so
    a displayed futures quote is never mistaken for spot. */
 const renderTickerWithContractLabel=renderTicker;
 renderTicker=function(){renderTickerWithContractLabel();const source=$('sourceUsed');if(!source)return;source.textContent={okx:tx('OKX USDT 永续','OKX USDT perpetual'),coinbase:tx('Coinbase BTC-PERP 永续','Coinbase BTC-PERP perpetual'),binance:tx('Binance USDT-M 永续','Binance USDT-M perpetual'),gate:tx('Gate USDT 永续','Gate USDT perpetual')}[state.lastGood?.source||state.source]||tx('USDT 永续','USDT perpetual')};
@@ -436,7 +445,8 @@ renderTicker=function(){renderTickerWithContractLabel();const source=$('sourceUs
    apply an option through the existing source-change handler. */
 (()=>{const native=$('source');if(!native||$('sourcePicker'))return;native.classList.add('source-native');const picker=document.createElement('div');picker.id='sourcePicker';picker.className='dropdown-container';picker.innerHTML='<span class="dropdown-trigger" aria-hidden="true"></span><div class="dropdown-menu" role="listbox"></div>';native.after(picker);const trigger=picker.querySelector('.dropdown-trigger'),menu=picker.querySelector('.dropdown-menu'),sync=()=>{trigger.textContent=native.options[native.selectedIndex]?.textContent||native.value;menu.innerHTML=[...native.options].map(option=>`<button type="button" role="option" aria-selected="${option.value===native.value}" data-source-option="${option.value}">${option.textContent}</button>`).join('')};menu.addEventListener('click',event=>{const option=event.target.closest('[data-source-option]');if(!option)return;native.value=option.dataset.sourceOption;native.dispatchEvent(new Event('change',{bubbles:true}));sync()});native.addEventListener('change',sync);sync()})();
 
-/* Final English-mode QA layer: every persistent card and every dynamically
+/* 英文模式质量层：覆盖固定卡片与动态插入内容。
+   Final English-mode QA layer: every persistent card and every dynamically
    rendered market-analysis string is rebuilt from the same locale source. */
 loadCorrelation=async function(){const status=$('correlationStatus'),out=$('correlationOutput');if(!out)return;status.textContent=tx('正在对齐 BTC、SPY、QQQ 的共同交易日并训练…','Aligning BTC, SPY and QQQ trading days and training…');try{const r=await fetch('/api/correlation-history'),d=await r.json();if(!r.ok)throw new Error(d.error||'request failed');const quoteCard=(name,ticker,q)=>{const delta=q.last-q.previous,up=delta>=0;return `<article class="index-card ${up?'up':'down'}"><span>${name} · ${ticker}</span><b>${q.last.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}</b><div><em>${up?'+':'−'}${Math.abs(delta).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}</em><em>${up?'+':'−'}${(Math.abs(delta)/q.previous*100).toFixed(2)}%</em></div><small>${tx('最近收盘','Last close')}</small></article>`};const cards=$('indexTickerCards');if(cards)cards.innerHTML=quoteCard(tx('标普 500','S&P 500'),'SPY',d.indexQuotes.spy)+quoteCard(tx('纳斯达克 100','Nasdaq 100'),'QQQ',d.indexQuotes.qqq);const byDate=arr=>new Map(arr.map(x=>[new Date(x.time).toISOString().slice(0,10),x.close])),btc=byDate(d.btc),spy=byDate(d.spy),qqq=byDate(d.qqq),dates=[...btc.keys()].filter(k=>spy.has(k)&&qqq.has(k)).sort(),rows=[];for(let i=1;i<dates.length-1;i++){const prev=dates[i-1],cur=dates[i],next=dates[i+1],br=(btc.get(cur)/btc.get(prev)-1)*100,sr=(spy.get(cur)/spy.get(prev)-1)*100,qr=(qqq.get(cur)/qqq.get(prev)-1)*100;rows.push({br,sr,qr,y:btc.get(next)>btc.get(cur)?1:0,x:[sr,qr,br]})}const recent=rows.slice(-60),fit=trainCrossMarket(rows),corrSPY=pearson(recent.map(x=>x.br),recent.map(x=>x.sr)),corrQQQ=pearson(recent.map(x=>x.br),recent.map(x=>x.qr)),p=fit?Math.round(fit.prob*100):null,correlationLabel=v=>v>=.3?tx('正相关较明显','Clear positive correlation'):v<=-.3?tx('负相关较明显','Clear negative correlation'):tx('相关性偏弱','Weak correlation');out.innerHTML=`<div class="corr-stat"><span>BTC × SPY (${tx('60日','60d')})</span><b class="${corrSPY>=0?'bull':'bear'}">${corrSPY>=0?'+':''}${corrSPY.toFixed(2)}</b><small>${correlationLabel(corrSPY)}</small></div><div class="corr-stat"><span>BTC × QQQ (${tx('60日','60d')})</span><b class="${corrQQQ>=0?'bull':'bear'}">${corrQQQ>=0?'+':''}${corrQQQ.toFixed(2)}</b><small>${correlationLabel(corrQQQ)}</small></div><div class="corr-stat wide"><span>${tx('跨市场模型：下一交易日 BTC 看多概率','Cross-market model: next-session BTC bullish probability')}</span><b class="${p>=50?'bull':'bear'}">${p===null?'--':p.toFixed(2)+'%'}</b><small>${fit?tx(`SPY、QQQ 与 BTC 当日收益特征 · 样本外准确率 ${(fit.accuracy*100).toFixed(2)}% · 训练 n=${fit.n}`,`SPY, QQQ and BTC same-day return features · out-of-sample accuracy ${(fit.accuracy*100).toFixed(2)}% · training n=${fit.n}`):tx('共同交易日不足','Not enough shared trading days')}</small></div>`;status.textContent=tx(`数据已按共同交易日对齐 · ${d.cached?'缓存数据':'刚更新'} · 相关性会随窗口变化，不能单独作为开仓信号。`,`Data aligned to shared trading days · ${d.cached?'cached':'updated'} · correlations vary by window and are not stand-alone entry signals.`)}catch(e){status.textContent=`${tx('美股联动模块暂不可用','US equities linkage module unavailable')}：${e.message}`}};
 
@@ -473,7 +483,8 @@ draw=function(){if(!chartPaused)drawCloseExtrema()};
 ['mousemove','pointermove','pointerdown','mouseleave'].forEach(type=>$('chart')?.addEventListener(type,()=>drawCloseExtrema()));
 if(state.candles.length)drawCloseExtrema();
 
-/* Position-sized liquidation model.  It uses the entered USDT notional and
+/* 按仓位计算的爆仓模型：使用用户输入的 USDT 名义金额，结果仅作研究参考。
+   Position-sized liquidation model. It uses the entered USDT notional and
    margin (then derives BTC quantity), instead of assuming a one-BTC position. */
 function setupLiqProbabilityCalculator(){ensureLiqProbabilityCard();const form=$('liqProbabilityForm');if(!form||form.dataset.positionSized==='1')return;form.dataset.positionSized='1';if(!liqProbState.margin)liqProbState.margin=(+liqProbState.amount||1000)/Math.max(1,+liqProbState.leverage||10);form.innerHTML=`<label>${tx('交易所','Exchange')}<select name="exchange"><option value="okx">OKX</option><option value="binance">Binance</option><option value="coinbase">Coinbase</option></select></label><label>${tx('方向','Side')}<select name="side"><option value="long">${tx('做多','Long')}</option><option value="short">${tx('做空','Short')}</option></select></label><label>${tx('持仓量（USDT）','Position (USDT)')}<input name="amount" type="number" min="0" step="0.01"></label><label>${tx('保证金（USDT）','Margin (USDT)')}<input name="margin" type="number" min="0.01" step="0.01"></label><label>${tx('杠杆倍率','Leverage')}<select name="leverage">${[1,2,3,5,10,20,30,50,100].map(x=>`<option value="${x}">${x}×</option>`).join('')}</select></label><label>${tx('开仓均价','Average entry')}<input name="entry" type="number" min="0" step="0.01"></label>`;Object.entries(liqProbState).forEach(([k,v])=>{if(form.elements[k])form.elements[k].value=v});form.oninput=event=>{for(const el of form.elements)if(el.name)liqProbState[el.name]=el.value;if(event.target.name==='leverage'&&+liqProbState.amount>0)liqProbState.margin=(+liqProbState.amount/Math.max(1,+liqProbState.leverage)).toFixed(2);if(event.target.name==='margin'&&+liqProbState.margin>0&&+liqProbState.amount>0)liqProbState.leverage=(+liqProbState.amount/+liqProbState.margin).toFixed(2);for(const el of form.elements)if(el.name&&document.activeElement!==el)el.value=liqProbState[el.name]||'';localStorage.setItem('btc_liq_probability',JSON.stringify(liqProbState));calcLiqProbability()};calcLiqProbability()}
 calcLiqProbability=function(){const form=$('liqProbabilityForm'),out=$('liqProbabilityOutput');if(!form||!out)return;const p=liqProbState,entry=+p.entry||state.ticker?.last||0,amount=Math.max(0,+p.amount||0),margin=Math.max(.01,+p.margin||amount/Math.max(1,+p.leverage||1)),lev=amount/margin,side=p.side==='short'?-1:1,mmr={binance:.004,okx:.005,coinbase:.006}[p.exchange]||.005,fee={binance:.0005,okx:.0005,coinbase:.0006}[p.exchange]||.0005,btc=entry?amount/entry:0,maintenance=amount*mmr,liq=btc?(side>0?entry+(maintenance-margin)/btc:entry+(margin-maintenance)/btc):0,live=state.ticker?.last||entry,d=state.candles.slice(-Math.min(120,state.candles.length)),window=Math.min(20,Math.max(5,Math.floor(d.length/4)));let hits=0,total=0;for(let i=0;i+window<=d.length;i++){const start=d[i].close,extreme=side>0?Math.min(...d.slice(i,i+window).map(x=>x.low)):Math.max(...d.slice(i,i+window).map(x=>x.high)),adverse=side>0?(start-extreme)/start:(extreme-start)/start;hits+=adverse>=Math.abs(liq-start)/start?1:0;total++}const nearby=side>0?Math.min(...d.slice(-Math.min(60,d.length)).map(x=>x.low)):Math.max(...d.slice(-Math.min(60,d.length)).map(x=>x.high)),gap=side>0?nearby-liq:liq-nearby,probability=total?hits/total*100:0,level=gap<=0||probability>=25?'bear':probability>=10?'flat':'bull',extremeLabel=side>0?tx('近 60 根最低价','Lowest in last 60 candles'):tx('近 60 根最高价','Highest in last 60 candles'),gapLabel=gap>=0?tx('局部极值距强平','Local extreme above liquidation'):tx('局部极值已越过强平','Local extreme crossed liquidation');out.innerHTML=`<div><small>${tx('理论强平价','Theoretical liquidation')}</small><b class="bear">${money(liq)}</b></div><div><small>${tx('实际杠杆 / BTC 数量','Effective leverage / BTC size')}</small><b>${lev.toFixed(2)}× / ${btc.toFixed(6)} BTC</b></div><div><small>${extremeLabel}</small><b class="${side>0?'low':'high'}">${money(nearby)}</b></div><div><small>${gapLabel}</small><b class="${gap>=0?'bull':'bear'}">${gap>=0?'+':'−'}${money(Math.abs(gap))}</b></div><div><small>${tx('历史触及概率','Historical touch probability')}</small><b class="${level}">${probability.toFixed(2)}%</b></div><div><small>${tx('手续费参考（开+平）','Fee reference (in + out)')}</small><b>${money(amount*fee*2)}</b></div><p class="${level}">${tx('以当前价','Using live price')} ${money(live)} · ${tx('以最近','Using')} ${total} ${tx('个','')} ${window}${tx(' 根 K 线窗口，比较每段局部最低/最高价与同一仓位的强平距离；仅作风险研究，不代表真实强平或未来概率。','-candle windows: compares each local low/high with this position’s liquidation distance. Research only; not actual liquidation or future probability.')}</p>`};
@@ -560,7 +571,7 @@ let renderedPriceText=null;
 const renderTickerWithWholeFlash=renderTicker;
 renderTicker=function(){const before=previousTickerPrice;renderTickerWithWholeFlash();const t=state.ticker,price=$('price'),change=$('change');if(!t||!price)return;const value=money(t.last),prior=renderedPriceText;let first=-1;if(prior!==null){if(prior.length!==value.length)first=0;else{for(let i=0;i<value.length;i++){if(/\d/.test(value[i])&&value[i]!==prior[i]){first=i;break}}}}const direction=before===null||t.last===before?'':t.last>before?'up':'down';price.classList.remove('price-up','price-down');price.innerHTML=[...value].map((ch,i)=>`<span class="${/\d/.test(ch)?'price-digit':''} ${first>=0&&i>=first&&/\d/.test(ch)?`changed-${direction}`:''}">${ch}</span>`).join('');if(change)change.classList.remove('price-up','price-down');renderedPriceText=value};
 
-/* Live comparison, selection overlay, resonance scheduler and horizon forecasts. */
+/* 实时比较、选择覆盖层、共振调度与不同期限预测 / Live comparison, selection overlay, resonance scheduler and horizon forecasts. */
 let resonanceTimer=null,horizonForecastCache=null,horizonForecastLoading=false;
 function renderSelectionOverlay(){if(!chartSelection)return;const d=visibleCandles(),a=Math.min(chartSelection.start,chartSelection.end),b=Math.max(chartSelection.start,chartSelection.end),s=d.slice(a,b+1),hi=Math.max(...s.map(v=>v.high)),lo=Math.min(...s.map(v=>v.low)),now=state.ticker?.last,ret=(s.at(-1).close/s[0].open-1)*100,overlay=$('selectionOverlay');if(!overlay||!Number.isFinite(now))return;const diff=(v)=>v-now;overlay.hidden=false;overlay.innerHTML=`<b>${tx('框选时间段','Selected range')}</b> ${pointTime(s[0].time)} — ${pointTime(s.at(-1).time)}<span>${tx('最高','High')} <em class="high">${money(hi)}</em> <i class="${diff(hi)>=0?'bull':'bear'}">${tx('较实时','vs live')} ${diff(hi)>=0?'+':'−'}${money(Math.abs(diff(hi)))}</i></span><span>${tx('最低','Low')} <em class="low">${money(lo)}</em> <i class="${diff(lo)>=0?'bull':'bear'}">${tx('较实时','vs live')} ${diff(lo)>=0?'+':'−'}${money(Math.abs(diff(lo)))}</i></span><span class="${ret>=0?'bull':'bear'}">${tx('区间涨跌','Range return')} ${pct(ret)}</span>`}
 function resetResonanceTimer(){clearTimeout(resonanceTimer);resonanceTimer=setTimeout(async()=>{if(!document.hidden)await resonance(true);resetResonanceTimer()},10_000)}
@@ -659,7 +670,8 @@ const renderFixedRuleSignalWithExpandedDetails=renderFixedRuleSignal;
 renderFixedRuleSignal=function(){renderFixedRuleSignalWithExpandedDetails();if(fixedRuleSignal.candles.length>=30)renderExpandedIndicatorDetails(metrics(fixedRuleSignal.candles))};
 if(fixedRuleSignal.candles.length)renderFixedRuleSignal();
 
-/* Two identical local price cards. Each card keeps its own price and direction
+/* 两张完全相同的本地买入价卡片：各自保存价格与多空方向，允许同时记录两种仓位。
+   Two identical local price cards. Each card keeps its own price and direction
    so the user can choose long or short independently. */
 const entryPriceStorageKey='btc_personal_entry_price',entryPricesStorageKey='btc_personal_entry_prices_v3';
 const validEntry=value=>Number.isFinite(value)&&value>0?value:null;
@@ -677,7 +689,8 @@ const renderTickerWithPersonalEntry=renderTicker;
 renderTicker=function(){renderTickerWithPersonalEntry();renderPersonalEntryCard()};
 renderPersonalEntryCard();
 
-/* Public-calendar-only macro watch.  It intentionally tracks event timing,
+/* 只使用公开日历的宏观监控：刻意追踪事件时间，不冒充未经验证的实际数据。
+   Public-calendar-only macro watch. It intentionally tracks event timing,
    not a paid macro-data feed or a direction call. */
 let fedCalendarLoading=false;
 function macroCountdown(at){
@@ -710,7 +723,8 @@ loadFedMonitor();
 setInterval(loadFedMonitor,600_000);
 setInterval(refreshMacroUpdateAges,30_000);
 
-/* Fear & Greed is intentionally slow-moving.  It is a market-environment
+/* 恐惧与贪婪故意采用低频更新：它是市场环境指标，不能单独作为交易信号。
+   Fear & Greed is intentionally slow-moving. It is a market-environment
    guardrail, not a high-frequency directional input. */
 const fearGreedRefreshMs=120_000,fearGreedRetryMs=30_000;
 let fearGreedSentiment=null,fearGreedLoading=false,fearGreedError=null,fearGreedRetryTimer=null;
@@ -801,14 +815,17 @@ loadFearGreedSentiment().then(data=>{if(data?.storageCached)setTimeout(()=>loadF
 setInterval(()=>loadFearGreedSentiment(true),fearGreedRefreshMs);
 if(fixedRuleSignal.candles.length)renderFixedRuleSignal();
 
-/* Keep technical indicators compact, and give OKX public microstructure a
+/* 技术指标保持紧凑，OKX 公开微观结构单独呈现，以突出实时证据。
+   Keep technical indicators compact, and give OKX public microstructure a
    dedicated card so live derivatives evidence is not mistaken for an EMA/RSI. */
 function renderOkxMicrostructure(context){
   let card=$('okxMicrostructureCard'),anchor=document.querySelector('#mainChartCard .forecast-card')||document.querySelector('.terminal-layout');
+  // 该面板高频重绘；替换实时微观结构标记时保留周期涨幅节点，避免其状态丢失。
   // This panel redraws frequently; preserve the period panel node while the
   // live microstructure markup is replaced below.
   const periodCard=$('periodChangeCard');
   if(!card){card=document.createElement('section');card.id='okxMicrostructureCard';card.className='card okx-microstructure-card'}
+  // 宽屏图表列中，把实时市场结构放在较慢的概率研究之前，先读当前市场证据。
   // Put live market structure before the slower probability research in the
   // wide chart column, so the current market evidence is read first.
   if(anchor&&anchor.previousElementSibling!==card)anchor.before(card);
@@ -939,7 +956,8 @@ const renderTickerWithFinalPersonalEntry=renderTicker;
 renderTicker=function(){renderTickerWithFinalPersonalEntry();renderPersonalEntryCard()};
 renderPersonalEntryCard();
 
-/* Period returns use appropriately sized candle histories instead of treating
+/* 周期涨幅使用与周期匹配的 K 线历史，不能把不同粒度的间隔当成相同时间长度。
+   Period returns use appropriately sized candle histories instead of treating
    a fixed number of whichever candles happen to be on screen as "minutes". */
 let periodHistory={},periodHistoryLoading=false,periodHistorySource='';
 const periodReturnDefinitions=[
@@ -976,6 +994,7 @@ function ensureFearGreedCard(){
 }
 function placePeriodAndSentimentCards(){
   const period=ensurePeriodChangeCard(),micro=$('okxMicrostructureCard'),sentiment=ensureFearGreedCard(),indicators=$('indicatorDetailsCard');
+  // 它是 OKX 面板的固定组成，而不是可游离的页面卡片。
   // It is a fixed part of the OKX panel, not a free-floating page card.
   if(micro&&period.parentElement!==micro)micro.append(period);
   if(sentiment&&indicators&&indicators.nextElementSibling!==sentiment)indicators.after(sentiment);
@@ -989,7 +1008,8 @@ function scheduleMicrostructureAlignment(){
     if(!forecast)return;
     forecast.style.minHeight='';
     fear?.style.removeProperty('min-height');
-    // Align only the probability and sentiment cards.  The market-structure
+    // 仅对齐概率与情绪卡片的底边；上方微观结构卡按内容高度布局，因此周期涨幅后不留无意义空白。
+    // Align only the probability and sentiment cards. The market-structure
     // card above remains content-sized, so no spacer appears after returns.
     if(window.innerWidth<1025||!fear||fear.hidden)return;
     const forecastBox=forecast.getBoundingClientRect(),fearBox=fear.getBoundingClientRect(),sharedBottom=Math.max(forecastBox.bottom,fearBox.bottom);

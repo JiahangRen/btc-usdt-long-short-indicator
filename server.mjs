@@ -5,6 +5,8 @@ import { mkdirSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
+// BTC 指标服务端：负责静态页面、公开数据源、SQLite 快照与实时 OKX 连接。
+// BTC indicator backend: serves the UI, public data sources, SQLite snapshots, and the live OKX connection.
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || '127.0.0.1';
 const PUBLIC = join(process.cwd(), 'public');
@@ -145,8 +147,9 @@ function storageStatus() {
   const count = table => database.prepare(`SELECT COUNT(*) AS total FROM ${table}`).get().total;
   return { engine:'SQLite', quoteSnapshots:count('quote_snapshots'), candles:count('candles'), marketSnapshots:count('market_snapshots'), trainingRuns:count('training_runs'), derivativeSnapshots:count('derivative_snapshots'), sentimentSnapshots:count('sentiment_snapshots'), macroMarketSnapshots:count('macro_market_snapshots'), fedCalendarSnapshots:count('fed_calendar_snapshots') };
 }
-// Layered cache policy.  Quotes are fed by the OKX stream, chart/indicator
-// data is refreshed at a lower cadence, and slow history is retained in SQLite.
+// 分层缓存策略：报价由 OKX 流持续推送，图表/指标以较低频率刷新，慢速历史保留在 SQLite。
+// Layered cache policy: quotes come from the OKX stream, chart/indicator data
+// refreshes less often, and slow history is retained in SQLite.
 const MARKET_TTL = 10_000;
 const CONTEXT_TTL = 10_000;
 const HISTORY_TTL = 300_000;
@@ -172,11 +175,13 @@ function coalesce(key, work) {
   inFlight.set(key, promise);
   return promise;
 }
-// Keep the automatic market selection aligned with the dashboard default and
-// the BTC-USDT perpetual contract used by the owner.
+// 自动市场选择需与仪表盘默认值及 BTC-USDT 永续合约保持一致。
+// Keep automatic market selection aligned with the dashboard default and the
+// BTC-USDT perpetual contract used by the owner.
 const sources = ['okx', 'coinbase', 'gate', 'binance'];
+// 单一进程级公共连接让默认 OKX 永续报价保持在内存中；当流或某频道不可用时，REST 仍是安全回退。
 // A single process-wide public connection keeps the default OKX perpetual
-// quote hot in memory.  REST remains the safe fallback if the stream or a
+// quote hot in memory. REST remains the safe fallback if the stream or a
 // particular channel is unavailable in a region.
 const okxStream = {
   socket:null, status:'connecting', ticker:null, spotPrice:null,
@@ -301,7 +306,8 @@ function openOkxStream() {
 openOkxStream();
 const derivativePersistTimer = setInterval(persistOkxDerivativeSnapshot, 10_000);
 derivativePersistTimer.unref?.();
-// Each API response carries request-scoped timings.  This lets the browser
+// 每个 API 响应都携带请求范围的耗时，浏览器可区分“浏览器→本站”与“本站→交易所”的耗时。
+// Each API response carries request-scoped timings. This lets the browser
 // distinguish its route to this server from the server's route to an exchange.
 const requestTiming = new AsyncLocalStorage();
 
@@ -361,6 +367,7 @@ async function fromGate(interval, limit) {
 }
 async function okxCandleRows(interval, limit) {
   if (interval !== '3h') return request(`https://www.okx.com/api/v5/market/candles?instId=BTC-USDT-SWAP&bar=${intervalFor('okx', interval)}&limit=${limit}`);
+  // OKX 没有原生 3 小时 K 线：分页取得足量 1 小时 K 线后，按 UTC 3 小时边界聚合，确保信号仍有 200 根数据。
   // OKX has no native 3H bar. Fetch enough native 1H bars in pages, then
   // aggregate them on a UTC 3-hour boundary so the signal still has 200 bars.
   const pages = [];
@@ -379,6 +386,7 @@ async function okxCandleRows(interval, limit) {
 async function fromOKX(interval, limit) {
   const streamedTicker = freshOkxTicker();
   const [ticker, rows] = await Promise.all([
+    // 仪表盘必须沿用 OKX 移动端永续合约的同一市场，不能混入 BTC-USDT 现货价格。
     // Keep the dashboard on the same market as the OKX mobile perpetual
     // contract, rather than mixing its price with BTC-USDT spot.
     streamedTicker ? Promise.resolve(null) : request('https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT-SWAP'),
@@ -650,8 +658,9 @@ async function fedMarketSignals() {
     const globalChange=Number(cg?.market_cap_change_percentage_24h_usd ?? cl?.mcap_change);
     market.push(Number.isFinite(totalMarketCap) && totalMarketCap > 0 ? { key:'crypto-total-cap', name:'全网加密总市值', available:true, value:totalMarketCap, changePct:globalChange, source, cadence:'24h 快照' } : { key:'crypto-total-cap', name:'全网加密总市值', available:false, source, detail:'公开数据暂不可用' });
     market.push(Number.isFinite(totalVolume) && totalVolume > 0 ? { key:'crypto-volume', name:'全网 24h 成交额', available:true, value:totalVolume, changePct:null, source, cadence:'24h 快照' } : { key:'crypto-volume', name:'全网 24h 成交额', available:false, source, detail:'公开数据暂不可用' });
+    // 可靠的免密公开源无法提供完整交易所钱包余额；应明确此限制，不能显示第三方的过期或不可验证数字。
     // Full exchange-wallet balances are not available from a reliable public,
-    // keyless source.  Expose that limitation rather than showing a stale or
+    // keyless source. Expose that limitation rather than showing a stale or
     // unverifiable number from a third-party dashboard.
     market.push({ key:'exchange-btc-reserve', name:'交易所比特币钱包余额', available:false, source:'—', detail:'需要可验证的链上数据订阅；当前未接入 Key' });
     const result={ market, fetchedAt:now, refreshMs:FED_MARKET_SIGNALS_TTL };
@@ -716,6 +725,7 @@ async function yahooHistory(symbol) {
   const raw = await request(`https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=2y&interval=1d&events=history`);
   const result = raw.chart?.result?.[0]; const closes = result?.indicators?.quote?.[0]?.close;
   if (!result?.timestamp || !closes) throw new Error(`${symbol} history unavailable`);
+  // Yahoo 偶尔会把尚未完成的日线附为 null 或 0；忽略它，避免临时占位符被误算为 -100% 涨跌。
   // Yahoo occasionally appends the still-forming daily bar as null or 0.
   // Ignore it so a transient placeholder never turns into a false -100% move.
   const candles = result.timestamp.map((time, i) => ({ time:time * 1000, close:+closes[i] })).filter(x => Number.isFinite(x.close) && x.close > 0);
@@ -746,6 +756,7 @@ async function equityHistory(symbol) {
 async function market(interval, limit, preferred) {
   const key = `${interval}:${limit}:${preferred || 'auto'}`; const hit = cache.get(key);
   if (hit && Date.now() - hit.time < MARKET_TTL) return { ...cacheResult(hit), stale:false };
+  // 用户选择的数据源需要锁定：上游暂时失败时，报价和图表不能静默切换交易所。
   // A user-selected source is intentionally locked: displayed price and chart
   // must not silently switch exchanges during a temporary upstream failure.
   try { return await coalesce(key, async () => {
