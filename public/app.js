@@ -1047,12 +1047,11 @@ let researchOutlookLoading=false;
 const safeText=value=>String(value ?? '').replace(/[&<>'"]/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
 function ensureResearchOutlookCard(){
   let card=$('researchOutlookCard');
-  if(card)return card;
-  card=document.createElement('section');
-  card.id='researchOutlookCard';
-  card.className='card research-outlook-card';
-  const forecast=document.querySelector('#mainChartCard .forecast-card')||document.querySelector('.forecast-card');
-  if(forecast)forecast.after(card);else document.querySelector('main')?.append(card);
+  if(!card){card=document.createElement('section');card.id='researchOutlookCard';card.className='card research-outlook-card'}
+  // 研究预测是多周期共振的后续研究层；每次确保卡片存在时都重新锚定，防止初始化重排打乱顺序。
+  // Research outlook follows multi-period resonance. Re-anchor it every time so startup rearrangement cannot change the order.
+  const resonance=document.querySelector('main > .optional')||document.querySelector('.optional');
+  if(resonance)resonance.after(card);else document.querySelector('main')?.append(card);
   return card;
 }
 function researchDirectionText(direction){return direction==='up'?tx('预期上涨','Expected up'):direction==='down'?tx('预期下跌','Expected down'):tx('预期震荡','Expected range')}
