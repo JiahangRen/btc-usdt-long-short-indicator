@@ -53,7 +53,8 @@ database.exec(`
   CREATE INDEX IF NOT EXISTS macro_market_snapshots_key_time ON macro_market_snapshots(metric_key, observed_at DESC);
   CREATE TABLE IF NOT EXISTS fed_calendar_snapshots (
     id INTEGER PRIMARY KEY, observed_at INTEGER NOT NULL, event_key TEXT NOT NULL,
-    event_name TEXT NOT NULL, event_at INTEGER NOT NULL, source TEXT NOT NULL
+    event_name TEXT NOT NULL, event_at INTEGER NOT NULL, source TEXT NOT NULL,
+    is_fallback INTEGER NOT NULL DEFAULT 0
   );
   CREATE INDEX IF NOT EXISTS fed_calendar_snapshots_event_time ON fed_calendar_snapshots(event_key, observed_at DESC);
   CREATE TABLE IF NOT EXISTS btc_news_snapshots (
@@ -73,6 +74,10 @@ database.exec(`
   CREATE INDEX IF NOT EXISTS research_predictions_target ON research_predictions(target_at, settled_at);
   CREATE INDEX IF NOT EXISTS research_predictions_horizon_settled ON research_predictions(horizon_key, settled_at DESC);
 `);
+// 为既有数据库补充日历回退标识，迁移可重复执行。
+// Add the calendar fallback flag to existing databases; this migration is safe to rerun.
+try { database.exec('ALTER TABLE fed_calendar_snapshots ADD COLUMN is_fallback INTEGER NOT NULL DEFAULT 0'); }
+catch (error) { if (!/duplicate column name/i.test(error.message)) throw error; }
 const storeQuote = database.prepare('INSERT INTO quote_snapshots (source, observed_at, last, open24h, change_pct, high24, low24) VALUES (?, ?, ?, ?, ?, ?, ?)');
 const storeCandle = database.prepare('INSERT OR IGNORE INTO candles (source, interval, candle_time, open, high, low, close, volume, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
 const updateCandle = database.prepare('UPDATE candles SET open=?, high=?, low=?, close=?, volume=?, updated_at=? WHERE source=? AND interval=? AND candle_time=?');
@@ -81,12 +86,17 @@ const storeTrainingRun = database.prepare('INSERT INTO training_runs (observed_a
 const storeDerivativeSnapshot = database.prepare('INSERT INTO derivative_snapshots (source, observed_at, funding_rate, oi, book_imbalance_pct, book_ratio, taker_buy_ratio_pct, taker_trade_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
 const storeSentimentSnapshot = database.prepare('INSERT INTO sentiment_snapshots (observed_at, value, classification, source) VALUES (?, ?, ?, ?)');
 const storeMacroMarketSnapshot = database.prepare('INSERT INTO macro_market_snapshots (observed_at, metric_key, value, change_pct, available, source, cadence) VALUES (?, ?, ?, ?, ?, ?, ?)');
-const storeFedCalendarSnapshot = database.prepare('INSERT INTO fed_calendar_snapshots (observed_at, event_key, event_name, event_at, source) VALUES (?, ?, ?, ?, ?)');
+const storeFedCalendarSnapshot = database.prepare('INSERT INTO fed_calendar_snapshots (observed_at, event_key, event_name, event_at, source, is_fallback) VALUES (?, ?, ?, ?, ?, ?)');
 const storeNewsSnapshot = database.prepare('INSERT OR IGNORE INTO btc_news_snapshots (observed_at, published_at, title, url, source, sentiment) VALUES (?, ?, ?, ?, ?, ?)');
 const priorOiSnapshot = database.prepare('SELECT observed_at, oi FROM derivative_snapshots WHERE source=? AND observed_at<=? AND oi IS NOT NULL ORDER BY observed_at DESC LIMIT 1');
 const priorFundingSnapshot = database.prepare('SELECT observed_at, funding_rate FROM derivative_snapshots WHERE source=? AND observed_at<=? AND funding_rate IS NOT NULL ORDER BY observed_at DESC LIMIT 1');
 const priorQuoteSnapshot = database.prepare('SELECT observed_at, last FROM quote_snapshots WHERE source=? AND observed_at<=? AND last IS NOT NULL ORDER BY observed_at DESC LIMIT 1');
 const latestSentimentSnapshot = database.prepare('SELECT observed_at, value, classification, source FROM sentiment_snapshots ORDER BY observed_at DESC LIMIT 1');
+const latestFedCalendarSnapshots = database.prepare(`SELECT snapshot.observed_at, snapshot.event_key, snapshot.event_name, snapshot.event_at, snapshot.source, snapshot.is_fallback
+  FROM fed_calendar_snapshots AS snapshot
+  INNER JOIN (SELECT event_key, MAX(observed_at) AS observed_at FROM fed_calendar_snapshots GROUP BY event_key) AS latest
+    ON latest.event_key=snapshot.event_key AND latest.observed_at=snapshot.observed_at
+  ORDER BY snapshot.event_at ASC`);
 const storeResearchPrediction = database.prepare('INSERT OR IGNORE INTO research_predictions (bucket_at, created_at, horizon_key, candle_interval, target_at, entry_price, raw_probability, calibrated_probability, direction, regime) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
 const pendingResearchPredictions = database.prepare('SELECT id, horizon_key, candle_interval, target_at, entry_price FROM research_predictions WHERE settled_at IS NULL AND target_at<=? ORDER BY target_at ASC');
 const settleResearchPrediction = database.prepare('UPDATE research_predictions SET settled_at=?, settled_price=?, actual_return=?, is_up=?, brier=? WHERE id=?');
@@ -147,7 +157,7 @@ function persistMacroMarketSnapshots(rows, observedAt = Date.now()) {
 }
 function persistFedCalendarSnapshots(events, observedAt = Date.now()) {
   safelyStore(() => {
-    for (const event of events) storeFedCalendarSnapshot.run(observedAt, event.key, event.name, event.at, event.source);
+    for (const event of events) storeFedCalendarSnapshot.run(observedAt, event.key, event.name, event.at, event.source, event.fallback ? 1 : 0);
     cleanStorage(observedAt);
   });
 }
@@ -640,11 +650,20 @@ function nearestIcsEvent(text, summaryPattern) { const now=Date.now(), candidate
 // Fallback only when BLS cannot be reached: Employment Situation is normally released on the first Friday of the following month at 08:30 ET.
 // 仅当 BLS 不可达时的回退：非农通常在次月第一个周五 08:30 ET 发布。
 function payrollCadenceFallback(now=Date.now()) { const date=new Date(now), year=date.getUTCFullYear(), month=date.getUTCMonth()+1;let candidate=new Date(Date.UTC(year,month,1,12,30));candidate.setUTCDate(1+((5-candidate.getUTCDay()+7)%7));if(candidate.getTime()<now-86_400_000){candidate=new Date(Date.UTC(year,month+1,1,12,30));candidate.setUTCDate(1+((5-candidate.getUTCDay()+7)%7))}return {at:candidate.getTime(),label:`${candidate.getUTCFullYear()}-${String(candidate.getUTCMonth()+1).padStart(2,'0')}-${String(candidate.getUTCDate()).padStart(2,'0')}`,fallback:true} }
-async function fedCalendar() {
-  const key = 'fed-calendar', hit = cache.get(key), now = Date.now();
-  if (hit && now - hit.time < FED_CALENDAR_TTL) return { ...cacheResult(hit, now), stale:false };
-  try {
-    return await coalesce(key, async () => {
+// 首屏读取三类宏观日历的最近成功 SQLite 快照，并后台请求官方来源更新它。
+// Read the latest successful FOMC/CPI/payroll SQLite snapshots on first paint, then revalidate official sources in the background.
+function storedFedCalendar(now = Date.now()) {
+  const rows = latestFedCalendarSnapshots.all().filter(row => Number.isFinite(+row.event_at) && +row.event_at >= now - 86_400_000);
+  if (!rows.length) return null;
+  const observedAt = Math.max(...rows.map(row => +row.observed_at));
+  return {
+    events:rows.map(row => ({ key:String(row.event_key), name:String(row.event_name), at:+row.event_at, source:String(row.source || 'SQLite'), fallback:Boolean(row.is_fallback) })),
+    fetchedAt:observedAt, cached:true, storageCached:true, stale:true, cacheAgeMs:Math.max(0, now-observedAt), refreshMs:FED_CALENDAR_TTL,
+    unavailable:[], sources:['SQLite fed_calendar_snapshots']
+  };
+}
+async function refreshFedCalendar(now = Date.now()) {
+  return coalesce('fed-calendar-refresh', async () => {
       const pages = await Promise.allSettled([
         requestText('https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm', 8_000),
         requestText('https://www.bls.gov/schedule/news_release/cpi.htm', 8_000),
@@ -654,15 +673,30 @@ async function fedCalendar() {
       const textAt = index => pages[index].status === 'fulfilled' ? plainText(pages[index].value) : '', rawAt=index=>pages[index].status === 'fulfilled'?String(pages[index].value):'';
       const events = [
         { key:'fomc', name:'FOMC 利率决议', source:'Federal Reserve', ...nearestDate(textAt(0), { range:true }) },
-        { key:'cpi', name:'美国 CPI', source:'U.S. Bureau of Labor Statistics', ...nearestDate(textAt(1)) },
+        // CPI 与非农都优先解析 BLS 统一 ICS 日历，网页明细仅作为兼容回退。
+        // Parse both CPI and payrolls from BLS's canonical ICS calendar first; use detail pages only as compatibility fallbacks.
+        { key:'cpi', name:'美国 CPI', source:'U.S. Bureau of Labor Statistics', ...(nearestIcsEvent(rawAt(3),/Consumer Price Index/i) || nearestDate(textAt(1))) },
         { key:'payrolls', name:'美国非农就业', source:'U.S. Bureau of Labor Statistics', ...(nearestIcsEvent(rawAt(3),/Employment Situation/i) || nearestDate(textAt(2)) || payrollCadenceFallback(now)) }
       ].filter(event => Number.isFinite(event.at));
       if (!events.length) throw new Error('no upcoming public macro events found');
       const result = { events:events.sort((a,b) => a.at - b.at), fetchedAt:now, cached:false, cacheAgeMs:0, refreshMs:FED_CALENDAR_TTL, unavailable:pages.map((page,index) => page.status === 'rejected' ? ['Federal Reserve','BLS CPI','BLS Employment','BLS calendar'][index] : null).filter(Boolean), sources:['https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm','https://www.bls.gov/schedule/news_release/cpi.htm','https://www.bls.gov/schedule/news_release/empsit.htm','https://www.bls.gov/schedule/news_release/bls.ics'] };
       persistFedCalendarSnapshots(result.events, now);
-      remember(key, result); return result;
-    });
-  } catch (error) {
+      remember('fed-calendar', result); return result;
+  });
+}
+async function fedCalendar() {
+  const key = 'fed-calendar', hit = cache.get(key), now = Date.now();
+  if (hit && now - hit.time < FED_CALENDAR_TTL) return { ...cacheResult(hit, now), stale:false };
+  const stored = storedFedCalendar(now);
+  if (stored) {
+    remember(key, stored);
+    // 返回数据库内容不等待网络；成功刷新会替换内存缓存，下一次界面轮询即得到新数据。
+    // Do not block on the network when returning SQLite data; a successful revalidation replaces cache for the next UI poll.
+    refreshFedCalendar(now).catch(error => console.warn('Fed calendar background refresh failed:', error.message));
+    return stored;
+  }
+  try { return await refreshFedCalendar(now); }
+  catch (error) {
     if (hit && now - hit.time <= 3_600_000) return { ...cacheResult(hit, now), stale:true, fallbackReason:error.name === 'AbortError' ? 'timeout' : error.message };
     throw error;
   }
