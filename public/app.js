@@ -1116,6 +1116,39 @@ async function loadResearchOutlook(force=false){
 setTimeout(()=>loadResearchOutlook(),2_500);
 setInterval(()=>loadResearchOutlook(),900_000);
 
+/* 将数据源与页面更新节奏展示在每一张依赖数据的卡片上，避免用户必须查看全局说明才能判断新鲜度。
+   Surface data source and UI cadence on every data-backed card, so freshness is visible without opening global documentation. */
+function installDataCadenceLabels(){
+  const selectedSource=()=>String(state.lastGood?.source||state.source||'OKX').toUpperCase();
+  const labels=[
+    ['#mainChartCard',()=>tx(`${selectedSource()} 行情 · 报价每 1 秒 · K 线/指标每 10 秒`,`${selectedSource()} market · quote 1s · candles/indicators 10s`)],
+    ['#ruleSignalCard',()=>tx(`${selectedSource()} K 线 · 每 15 秒评估`,`${selectedSource()} candles · evaluated every 15s`)],
+    ['#indicatorDetailsCard',()=>tx(`${selectedSource()} K 线 · 每 10 秒`,`${selectedSource()} candles · every 10s`)],
+    ['#periodChangeCard',()=>tx(`${selectedSource()} 历史 K 线 · 每 10 秒`,`${selectedSource()} historical candles · every 10s`)],
+    ['.forecast-card',()=>tx('SQLite 历史 K 线 · 缓存 5 分钟 · 首屏/手动训练','SQLite historical candles · 5m cache · initial/manual training')],
+    ['.optional',()=>tx(`${selectedSource()} 多周期 K 线 · 每 10 秒`,`${selectedSource()} multi-horizon candles · every 10s`)],
+    ['.correlation-card',()=>tx('BTC + Yahoo Finance（SPY / QQQ）· 缓存 5 分钟 · 手动更新','BTC + Yahoo Finance (SPY / QQQ) · 5m cache · manual refresh')],
+    ['.leverage-card',()=>tx(`${selectedSource()} 价格与历史 K 线 · 每 10 秒`,`${selectedSource()} price and historical candles · every 10s`)],
+    ['.position-card',()=>tx(`${selectedSource()} 标记价 · 每 1 秒`,`${selectedSource()} mark price · every 1s`)],
+    ['#liqProbabilityCard',()=>tx(`${selectedSource()} 历史 K 线 · 缓存 5 分钟`,`${selectedSource()} historical candles · 5m cache`)],
+    ['#okxMicrostructureCard',()=>tx('OKX WebSocket · 实时推送 · 快照每 10 秒','OKX WebSocket · live stream · snapshot every 10s')],
+    ['#fearGreedGauge',()=>tx('Alternative.me · SQLite 首屏优先 · 每 2 分钟','Alternative.me · SQLite first paint · every 2m')],
+    ['#fedMonitorCard',()=>tx('SQLite + Federal Reserve / BLS / Yahoo / CoinGecko / CoinLore · 每 10 分钟','SQLite + Federal Reserve / BLS / Yahoo / CoinGecko / CoinLore · every 10m')],
+    ['#researchOutlookCard',()=>tx('SQLite 历史 + Google News RSS + Alternative.me + OKX · 每 15 分钟','SQLite history + Google News RSS + Alternative.me + OKX · every 15m')],
+    ['.backtest-details .card',()=>tx(`${selectedSource()} 历史 K 线 · 每次图表更新重算`,`${selectedSource()} historical candles · recalculated with each chart update`)]
+  ];
+  for(const [selector,text] of labels){
+    for(const card of document.querySelectorAll(selector)){
+      let badge=card.querySelector(':scope > .data-cadence');
+      if(!badge){badge=document.createElement('small');badge.className='data-cadence';card.append(badge)}
+      const value=text();if(badge.textContent!==value)badge.textContent=value;
+    }
+  }
+}
+// 动态卡片会整块重绘；轻量观察器负责恢复频率标识，同时更新切换交易所后的来源名称。
+// Dynamic cards redraw their contents; a small observer restores cadence labels and updates the selected source name.
+(()=>{let queued=false;const refresh=()=>{queued=false;installDataCadenceLabels()};new MutationObserver(()=>{if(!queued){queued=true;queueMicrotask(refresh)}}).observe(document.querySelector('main'),{childList:true,subtree:true,characterData:true});setTimeout(refresh,0);const applyLanguageWithCadence=applyLanguage;applyLanguage=function(){applyLanguageWithCadence();installDataCadenceLabels()}})();
+
 /* Keep the first time label wholly inside the plot after the left scale has
    been widened for readable price labels. */
 drawChartWithoutDuplicateExtremaText=function(){
