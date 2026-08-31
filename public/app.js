@@ -414,6 +414,10 @@ renderRangeExtremaPoints=function(){const box=$('chart')?.closest('.chart-box'),
   // v2.1.0 contains only changes since v2.0.1; prior release notes remain intact for traceability.
   const legacyChangelog=log.innerHTML;
   log.innerHTML=`<b>v2.1.0 更新日志</b><dl><dt>多因子研究预测</dt><dd>新增 BTC 多因子研究预测：融合 SQLite 历史样本、公开 BTC 新闻情绪、恐惧&贪婪指数与 OKX 市场结构，覆盖 15 分钟、1 小时、4 小时、1 日方向与价格区间研究。</dd><dt>概率融合与记分卡</dt><dd>加入时间顺序融合、Platt 概率校准、跨周期一致性约束；展示验证准确率、Brier 分数、已结算实时命中率与待结算预测。</dd><dt>新闻研究</dt><dd>重点新闻支持点击原文，按利好／利空影响排序并按标题相似度去重；显示近 2 小时与近 24 小时窗口，默认最多 6 篇。</dd><dt>宏观日历存储</dt><dd>FOMC、CPI 与非农日历写入 SQLite；首屏优先读取最近成功快照，再后台请求 Federal Reserve／BLS 更新。修正非农日期解析，并在官方源不可达时明确标记发布节奏回退。</dd><dt>数据透明度</dt><dd>所有依赖外部或 SQLite 数据的卡片新增“数据源 · 更新频率”标识，便于确认来源、缓存策略与数据新鲜度。</dd><dt>图表体验</dt><dd>图表工具与显示控制左对齐；新增 15 分钟查看范围；默认改为 1 分钟 K 线与 6 小时查看范围，并支持完整加载该窗口。</dd><dt>持仓与风险研究</dt><dd>完善双持仓参考、方向选择持久化、盈亏颜色提示与强平概率研究输入；长数值保持完整显示，必要时自动换行。</dd><dt>移动端可用性</dt><dd>修复小屏幕说明感叹号的拉伸变形，并优化数据卡片、工具栏与研究卡片的换行和溢出表现。</dd></dl><hr>${legacyChangelog}`;
+  // 旧版本默认收起，确保用户打开日志时首先看到当前版本的完整变更。
+  // Older releases are collapsed by default so opening the log focuses on the current release.
+  const collapseLegacyRelease=()=>{const divider=log.querySelector('hr'),heading=divider?.nextElementSibling,content=heading?.nextElementSibling;if(!divider||heading?.tagName!=='B'||content?.tagName!=='DL')return;const details=document.createElement('details'),summary=document.createElement('summary');details.className='legacy-release';summary.textContent=heading.textContent;details.append(summary,content);divider.replaceWith(details);heading.remove()};
+  collapseLegacyRelease();collapseLegacyRelease();
   document.body.append(log);
   version.onclick = () => {
     const open = log.hidden;
