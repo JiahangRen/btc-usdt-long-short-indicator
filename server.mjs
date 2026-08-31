@@ -819,22 +819,24 @@ async function researchOutlook({ refresh = false } = {}) {
     const microstructureScore=derivatives ? clamp((Number(derivatives.orderBook?.imbalancePct)||0)/30*.32 + (Number(derivatives.takerFlow?.imbalancePct)||0)/35*.38 + (Number(derivatives.oiChangePct)||0)/.8*(Number(derivatives.priceChangePct)||0>=0?1:-1)*.18 - (Number(derivatives.fundingRate)||0)/.001*.08 - (Number(derivatives.basisPct)||0)/.25*.04,-1,1) : 0;
     const eventRisk=(calendar?.events||[]).filter(event=>event.at-now>=0&&event.at-now<=24*3_600_000).map(event=>event.name), eventRangeMultiplier=eventRisk.length?1.35:1;
     const last=intraday.candles.at(-1)?.close || daily.candles.at(-1)?.close;
-    const definitions=[{ key:'1h', label:'约 1 小时', candles:intraday.candles, horizon:4, cap:.03 },{ key:'4h', label:'约 4 小时', candles:intraday.candles, horizon:16, cap:.05 },{ key:'1d', label:'约 1 天', candles:daily.candles, horizon:1, cap:.12 }];
+    // Four horizons share the same historical-feature model; the 15m/1h/4h paths use intraday candles, while 1d uses daily candles.
+    // 四个周期共用同一历史特征模型；15 分钟/1 小时/4 小时使用日内 K 线，1 天使用日线。
+    const definitions=[{ key:'15m', label:'约 15 分钟', candles:intraday.candles, horizon:1, cap:.015 },{ key:'1h', label:'约 1 小时', candles:intraday.candles, horizon:4, cap:.03 },{ key:'4h', label:'约 4 小时', candles:intraday.candles, horizon:16, cap:.05 },{ key:'1d', label:'约 1 天', candles:daily.candles, horizon:1, cap:.12 }];
     const windows=definitions.map(definition => {
       const history=historicalProjection(definition.candles,definition.horizon);
-      const newsWeight=definition.key==='1d'?.25:.12, sentimentWeight=definition.key==='1d'?.08:.04, microWeight=definition.key==='1h'?.12:definition.key==='4h'?.09:.025;
+      const newsWeight=definition.key==='1d'?.25:.12, sentimentWeight=definition.key==='1d'?.08:.04, microWeight=definition.key==='15m'?.14:definition.key==='1h'?.12:definition.key==='4h'?.09:.025;
       const adjustment=(newsScore*newsWeight + sentimentScore*sentimentWeight + microstructureScore*microWeight)*Math.max(history.volatility,.002);
       const adjustedReturn=clamp(history.expectedReturn + adjustment,-definition.cap,definition.cap), volatilityUnit=Math.max(history.volatility*Math.sqrt(definition.horizon),.001);
       const rawProbability=history.upProbability + newsScore*.06 + sentimentScore*.025 + microstructureScore*(definition.key==='1d'?.015:.045);
       const upProbability=clamp((rawProbability*Math.max(1,history.samples)+.5*24)/(Math.max(1,history.samples)+24),.05,.95);
-      // Direction follows the signed ensemble return so every forecast states upside or downside.
-      // 方向以融合后的预期收益正负为准，确保每个预测明确显示上涨或下跌。
-      const direction=adjustedReturn>=0?'up':'down';
+      // A slim probability band is deliberately neutral: a 50%-plus reading is not directional evidence.
+      // 概率落在窄幅中性带时刻意显示中性：仅 50% 多并不构成方向证据。
+      const direction=upProbability>=.56?'up':upProbability<=.44?'down':'flat';
       const distribution=Object.fromEntries(Object.entries(history.distribution).map(([key,value])=>[key,clamp(value+adjustment,-definition.cap,definition.cap)]));
       const center=distribution.p50, widened={p10:center+(distribution.p10-center)*eventRangeMultiplier,p50:center,p90:center+(distribution.p90-center)*eventRangeMultiplier};
       return { ...definition, upProbability, expectedReturn:adjustedReturn, expectedMove:last*adjustedReturn, expectedPrice:last*(1+adjustedReturn), direction, samples:history.samples, candidateCount:history.candidateCount, matchQuality:history.matchQuality, regime:history.regime, volatilityUnit, distribution, priceRange:{p10:last*(1+widened.p10),p50:last*(1+widened.p50),p90:last*(1+widened.p90)}, eventRangeMultiplier };
     });
-    const primary=windows[1];
+    const primary=windows[2];
     const rankedNews=[...newsItems].map(item=>{const ageHours=Number.isFinite(item.publishedAt)?Math.max(0,(now-item.publishedAt)/3_600_000):6;return {...item,impact:Math.abs(item.sentiment)*(item.sourceWeight||.7)*(item.eventWeight||.7)*Math.exp(-ageHours/4)}}).sort((a,b)=>b.impact-a.impact || (b.publishedAt||0)-(a.publishedAt||0));
     const result={ price:last, windows, news:{ source:news.source, fetchedAt:news.fetchedAt, bullish, bearish, neutral:newsItems.length-bullish-bearish, score:newsScore, halfLifeHours:4, items:rankedNews.slice(0,6) }, sentiment:sentiment?{ value:sentiment.value, source:sentiment.source || 'Alternative.me' }:null, derivatives:derivatives?{ source:derivatives.source, score:microstructureScore, fundingRate:derivatives.fundingRate, oiChangePct:derivatives.oiChangePct, bookImbalancePct:derivatives.orderBook?.imbalancePct, takerImbalancePct:derivatives.takerFlow?.imbalancePct, cvdSessionNotional:derivatives.takerFlow?.cvdSessionNotional, coverage:['funding','oi-change','order-book','taker-flow','cvd','basis'], unavailable:['funding term structure / long-short ratio','options PCR / 25Δ skew / IV term structure','liquidation heatmap','spot ETF net flows','on-chain exchange / whale flows','Coinbase and Kimchi premiums'] }:null, eventRisk, historical:{ intradaySource:intraday.source, dailySource:daily.source, intradaySamples:intraday.candles.length, dailySamples:daily.candles.length }, primary, fetchedAt:now, refreshMs:NEWS_TTL, cached:false, disclaimer:'Historical-pattern and public-headline research only; not investment advice.' };
     remember(key,result); return result;
