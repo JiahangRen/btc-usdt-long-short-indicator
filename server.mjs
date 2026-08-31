@@ -62,6 +62,16 @@ database.exec(`
   );
   CREATE UNIQUE INDEX IF NOT EXISTS btc_news_snapshots_title_time ON btc_news_snapshots(title, published_at);
   CREATE INDEX IF NOT EXISTS btc_news_snapshots_observed_time ON btc_news_snapshots(observed_at DESC);
+  CREATE TABLE IF NOT EXISTS research_predictions (
+    id INTEGER PRIMARY KEY, bucket_at INTEGER NOT NULL, created_at INTEGER NOT NULL,
+    horizon_key TEXT NOT NULL, candle_interval TEXT NOT NULL, target_at INTEGER NOT NULL,
+    entry_price REAL NOT NULL, raw_probability REAL NOT NULL, calibrated_probability REAL NOT NULL,
+    direction TEXT NOT NULL, regime TEXT NOT NULL, settled_at INTEGER, settled_price REAL,
+    actual_return REAL, is_up INTEGER, brier REAL,
+    UNIQUE(bucket_at, horizon_key)
+  );
+  CREATE INDEX IF NOT EXISTS research_predictions_target ON research_predictions(target_at, settled_at);
+  CREATE INDEX IF NOT EXISTS research_predictions_horizon_settled ON research_predictions(horizon_key, settled_at DESC);
 `);
 const storeQuote = database.prepare('INSERT INTO quote_snapshots (source, observed_at, last, open24h, change_pct, high24, low24) VALUES (?, ?, ?, ?, ?, ?, ?)');
 const storeCandle = database.prepare('INSERT OR IGNORE INTO candles (source, interval, candle_time, open, high, low, close, volume, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
@@ -77,6 +87,9 @@ const priorOiSnapshot = database.prepare('SELECT observed_at, oi FROM derivative
 const priorFundingSnapshot = database.prepare('SELECT observed_at, funding_rate FROM derivative_snapshots WHERE source=? AND observed_at<=? AND funding_rate IS NOT NULL ORDER BY observed_at DESC LIMIT 1');
 const priorQuoteSnapshot = database.prepare('SELECT observed_at, last FROM quote_snapshots WHERE source=? AND observed_at<=? AND last IS NOT NULL ORDER BY observed_at DESC LIMIT 1');
 const latestSentimentSnapshot = database.prepare('SELECT observed_at, value, classification, source FROM sentiment_snapshots ORDER BY observed_at DESC LIMIT 1');
+const storeResearchPrediction = database.prepare('INSERT OR IGNORE INTO research_predictions (bucket_at, created_at, horizon_key, candle_interval, target_at, entry_price, raw_probability, calibrated_probability, direction, regime) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+const pendingResearchPredictions = database.prepare('SELECT id, horizon_key, candle_interval, target_at, entry_price FROM research_predictions WHERE settled_at IS NULL AND target_at<=? ORDER BY target_at ASC');
+const settleResearchPrediction = database.prepare('UPDATE research_predictions SET settled_at=?, settled_price=?, actual_return=?, is_up=?, brier=? WHERE id=?');
 let lastStorageCleanup = 0;
 const lastStoredQuote = new Map();
 const lastStoredDerivative = new Map();
@@ -93,6 +106,7 @@ function cleanStorage(now) {
   database.prepare('DELETE FROM macro_market_snapshots WHERE observed_at < ?').run(now - 180 * 86_400_000);
   database.prepare('DELETE FROM fed_calendar_snapshots WHERE observed_at < ?').run(now - 180 * 86_400_000);
   database.prepare('DELETE FROM btc_news_snapshots WHERE observed_at < ?').run(now - 30 * 86_400_000);
+  database.prepare('DELETE FROM research_predictions WHERE created_at < ?').run(now - 180 * 86_400_000);
   database.exec('PRAGMA wal_checkpoint(PASSIVE)');
 }
 function persistQuote(source, ticker, observedAt) {
@@ -808,6 +822,22 @@ function historicalProjection(candles, horizon) {
   return { expectedReturn:Number.isFinite(expected) ? expected : 0, upProbability:up, samples:Math.round(effectiveSamples), candidateCount:pool.length, momentum:target.medium, volatility:target.volatility, regime:target.regime, matchQuality:clamp(Math.exp(-medianDistance/Math.max(scale,.001)),0,1), distribution:{p10:quantile(.1),p50:quantile(.5),p90:quantile(.9)} };
 }
 function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
+function sigmoid(value) { return 1/(1+Math.exp(-Math.max(-18,Math.min(18,value)))); }
+function logit(probability) { const value=clamp(probability,.001,.999); return Math.log(value/(1-value)); }
+// Time-ordered lightweight fusion model: price features are trained on earlier rows and validated on later unseen rows.
+// 时间顺序轻量融合模型：价格特征仅用较早样本训练、较晚未见样本验证，避免随机切分泄漏。
+function trainFusionModel(candles,horizon) {
+  const closes=candles.map(candle=>Number(candle.close)).filter(value=>Number.isFinite(value)&&value>0), featureAt=index=>{const change=span=>percentChange(closes,index,span)*100, volatility=closes.slice(Math.max(1,index-20),index+1).reduce((sum,value,offset,rows)=>offset?sum+Math.abs(value/rows[offset-1]-1):sum,0)/20*100;return [change(1),change(Math.max(2,Math.round(horizon/2))),change(Math.max(6,horizon*2)),volatility]};
+  const rows=[];for(let index=30;index<closes.length-horizon;index+=3)rows.push({x:featureAt(index),y:closes[index+horizon]>closes[index]?1:0});
+  if(rows.length<90)return null;const split=Math.floor(rows.length*.7),train=rows.slice(0,split),test=rows.slice(split),means=[0,0,0,0],scales=[0,0,0,0];for(const row of train)row.x.forEach((value,index)=>means[index]+=value/train.length);for(const row of train)row.x.forEach((value,index)=>scales[index]+=(value-means[index])**2/train.length);for(let index=0;index<scales.length;index++)scales[index]=Math.sqrt(scales[index])||1;const standardize=row=>row.map((value,index)=>(value-means[index])/scales[index]),weights=[0,0,0,0];let bias=0;for(let epoch=0;epoch<140;epoch++)for(const row of train){const x=standardize(row.x),probability=sigmoid(bias+x.reduce((sum,value,index)=>sum+value*weights[index],0)),error=row.y-probability;bias+=.018*error;x.forEach((value,index)=>weights[index]+=.018*error*value)}const raw=row=>sigmoid(bias+standardize(row).reduce((sum,value,index)=>sum+value*weights[index],0)),validation=test.map(row=>({probability:raw(row.x),y:row.y}));
+  // Platt scaling uses the held-out chronological window, turning raw model scores into calibrated probabilities.
+  // Platt 校准使用按时间保留的验证窗口，将原始分数映射为校准概率。
+  let slope=1,intercept=0;for(let epoch=0;epoch<220;epoch++)for(const row of validation){const z=logit(row.probability),probability=sigmoid(slope*z+intercept),error=row.y-probability;slope+=.018*error*z;intercept+=.018*error}const calibrated=value=>sigmoid(slope*logit(value)+intercept),validated=validation.map(row=>({probability:calibrated(row.probability),y:row.y})),accuracy=validated.filter(row=>(row.probability>=.5?1:0)===row.y).length/validated.length,brier=validated.reduce((sum,row)=>sum+(row.probability-row.y)**2,0)/validated.length;
+  return { probability:raw(featureAt(closes.length-1)), calibrate, calibration:{slope,intercept}, validation:{accuracy,brier,samples:validated.length}, calibrate };
+  function calibrate(value){return calibrated(value)}
+}
+function settleResearchPredictions(histories, now) { const rows=pendingResearchPredictions.all(now);for(const row of rows){const candles=histories[row.candle_interval]||[], target=candles.find(candle=>Number(candle.time)>=row.target_at);if(!target)continue;const settledPrice=Number(target.close);if(!Number.isFinite(settledPrice)||!row.entry_price)continue;const actualReturn=settledPrice/row.entry_price-1,isUp=actualReturn>0?1:0,stored=database.prepare('SELECT calibrated_probability FROM research_predictions WHERE id=?').get(row.id),brier=(Number(stored?.calibrated_probability)-isUp)**2;settleResearchPrediction.run(now,settledPrice,actualReturn,isUp,brier,row.id)}}
+function researchScorecard() { const rows=database.prepare('SELECT horizon_key, COUNT(*) AS settled, AVG(CASE WHEN (calibrated_probability>=.5 AND is_up=1) OR (calibrated_probability<.5 AND is_up=0) THEN 1.0 ELSE 0.0 END) AS hit_rate, AVG(brier) AS brier, AVG(actual_return) AS mean_return FROM research_predictions WHERE settled_at IS NOT NULL GROUP BY horizon_key').all(), pending=database.prepare('SELECT horizon_key, COUNT(*) AS total FROM research_predictions WHERE settled_at IS NULL GROUP BY horizon_key').all();return { rows:Object.fromEntries(rows.map(row=>[row.horizon_key,{settled:Number(row.settled),hitRate:Number(row.hit_rate),brier:Number(row.brier),meanReturn:Number(row.mean_return)}])), pending:Object.fromEntries(pending.map(row=>[row.horizon_key,Number(row.total)])) }; }
 async function researchOutlook({ refresh = false } = {}) {
   const key='research-outlook', hit=cache.get(key), now=Date.now();
   if (!refresh && hit && now-hit.time<NEWS_TTL) return { ...cacheResult(hit, now), stale:false };
@@ -819,26 +849,33 @@ async function researchOutlook({ refresh = false } = {}) {
     const microstructureScore=derivatives ? clamp((Number(derivatives.orderBook?.imbalancePct)||0)/30*.32 + (Number(derivatives.takerFlow?.imbalancePct)||0)/35*.38 + (Number(derivatives.oiChangePct)||0)/.8*(Number(derivatives.priceChangePct)||0>=0?1:-1)*.18 - (Number(derivatives.fundingRate)||0)/.001*.08 - (Number(derivatives.basisPct)||0)/.25*.04,-1,1) : 0;
     const eventRisk=(calendar?.events||[]).filter(event=>event.at-now>=0&&event.at-now<=24*3_600_000).map(event=>event.name), eventRangeMultiplier=eventRisk.length?1.35:1;
     const last=intraday.candles.at(-1)?.close || daily.candles.at(-1)?.close;
+    settleResearchPredictions({'15m':intraday.candles,'1d':daily.candles},now);
     // Four horizons share the same historical-feature model; the 15m/1h/4h paths use intraday candles, while 1d uses daily candles.
     // 四个周期共用同一历史特征模型；15 分钟/1 小时/4 小时使用日内 K 线，1 天使用日线。
     const definitions=[{ key:'15m', label:'约 15 分钟', candles:intraday.candles, horizon:1, cap:.015 },{ key:'1h', label:'约 1 小时', candles:intraday.candles, horizon:4, cap:.03 },{ key:'4h', label:'约 4 小时', candles:intraday.candles, horizon:16, cap:.05 },{ key:'1d', label:'约 1 天', candles:daily.candles, horizon:1, cap:.12 }];
     const windows=definitions.map(definition => {
       const history=historicalProjection(definition.candles,definition.horizon);
+      const fusion=trainFusionModel(definition.candles,definition.horizon);
       const newsWeight=definition.key==='1d'?.25:.12, sentimentWeight=definition.key==='1d'?.08:.04, microWeight=definition.key==='15m'?.14:definition.key==='1h'?.12:definition.key==='4h'?.09:.025;
       const adjustment=(newsScore*newsWeight + sentimentScore*sentimentWeight + microstructureScore*microWeight)*Math.max(history.volatility,.002);
       const adjustedReturn=clamp(history.expectedReturn + adjustment,-definition.cap,definition.cap), volatilityUnit=Math.max(history.volatility*Math.sqrt(definition.horizon),.001);
-      const rawProbability=history.upProbability + newsScore*.06 + sentimentScore*.025 + microstructureScore*(definition.key==='1d'?.015:.045);
-      const upProbability=clamp((rawProbability*Math.max(1,history.samples)+.5*24)/(Math.max(1,history.samples)+24),.05,.95);
+      const analogueProbability=history.upProbability, learnedProbability=fusion?.probability ?? analogueProbability, baseProbability=.55*analogueProbability+.45*learnedProbability;
+      const rawProbability=sigmoid(logit(baseProbability) + newsScore*.22 + sentimentScore*.12 + microstructureScore*(definition.key==='1d'?.07:.18));
+      const upProbability=clamp(fusion?.calibrate(rawProbability) ?? rawProbability,.05,.95);
       // A slim probability band is deliberately neutral: a 50%-plus reading is not directional evidence.
       // 概率落在窄幅中性带时刻意显示中性：仅 50% 多并不构成方向证据。
       const direction=upProbability>=.56?'up':upProbability<=.44?'down':'flat';
       const distribution=Object.fromEntries(Object.entries(history.distribution).map(([key,value])=>[key,clamp(value+adjustment,-definition.cap,definition.cap)]));
       const center=distribution.p50, widened={p10:center+(distribution.p10-center)*eventRangeMultiplier,p50:center,p90:center+(distribution.p90-center)*eventRangeMultiplier};
-      return { ...definition, upProbability, expectedReturn:adjustedReturn, expectedMove:last*adjustedReturn, expectedPrice:last*(1+adjustedReturn), direction, samples:history.samples, candidateCount:history.candidateCount, matchQuality:history.matchQuality, regime:history.regime, volatilityUnit, distribution, priceRange:{p10:last*(1+widened.p10),p50:last*(1+widened.p50),p90:last*(1+widened.p90)}, eventRangeMultiplier };
+      return { ...definition, upProbability, rawProbability, expectedReturn:adjustedReturn, expectedMove:last*adjustedReturn, expectedPrice:last*(1+adjustedReturn), direction, samples:history.samples, candidateCount:history.candidateCount, matchQuality:history.matchQuality, regime:history.regime, volatilityUnit, distribution, priceRange:{p10:last*(1+widened.p10),p50:last*(1+widened.p50),p90:last*(1+widened.p90)}, eventRangeMultiplier, candleInterval:definition.key==='1d'?'1d':'15m', targetAt:Number(definition.candles.at(-1)?.time||now)+(definition.key==='1d'?86_400_000:definition.horizon*900_000), validation:fusion?.validation || null };
     });
+    // Damp a lone outlier horizon toward neutral; this is a consistency guard, not an attempt to force one direction.
+    // 将孤立周期向中性轻微收缩；这是跨周期一致性保护，不会强行统一方向。
+    windows.forEach((window,index)=>{const neighbors=windows.filter((_,other)=>Math.abs(other-index)===1).map(item=>item.upProbability);if(neighbors.length&&Math.abs(window.upProbability-neighbors.reduce((sum,value)=>sum+value,0)/neighbors.length)>.18)window.upProbability=.5+(window.upProbability-.5)*.65;window.direction=window.upProbability>=.56?'up':window.upProbability<=.44?'down':'flat'});
+    for(const window of windows)safelyStore(()=>storeResearchPrediction.run(Math.floor((Number(window.targetAt)-(window.candleInterval==='1d'?86_400_000:window.horizon*900_000))/900_000)*900_000,now,window.key,window.candleInterval,window.targetAt,last,window.rawProbability,window.upProbability,window.direction,window.regime));
     const primary=windows[2];
     const rankedNews=[...newsItems].map(item=>{const ageHours=Number.isFinite(item.publishedAt)?Math.max(0,(now-item.publishedAt)/3_600_000):6;return {...item,impact:Math.abs(item.sentiment)*(item.sourceWeight||.7)*(item.eventWeight||.7)*Math.exp(-ageHours/4)}}).sort((a,b)=>b.impact-a.impact || (b.publishedAt||0)-(a.publishedAt||0));
-    const result={ price:last, windows, news:{ source:news.source, fetchedAt:news.fetchedAt, bullish, bearish, neutral:newsItems.length-bullish-bearish, score:newsScore, halfLifeHours:4, items:rankedNews.slice(0,6) }, sentiment:sentiment?{ value:sentiment.value, source:sentiment.source || 'Alternative.me' }:null, derivatives:derivatives?{ source:derivatives.source, score:microstructureScore, fundingRate:derivatives.fundingRate, oiChangePct:derivatives.oiChangePct, bookImbalancePct:derivatives.orderBook?.imbalancePct, takerImbalancePct:derivatives.takerFlow?.imbalancePct, cvdSessionNotional:derivatives.takerFlow?.cvdSessionNotional, coverage:['funding','oi-change','order-book','taker-flow','cvd','basis'], unavailable:['funding term structure / long-short ratio','options PCR / 25Δ skew / IV term structure','liquidation heatmap','spot ETF net flows','on-chain exchange / whale flows','Coinbase and Kimchi premiums'] }:null, eventRisk, historical:{ intradaySource:intraday.source, dailySource:daily.source, intradaySamples:intraday.candles.length, dailySamples:daily.candles.length }, primary, fetchedAt:now, refreshMs:NEWS_TTL, cached:false, disclaimer:'Historical-pattern and public-headline research only; not investment advice.' };
+    const result={ price:last, windows, scorecard:researchScorecard(), news:{ source:news.source, fetchedAt:news.fetchedAt, bullish, bearish, neutral:newsItems.length-bullish-bearish, score:newsScore, halfLifeHours:4, items:rankedNews.slice(0,6) }, sentiment:sentiment?{ value:sentiment.value, source:sentiment.source || 'Alternative.me' }:null, derivatives:derivatives?{ source:derivatives.source, score:microstructureScore, fundingRate:derivatives.fundingRate, oiChangePct:derivatives.oiChangePct, bookImbalancePct:derivatives.orderBook?.imbalancePct, takerImbalancePct:derivatives.takerFlow?.imbalancePct, cvdSessionNotional:derivatives.takerFlow?.cvdSessionNotional, coverage:['funding','oi-change','order-book','taker-flow','cvd','basis'], unavailable:['funding term structure / long-short ratio','options PCR / 25Δ skew / IV term structure','liquidation heatmap','spot ETF net flows','on-chain exchange / whale flows','Coinbase and Kimchi premiums'] }:null, eventRisk, historical:{ intradaySource:intraday.source, dailySource:daily.source, intradaySamples:intraday.candles.length, dailySamples:daily.candles.length }, primary, fetchedAt:now, refreshMs:NEWS_TTL, cached:false, disclaimer:'Calibrated historical-model research only; not investment advice.' };
     remember(key,result); return result;
   });
 }
