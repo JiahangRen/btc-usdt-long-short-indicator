@@ -634,6 +634,12 @@ function nearestDate(text, { range = false } = {}) {
   }
   candidates.sort((a, b) => a.at - b.at); return candidates[0] || null;
 }
+// BLS publishes a canonical ICS calendar; parse its Employment Situation event instead of guessing from page prose.
+// BLS 提供权威 ICS 日历；非农直接解析 Employment Situation 事件，不再从网页正文猜测日期。
+function nearestIcsEvent(text, summaryPattern) { const now=Date.now(), candidates=[];for(const block of String(text).split(/BEGIN:VEVENT/i).slice(1)){const summary=(block.match(/SUMMARY:(.+)/i)||[])[1]||'',date=(block.match(/DTSTART(?:;[^:]*)?:(\d{8})(?:T(\d{2})(\d{2}))?/i)||[]);if(!summaryPattern.test(summary)||!date[1])continue;const year=Number(date[1].slice(0,4)),month=Number(date[1].slice(4,6))-1,day=Number(date[1].slice(6,8)),hour=Number(date[2]||17),minute=Number(date[3]||0),at=Date.UTC(year,month,day,hour,minute);if(at>=now-86_400_000&&at<now+400*86_400_000)candidates.push({at,label:`${year}-${String(month+1).padStart(2,'0')}-${String(day).padStart(2,'0')}`})}candidates.sort((a,b)=>a.at-b.at);return candidates[0]||null }
+// Fallback only when BLS cannot be reached: Employment Situation is normally released on the first Friday of the following month at 08:30 ET.
+// 仅当 BLS 不可达时的回退：非农通常在次月第一个周五 08:30 ET 发布。
+function payrollCadenceFallback(now=Date.now()) { const date=new Date(now), year=date.getUTCFullYear(), month=date.getUTCMonth()+1;let candidate=new Date(Date.UTC(year,month,1,12,30));candidate.setUTCDate(1+((5-candidate.getUTCDay()+7)%7));if(candidate.getTime()<now-86_400_000){candidate=new Date(Date.UTC(year,month+1,1,12,30));candidate.setUTCDate(1+((5-candidate.getUTCDay()+7)%7))}return {at:candidate.getTime(),label:`${candidate.getUTCFullYear()}-${String(candidate.getUTCMonth()+1).padStart(2,'0')}-${String(candidate.getUTCDate()).padStart(2,'0')}`,fallback:true} }
 async function fedCalendar() {
   const key = 'fed-calendar', hit = cache.get(key), now = Date.now();
   if (hit && now - hit.time < FED_CALENDAR_TTL) return { ...cacheResult(hit, now), stale:false };
@@ -642,16 +648,17 @@ async function fedCalendar() {
       const pages = await Promise.allSettled([
         requestText('https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm', 8_000),
         requestText('https://www.bls.gov/schedule/news_release/cpi.htm', 8_000),
-        requestText('https://www.bls.gov/schedule/news_release/empsit.htm', 8_000)
+        requestText('https://www.bls.gov/schedule/news_release/empsit.htm', 8_000),
+        requestText('https://www.bls.gov/schedule/news_release/bls.ics', 8_000)
       ]);
-      const textAt = index => pages[index].status === 'fulfilled' ? plainText(pages[index].value) : '';
+      const textAt = index => pages[index].status === 'fulfilled' ? plainText(pages[index].value) : '', rawAt=index=>pages[index].status === 'fulfilled'?String(pages[index].value):'';
       const events = [
         { key:'fomc', name:'FOMC 利率决议', source:'Federal Reserve', ...nearestDate(textAt(0), { range:true }) },
         { key:'cpi', name:'美国 CPI', source:'U.S. Bureau of Labor Statistics', ...nearestDate(textAt(1)) },
-        { key:'payrolls', name:'美国非农就业', source:'U.S. Bureau of Labor Statistics', ...nearestDate(textAt(2)) }
+        { key:'payrolls', name:'美国非农就业', source:'U.S. Bureau of Labor Statistics', ...(nearestIcsEvent(rawAt(3),/Employment Situation/i) || nearestDate(textAt(2)) || payrollCadenceFallback(now)) }
       ].filter(event => Number.isFinite(event.at));
       if (!events.length) throw new Error('no upcoming public macro events found');
-      const result = { events:events.sort((a,b) => a.at - b.at), fetchedAt:now, cached:false, cacheAgeMs:0, refreshMs:FED_CALENDAR_TTL, unavailable:pages.map((page,index) => page.status === 'rejected' ? ['Federal Reserve','BLS CPI','BLS Employment'][index] : null).filter(Boolean), sources:['https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm','https://www.bls.gov/schedule/news_release/cpi.htm','https://www.bls.gov/schedule/news_release/empsit.htm'] };
+      const result = { events:events.sort((a,b) => a.at - b.at), fetchedAt:now, cached:false, cacheAgeMs:0, refreshMs:FED_CALENDAR_TTL, unavailable:pages.map((page,index) => page.status === 'rejected' ? ['Federal Reserve','BLS CPI','BLS Employment','BLS calendar'][index] : null).filter(Boolean), sources:['https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm','https://www.bls.gov/schedule/news_release/cpi.htm','https://www.bls.gov/schedule/news_release/empsit.htm','https://www.bls.gov/schedule/news_release/bls.ics'] };
       persistFedCalendarSnapshots(result.events, now);
       remember(key, result); return result;
     });
