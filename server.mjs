@@ -5,6 +5,8 @@ import { mkdirSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
+// BTC 指标服务端：负责静态页面、公开数据源、SQLite 快照与实时 OKX 连接。
+// BTC indicator backend: serves the UI, public data sources, SQLite snapshots, and the live OKX connection.
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || '127.0.0.1';
 const PUBLIC = join(process.cwd(), 'public');
@@ -51,10 +53,31 @@ database.exec(`
   CREATE INDEX IF NOT EXISTS macro_market_snapshots_key_time ON macro_market_snapshots(metric_key, observed_at DESC);
   CREATE TABLE IF NOT EXISTS fed_calendar_snapshots (
     id INTEGER PRIMARY KEY, observed_at INTEGER NOT NULL, event_key TEXT NOT NULL,
-    event_name TEXT NOT NULL, event_at INTEGER NOT NULL, source TEXT NOT NULL
+    event_name TEXT NOT NULL, event_at INTEGER NOT NULL, source TEXT NOT NULL,
+    is_fallback INTEGER NOT NULL DEFAULT 0
   );
   CREATE INDEX IF NOT EXISTS fed_calendar_snapshots_event_time ON fed_calendar_snapshots(event_key, observed_at DESC);
+  CREATE TABLE IF NOT EXISTS btc_news_snapshots (
+    id INTEGER PRIMARY KEY, observed_at INTEGER NOT NULL, published_at INTEGER,
+    title TEXT NOT NULL, url TEXT, source TEXT, sentiment INTEGER NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS btc_news_snapshots_title_time ON btc_news_snapshots(title, published_at);
+  CREATE INDEX IF NOT EXISTS btc_news_snapshots_observed_time ON btc_news_snapshots(observed_at DESC);
+  CREATE TABLE IF NOT EXISTS research_predictions (
+    id INTEGER PRIMARY KEY, bucket_at INTEGER NOT NULL, created_at INTEGER NOT NULL,
+    horizon_key TEXT NOT NULL, candle_interval TEXT NOT NULL, target_at INTEGER NOT NULL,
+    entry_price REAL NOT NULL, raw_probability REAL NOT NULL, calibrated_probability REAL NOT NULL,
+    direction TEXT NOT NULL, regime TEXT NOT NULL, settled_at INTEGER, settled_price REAL,
+    actual_return REAL, is_up INTEGER, brier REAL,
+    UNIQUE(bucket_at, horizon_key)
+  );
+  CREATE INDEX IF NOT EXISTS research_predictions_target ON research_predictions(target_at, settled_at);
+  CREATE INDEX IF NOT EXISTS research_predictions_horizon_settled ON research_predictions(horizon_key, settled_at DESC);
 `);
+// 为既有数据库补充日历回退标识，迁移可重复执行。
+// Add the calendar fallback flag to existing databases; this migration is safe to rerun.
+try { database.exec('ALTER TABLE fed_calendar_snapshots ADD COLUMN is_fallback INTEGER NOT NULL DEFAULT 0'); }
+catch (error) { if (!/duplicate column name/i.test(error.message)) throw error; }
 const storeQuote = database.prepare('INSERT INTO quote_snapshots (source, observed_at, last, open24h, change_pct, high24, low24) VALUES (?, ?, ?, ?, ?, ?, ?)');
 const storeCandle = database.prepare('INSERT OR IGNORE INTO candles (source, interval, candle_time, open, high, low, close, volume, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
 const updateCandle = database.prepare('UPDATE candles SET open=?, high=?, low=?, close=?, volume=?, updated_at=? WHERE source=? AND interval=? AND candle_time=?');
@@ -63,11 +86,20 @@ const storeTrainingRun = database.prepare('INSERT INTO training_runs (observed_a
 const storeDerivativeSnapshot = database.prepare('INSERT INTO derivative_snapshots (source, observed_at, funding_rate, oi, book_imbalance_pct, book_ratio, taker_buy_ratio_pct, taker_trade_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
 const storeSentimentSnapshot = database.prepare('INSERT INTO sentiment_snapshots (observed_at, value, classification, source) VALUES (?, ?, ?, ?)');
 const storeMacroMarketSnapshot = database.prepare('INSERT INTO macro_market_snapshots (observed_at, metric_key, value, change_pct, available, source, cadence) VALUES (?, ?, ?, ?, ?, ?, ?)');
-const storeFedCalendarSnapshot = database.prepare('INSERT INTO fed_calendar_snapshots (observed_at, event_key, event_name, event_at, source) VALUES (?, ?, ?, ?, ?)');
+const storeFedCalendarSnapshot = database.prepare('INSERT INTO fed_calendar_snapshots (observed_at, event_key, event_name, event_at, source, is_fallback) VALUES (?, ?, ?, ?, ?, ?)');
+const storeNewsSnapshot = database.prepare('INSERT OR IGNORE INTO btc_news_snapshots (observed_at, published_at, title, url, source, sentiment) VALUES (?, ?, ?, ?, ?, ?)');
 const priorOiSnapshot = database.prepare('SELECT observed_at, oi FROM derivative_snapshots WHERE source=? AND observed_at<=? AND oi IS NOT NULL ORDER BY observed_at DESC LIMIT 1');
 const priorFundingSnapshot = database.prepare('SELECT observed_at, funding_rate FROM derivative_snapshots WHERE source=? AND observed_at<=? AND funding_rate IS NOT NULL ORDER BY observed_at DESC LIMIT 1');
 const priorQuoteSnapshot = database.prepare('SELECT observed_at, last FROM quote_snapshots WHERE source=? AND observed_at<=? AND last IS NOT NULL ORDER BY observed_at DESC LIMIT 1');
 const latestSentimentSnapshot = database.prepare('SELECT observed_at, value, classification, source FROM sentiment_snapshots ORDER BY observed_at DESC LIMIT 1');
+const latestFedCalendarSnapshots = database.prepare(`SELECT snapshot.observed_at, snapshot.event_key, snapshot.event_name, snapshot.event_at, snapshot.source, snapshot.is_fallback
+  FROM fed_calendar_snapshots AS snapshot
+  INNER JOIN (SELECT event_key, MAX(observed_at) AS observed_at FROM fed_calendar_snapshots GROUP BY event_key) AS latest
+    ON latest.event_key=snapshot.event_key AND latest.observed_at=snapshot.observed_at
+  ORDER BY snapshot.event_at ASC`);
+const storeResearchPrediction = database.prepare('INSERT OR IGNORE INTO research_predictions (bucket_at, created_at, horizon_key, candle_interval, target_at, entry_price, raw_probability, calibrated_probability, direction, regime) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+const pendingResearchPredictions = database.prepare('SELECT id, horizon_key, candle_interval, target_at, entry_price FROM research_predictions WHERE settled_at IS NULL AND target_at<=? ORDER BY target_at ASC');
+const settleResearchPrediction = database.prepare('UPDATE research_predictions SET settled_at=?, settled_price=?, actual_return=?, is_up=?, brier=? WHERE id=?');
 let lastStorageCleanup = 0;
 const lastStoredQuote = new Map();
 const lastStoredDerivative = new Map();
@@ -83,6 +115,8 @@ function cleanStorage(now) {
   database.prepare('DELETE FROM sentiment_snapshots WHERE observed_at < ?').run(now - 365 * 86_400_000);
   database.prepare('DELETE FROM macro_market_snapshots WHERE observed_at < ?').run(now - 180 * 86_400_000);
   database.prepare('DELETE FROM fed_calendar_snapshots WHERE observed_at < ?').run(now - 180 * 86_400_000);
+  database.prepare('DELETE FROM btc_news_snapshots WHERE observed_at < ?').run(now - 30 * 86_400_000);
+  database.prepare('DELETE FROM research_predictions WHERE created_at < ?').run(now - 180 * 86_400_000);
   database.exec('PRAGMA wal_checkpoint(PASSIVE)');
 }
 function persistQuote(source, ticker, observedAt) {
@@ -123,7 +157,13 @@ function persistMacroMarketSnapshots(rows, observedAt = Date.now()) {
 }
 function persistFedCalendarSnapshots(events, observedAt = Date.now()) {
   safelyStore(() => {
-    for (const event of events) storeFedCalendarSnapshot.run(observedAt, event.key, event.name, event.at, event.source);
+    for (const event of events) storeFedCalendarSnapshot.run(observedAt, event.key, event.name, event.at, event.source, event.fallback ? 1 : 0);
+    cleanStorage(observedAt);
+  });
+}
+function persistNewsSnapshots(items, observedAt = Date.now()) {
+  safelyStore(() => {
+    for (const item of items) storeNewsSnapshot.run(observedAt, Number.isFinite(item.publishedAt) ? item.publishedAt : null, item.title, item.url || null, item.source || 'Google News', item.sentiment);
     cleanStorage(observedAt);
   });
 }
@@ -143,16 +183,18 @@ function persistHistory(source, interval, candles) {
 }
 function storageStatus() {
   const count = table => database.prepare(`SELECT COUNT(*) AS total FROM ${table}`).get().total;
-  return { engine:'SQLite', quoteSnapshots:count('quote_snapshots'), candles:count('candles'), marketSnapshots:count('market_snapshots'), trainingRuns:count('training_runs'), derivativeSnapshots:count('derivative_snapshots'), sentimentSnapshots:count('sentiment_snapshots'), macroMarketSnapshots:count('macro_market_snapshots'), fedCalendarSnapshots:count('fed_calendar_snapshots') };
+  return { engine:'SQLite', quoteSnapshots:count('quote_snapshots'), candles:count('candles'), marketSnapshots:count('market_snapshots'), trainingRuns:count('training_runs'), derivativeSnapshots:count('derivative_snapshots'), sentimentSnapshots:count('sentiment_snapshots'), macroMarketSnapshots:count('macro_market_snapshots'), fedCalendarSnapshots:count('fed_calendar_snapshots'), newsSnapshots:count('btc_news_snapshots') };
 }
-// Layered cache policy.  Quotes are fed by the OKX stream, chart/indicator
-// data is refreshed at a lower cadence, and slow history is retained in SQLite.
+// 分层缓存策略：报价由 OKX 流持续推送，图表/指标以较低频率刷新，慢速历史保留在 SQLite。
+// Layered cache policy: quotes come from the OKX stream, chart/indicator data
+// refreshes less often, and slow history is retained in SQLite.
 const MARKET_TTL = 10_000;
 const CONTEXT_TTL = 10_000;
 const HISTORY_TTL = 300_000;
 const SENTIMENT_TTL = 120_000;
 const FED_CALENDAR_TTL = 600_000;
 const FED_MARKET_SIGNALS_TTL = 600_000;
+const NEWS_TTL = 900_000;
 const QUOTE_TTL = 1_000;
 const UPSTREAM_TIMEOUT = 1_200;
 const STALE_QUOTE_MAX_AGE = 60_000;
@@ -172,16 +214,18 @@ function coalesce(key, work) {
   inFlight.set(key, promise);
   return promise;
 }
-// Keep the automatic market selection aligned with the dashboard default and
-// the BTC-USDT perpetual contract used by the owner.
+// 自动市场选择需与仪表盘默认值及 BTC-USDT 永续合约保持一致。
+// Keep automatic market selection aligned with the dashboard default and the
+// BTC-USDT perpetual contract used by the owner.
 const sources = ['okx', 'coinbase', 'gate', 'binance'];
+// 单一进程级公共连接让默认 OKX 永续报价保持在内存中；当流或某频道不可用时，REST 仍是安全回退。
 // A single process-wide public connection keeps the default OKX perpetual
-// quote hot in memory.  REST remains the safe fallback if the stream or a
+// quote hot in memory. REST remains the safe fallback if the stream or a
 // particular channel is unavailable in a region.
 const okxStream = {
   socket:null, status:'connecting', ticker:null, spotPrice:null,
   fundingRate:null, nextFundingRate:null, oi:null, oiUnit:'BTC',
-  orderBook:null, takerTrades:[], bookAt:0, tradeAt:0,
+  orderBook:null, takerTrades:[], cvdNotional:0, bookAt:0, tradeAt:0,
   lastMessageAt:0, tickerAt:0, contextAt:0, connectedAt:0,
   reconnects:0, lastError:null, retryMs:1_000, heartbeat:null, retryTimer:null
 };
@@ -198,6 +242,7 @@ function recentTakerFlow(now = Date.now()) {
   return total > 0 ? {
     buyNotional:buys, sellNotional:sells, buyRatioPct:buys / total * 100,
     imbalancePct:(buys - sells) / total * 100, tradeCount:okxStream.takerTrades.length,
+    cvd60Notional:buys-sells, cvdSessionNotional:okxStream.cvdNotional,
     windowSeconds:60, updatedAt:okxStream.tradeAt || null
   } : null;
 }
@@ -268,7 +313,7 @@ function updateOkxStream(message) {
   } else if (channel === 'trades') {
     for (const trade of rows) {
       const price = +trade.px, size = +trade.sz, side = trade.side === 'buy' ? 'buy' : trade.side === 'sell' ? 'sell' : null;
-      if (side && Number.isFinite(price) && Number.isFinite(size) && size > 0) okxStream.takerTrades.push({ time:now, side, notional:price * size });
+      if (side && Number.isFinite(price) && Number.isFinite(size) && size > 0) { const notional=price*size;okxStream.takerTrades.push({ time:now, side, notional });okxStream.cvdNotional+=side==='buy'?notional:-notional; }
     }
     okxStream.tradeAt = now;
     recentTakerFlow(now);
@@ -301,7 +346,8 @@ function openOkxStream() {
 openOkxStream();
 const derivativePersistTimer = setInterval(persistOkxDerivativeSnapshot, 10_000);
 derivativePersistTimer.unref?.();
-// Each API response carries request-scoped timings.  This lets the browser
+// 每个 API 响应都携带请求范围的耗时，浏览器可区分“浏览器→本站”与“本站→交易所”的耗时。
+// Each API response carries request-scoped timings. This lets the browser
 // distinguish its route to this server from the server's route to an exchange.
 const requestTiming = new AsyncLocalStorage();
 
@@ -361,6 +407,7 @@ async function fromGate(interval, limit) {
 }
 async function okxCandleRows(interval, limit) {
   if (interval !== '3h') return request(`https://www.okx.com/api/v5/market/candles?instId=BTC-USDT-SWAP&bar=${intervalFor('okx', interval)}&limit=${limit}`);
+  // OKX 没有原生 3 小时 K 线：分页取得足量 1 小时 K 线后，按 UTC 3 小时边界聚合，确保信号仍有 200 根数据。
   // OKX has no native 3H bar. Fetch enough native 1H bars in pages, then
   // aggregate them on a UTC 3-hour boundary so the signal still has 200 bars.
   const pages = [];
@@ -379,6 +426,7 @@ async function okxCandleRows(interval, limit) {
 async function fromOKX(interval, limit) {
   const streamedTicker = freshOkxTicker();
   const [ticker, rows] = await Promise.all([
+    // 仪表盘必须沿用 OKX 移动端永续合约的同一市场，不能混入 BTC-USDT 现货价格。
     // Keep the dashboard on the same market as the OKX mobile perpetual
     // contract, rather than mixing its price with BTC-USDT spot.
     streamedTicker ? Promise.resolve(null) : request('https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT-SWAP'),
@@ -596,28 +644,59 @@ function nearestDate(text, { range = false } = {}) {
   }
   candidates.sort((a, b) => a.at - b.at); return candidates[0] || null;
 }
-async function fedCalendar() {
-  const key = 'fed-calendar', hit = cache.get(key), now = Date.now();
-  if (hit && now - hit.time < FED_CALENDAR_TTL) return { ...cacheResult(hit, now), stale:false };
-  try {
-    return await coalesce(key, async () => {
+// BLS publishes a canonical ICS calendar; parse its Employment Situation event instead of guessing from page prose.
+// BLS 提供权威 ICS 日历；非农直接解析 Employment Situation 事件，不再从网页正文猜测日期。
+function nearestIcsEvent(text, summaryPattern) { const now=Date.now(), candidates=[];for(const block of String(text).split(/BEGIN:VEVENT/i).slice(1)){const summary=(block.match(/SUMMARY:(.+)/i)||[])[1]||'',date=(block.match(/DTSTART(?:;[^:]*)?:(\d{8})(?:T(\d{2})(\d{2}))?/i)||[]);if(!summaryPattern.test(summary)||!date[1])continue;const year=Number(date[1].slice(0,4)),month=Number(date[1].slice(4,6))-1,day=Number(date[1].slice(6,8)),hour=Number(date[2]||17),minute=Number(date[3]||0),at=Date.UTC(year,month,day,hour,minute);if(at>=now-86_400_000&&at<now+400*86_400_000)candidates.push({at,label:`${year}-${String(month+1).padStart(2,'0')}-${String(day).padStart(2,'0')}`})}candidates.sort((a,b)=>a.at-b.at);return candidates[0]||null }
+// Fallback only when BLS cannot be reached: Employment Situation is normally released on the first Friday of the following month at 08:30 ET.
+// 仅当 BLS 不可达时的回退：非农通常在次月第一个周五 08:30 ET 发布。
+function payrollCadenceFallback(now=Date.now()) { const date=new Date(now), year=date.getUTCFullYear(), month=date.getUTCMonth()+1;let candidate=new Date(Date.UTC(year,month,1,12,30));candidate.setUTCDate(1+((5-candidate.getUTCDay()+7)%7));if(candidate.getTime()<now-86_400_000){candidate=new Date(Date.UTC(year,month+1,1,12,30));candidate.setUTCDate(1+((5-candidate.getUTCDay()+7)%7))}return {at:candidate.getTime(),label:`${candidate.getUTCFullYear()}-${String(candidate.getUTCMonth()+1).padStart(2,'0')}-${String(candidate.getUTCDate()).padStart(2,'0')}`,fallback:true} }
+// 首屏读取三类宏观日历的最近成功 SQLite 快照，并后台请求官方来源更新它。
+// Read the latest successful FOMC/CPI/payroll SQLite snapshots on first paint, then revalidate official sources in the background.
+function storedFedCalendar(now = Date.now()) {
+  const rows = latestFedCalendarSnapshots.all().filter(row => Number.isFinite(+row.event_at) && +row.event_at >= now - 86_400_000);
+  if (!rows.length) return null;
+  const observedAt = Math.max(...rows.map(row => +row.observed_at));
+  return {
+    events:rows.map(row => ({ key:String(row.event_key), name:String(row.event_name), at:+row.event_at, source:String(row.source || 'SQLite'), fallback:Boolean(row.is_fallback) })),
+    fetchedAt:observedAt, cached:true, storageCached:true, stale:true, cacheAgeMs:Math.max(0, now-observedAt), refreshMs:FED_CALENDAR_TTL,
+    unavailable:[], sources:['SQLite fed_calendar_snapshots']
+  };
+}
+async function refreshFedCalendar(now = Date.now()) {
+  return coalesce('fed-calendar-refresh', async () => {
       const pages = await Promise.allSettled([
         requestText('https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm', 8_000),
         requestText('https://www.bls.gov/schedule/news_release/cpi.htm', 8_000),
-        requestText('https://www.bls.gov/schedule/news_release/empsit.htm', 8_000)
+        requestText('https://www.bls.gov/schedule/news_release/empsit.htm', 8_000),
+        requestText('https://www.bls.gov/schedule/news_release/bls.ics', 8_000)
       ]);
-      const textAt = index => pages[index].status === 'fulfilled' ? plainText(pages[index].value) : '';
+      const textAt = index => pages[index].status === 'fulfilled' ? plainText(pages[index].value) : '', rawAt=index=>pages[index].status === 'fulfilled'?String(pages[index].value):'';
       const events = [
         { key:'fomc', name:'FOMC 利率决议', source:'Federal Reserve', ...nearestDate(textAt(0), { range:true }) },
-        { key:'cpi', name:'美国 CPI', source:'U.S. Bureau of Labor Statistics', ...nearestDate(textAt(1)) },
-        { key:'payrolls', name:'美国非农就业', source:'U.S. Bureau of Labor Statistics', ...nearestDate(textAt(2)) }
+        // CPI 与非农都优先解析 BLS 统一 ICS 日历，网页明细仅作为兼容回退。
+        // Parse both CPI and payrolls from BLS's canonical ICS calendar first; use detail pages only as compatibility fallbacks.
+        { key:'cpi', name:'美国 CPI', source:'U.S. Bureau of Labor Statistics', ...(nearestIcsEvent(rawAt(3),/Consumer Price Index/i) || nearestDate(textAt(1))) },
+        { key:'payrolls', name:'美国非农就业', source:'U.S. Bureau of Labor Statistics', ...(nearestIcsEvent(rawAt(3),/Employment Situation/i) || nearestDate(textAt(2)) || payrollCadenceFallback(now)) }
       ].filter(event => Number.isFinite(event.at));
       if (!events.length) throw new Error('no upcoming public macro events found');
-      const result = { events:events.sort((a,b) => a.at - b.at), fetchedAt:now, cached:false, cacheAgeMs:0, refreshMs:FED_CALENDAR_TTL, unavailable:pages.map((page,index) => page.status === 'rejected' ? ['Federal Reserve','BLS CPI','BLS Employment'][index] : null).filter(Boolean), sources:['https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm','https://www.bls.gov/schedule/news_release/cpi.htm','https://www.bls.gov/schedule/news_release/empsit.htm'] };
+      const result = { events:events.sort((a,b) => a.at - b.at), fetchedAt:now, cached:false, cacheAgeMs:0, refreshMs:FED_CALENDAR_TTL, unavailable:pages.map((page,index) => page.status === 'rejected' ? ['Federal Reserve','BLS CPI','BLS Employment','BLS calendar'][index] : null).filter(Boolean), sources:['https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm','https://www.bls.gov/schedule/news_release/cpi.htm','https://www.bls.gov/schedule/news_release/empsit.htm','https://www.bls.gov/schedule/news_release/bls.ics'] };
       persistFedCalendarSnapshots(result.events, now);
-      remember(key, result); return result;
-    });
-  } catch (error) {
+      remember('fed-calendar', result); return result;
+  });
+}
+async function fedCalendar() {
+  const key = 'fed-calendar', hit = cache.get(key), now = Date.now();
+  if (hit && now - hit.time < FED_CALENDAR_TTL) return { ...cacheResult(hit, now), stale:false };
+  const stored = storedFedCalendar(now);
+  if (stored) {
+    remember(key, stored);
+    // 返回数据库内容不等待网络；成功刷新会替换内存缓存，下一次界面轮询即得到新数据。
+    // Do not block on the network when returning SQLite data; a successful revalidation replaces cache for the next UI poll.
+    refreshFedCalendar(now).catch(error => console.warn('Fed calendar background refresh failed:', error.message));
+    return stored;
+  }
+  try { return await refreshFedCalendar(now); }
+  catch (error) {
     if (hit && now - hit.time <= 3_600_000) return { ...cacheResult(hit, now), stale:true, fallbackReason:error.name === 'AbortError' ? 'timeout' : error.message };
     throw error;
   }
@@ -650,8 +729,9 @@ async function fedMarketSignals() {
     const globalChange=Number(cg?.market_cap_change_percentage_24h_usd ?? cl?.mcap_change);
     market.push(Number.isFinite(totalMarketCap) && totalMarketCap > 0 ? { key:'crypto-total-cap', name:'全网加密总市值', available:true, value:totalMarketCap, changePct:globalChange, source, cadence:'24h 快照' } : { key:'crypto-total-cap', name:'全网加密总市值', available:false, source, detail:'公开数据暂不可用' });
     market.push(Number.isFinite(totalVolume) && totalVolume > 0 ? { key:'crypto-volume', name:'全网 24h 成交额', available:true, value:totalVolume, changePct:null, source, cadence:'24h 快照' } : { key:'crypto-volume', name:'全网 24h 成交额', available:false, source, detail:'公开数据暂不可用' });
+    // 可靠的免密公开源无法提供完整交易所钱包余额；应明确此限制，不能显示第三方的过期或不可验证数字。
     // Full exchange-wallet balances are not available from a reliable public,
-    // keyless source.  Expose that limitation rather than showing a stale or
+    // keyless source. Expose that limitation rather than showing a stale or
     // unverifiable number from a third-party dashboard.
     market.push({ key:'exchange-btc-reserve', name:'交易所比特币钱包余额', available:false, source:'—', detail:'需要可验证的链上数据订阅；当前未接入 Key' });
     const result={ market, fetchedAt:now, refreshMs:FED_MARKET_SIGNALS_TTL };
@@ -712,10 +792,139 @@ async function forecastHistory(interval) {
   }
   throw new Error(failures.join('; '));
 }
+// 公开新闻只用于给历史价格模型增加有限的环境权重；标题情绪不是事实核验，也不能单独产生交易结论。
+// Public headlines only add a limited context weight to the price-history model. Headline sentiment is not fact verification and never produces a trading call by itself.
+const newsBullTerms=['etf approval','etf inflow','institutional buy','accumulation','adoption','partnership','bullish','rally','surge','surging','rises','buying','purchases','all-time high','rate cut','regulatory clarity','approval','inflow','买入','增持','采用','合作','利好','上涨','反弹','降息','获批','流入'];
+const newsBearTerms=['etf outflow','hack','exploit','breach','lawsuit','ban','crackdown','liquidation','sell-off','selloff','plunge','weakness','outflow','rate hike','fraud','scam','hacked','调查','禁令','监管打击','黑客','漏洞','清算','抛售','下跌','利空','加息','流出','诉讼'];
+function newsSentimentScore(title) {
+  const normalized=String(title || '').toLowerCase();
+  const count=terms => terms.reduce((total, term) => total + (normalized.includes(term) ? 1 : 0), 0);
+  const bull=count(newsBullTerms), bear=count(newsBearTerms);
+  return clamp((bull-bear)/3,-1,1);
+}
+function decodeXml(text) { return String(text || '').replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').replace(/&amp;/gi, '&').replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'").replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code))).trim(); }
+function xmlField(block, tag) { const matched=String(block).match(new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${tag}>`, 'i')); return matched ? decodeXml(matched[1]).replace(/<[^>]+>/g, '').trim() : ''; }
+function normalizedHeadline(title) { return String(title || '').toLowerCase().replace(/\s+[|–—-]\s+[^|–—-]{2,}$/,'').replace(/[^a-z0-9\u4e00-\u9fff]+/g,' ').trim(); }
+function headlineSimilarity(a,b) { const left=new Set(normalizedHeadline(a).split(/\s+/).filter(Boolean)), right=new Set(normalizedHeadline(b).split(/\s+/).filter(Boolean)); const union=new Set([...left,...right]).size, overlap=[...left].filter(word=>right.has(word)).length; return union ? overlap/union : 0; }
+function classifyNewsEvent(title) { const value=String(title || '').toLowerCase(); if(/etf|inflow|outflow|blackrock|fidelity/.test(value))return 'etf-flow';if(/hack|exploit|breach|scam|fraud|bankrupt/.test(value))return 'security';if(/regulat|sec |lawsuit|ban|approval/.test(value))return 'regulation';if(/whale|wallet|transfer|holder/.test(value))return 'whale-flow';if(/cpi|fomc|rate |fed |inflation/.test(value))return 'macro';return 'market'; }
+function sourceWeight(source) { const value=String(source || '').toLowerCase(); if(/reuters|bloomberg|financial times|wall street journal/.test(value))return 1.35;if(/coindesk|the block|cointelegraph/.test(value))return 1.1;if(/yahoo finance|cnbc/.test(value))return .9;if(/motley fool|benzinga/.test(value))return .75;if(/stocktwits|reddit|x\.com|twitter/.test(value))return .5;return .7; }
+function eventWeight(category) { return ({'etf-flow':1.3,security:1.25,regulation:1.15,'whale-flow':.8,macro:1.05,market:.7})[category] || .7; }
+function parseBitcoinNews(xml) {
+  const items=[];
+  for (const matched of String(xml).matchAll(/<item>([\s\S]*?)<\/item>/gi)) {
+    const block=matched[1], title=xmlField(block, 'title');
+    if (!title || items.some(item=>headlineSimilarity(item.title,title)>=.72)) continue;
+    const publishedAt=Date.parse(xmlField(block, 'pubDate'));
+    const source=xmlField(block, 'source') || 'Google News', category=classifyNewsEvent(title);
+    items.push({ title, url:xmlField(block, 'link'), source, publishedAt:Number.isFinite(publishedAt) ? publishedAt : null, sentiment:newsSentimentScore(title), category, sourceWeight:sourceWeight(source), eventWeight:eventWeight(category) });
+    if (items.length >= 24) break;
+  }
+  return items;
+}
+function storedBitcoinNews(now = Date.now()) {
+  const rows=database.prepare('SELECT title, url, source, published_at AS publishedAt, sentiment FROM btc_news_snapshots WHERE observed_at >= ? ORDER BY COALESCE(published_at, observed_at) DESC LIMIT 24').all(now - 24 * 86_400_000);
+  return rows.map(row => { const title=String(row.title), source=row.source || 'SQLite', category=classifyNewsEvent(title); return { title, url:row.url || '', source, publishedAt:Number(row.publishedAt) || null, sentiment:Number(row.sentiment) || 0, category, sourceWeight:sourceWeight(source), eventWeight:eventWeight(category) }; });
+}
+async function bitcoinNews({ refresh = false } = {}) {
+  const key='btc-news', hit=cache.get(key), now=Date.now();
+  if (!refresh && hit && now-hit.time<NEWS_TTL) return { ...cacheResult(hit, now), stale:false };
+  const stored=storedBitcoinNews(now);
+  try {
+    return await coalesce(key, async () => {
+      const xml=await requestText('https://news.google.com/rss/search?q=Bitcoin%20when%3A1d&hl=en-US&gl=US&ceid=US:en', 8_000);
+      const items=parseBitcoinNews(xml);
+      if (!items.length) throw new Error('no Bitcoin news headlines found');
+      persistNewsSnapshots(items, now);
+      const result={ items, fetchedAt:now, refreshMs:NEWS_TTL, source:'Google News RSS', cached:false, cacheAgeMs:0 };
+      remember(key,result); return result;
+    });
+  } catch (error) {
+    if (hit && now-hit.time<=3_600_000) return { ...cacheResult(hit, now), stale:true, fallbackReason:error.message };
+    if (stored.length) return { items:stored, fetchedAt:now, refreshMs:NEWS_TTL, source:'SQLite news snapshots', cached:true, stale:true, cacheAgeMs:null, fallbackReason:error.message };
+    throw error;
+  }
+}
+function percentChange(closes, end, span) { const start=closes[Math.max(0,end-span)], current=closes[end]; return Number.isFinite(start) && start > 0 && Number.isFinite(current) ? current / start - 1 : 0; }
+function historicalProjection(candles, horizon) {
+  const closes=candles.map(candle => +candle.close).filter(value => Number.isFinite(value) && value > 0), end=closes.length-1;
+  if (end < Math.max(80, horizon + 30)) throw new Error('insufficient price-history samples');
+  const featureAt=index => { const volatility=closes.slice(Math.max(1,index-20),index+1).reduce((total,value,offset,rows) => offset ? total + Math.abs(value / rows[offset-1] - 1) : total,0)/20, trend=percentChange(closes,index,Math.max(20,horizon*4)); return { short:percentChange(closes,index,Math.max(2,Math.round(horizon/2))), medium:percentChange(closes,index,Math.max(6,horizon*2)), volatility, trend, regime:trend>.015?'bull':trend<-.015?'bear':'range' }; };
+  const target=featureAt(end), candidates=[];
+  for (let index=30;index<=end-horizon;index++) {
+    const row=featureAt(index), distance=Math.abs(row.short-target.short)*20 + Math.abs(row.medium-target.medium)*12 + Math.abs(row.volatility-target.volatility)*18 + Math.abs(row.trend-target.trend)*8;
+    candidates.push({ distance, change:closes[index+horizon]/closes[index]-1, regime:row.regime });
+  }
+  const sameRegime=candidates.filter(row=>row.regime===target.regime), pool=sameRegime.length>=60?sameRegime:candidates;
+  const sorted=[...pool].sort((a,b)=>a.distance-b.distance), scale=Math.max(.001,sorted[Math.floor(sorted.length*.35)]?.distance || .01);
+  const weighted=pool.map(row=>({...row,weight:Math.exp(-row.distance/scale)})), weightTotal=weighted.reduce((sum,row)=>sum+row.weight,0);
+  const expected=weighted.reduce((sum,row)=>sum+row.change*row.weight,0)/weightTotal, up=weighted.filter(row=>row.change>0).reduce((sum,row)=>sum+row.weight,0)/weightTotal;
+  const normalized=weighted.map(row=>({...row,weight:row.weight/weightTotal})).sort((a,b)=>a.change-b.change), quantile=q=>{let cumulative=0;for(const row of normalized){cumulative+=row.weight;if(cumulative>=q)return row.change}return normalized.at(-1)?.change || 0};
+  const effectiveSamples=1/normalized.reduce((sum,row)=>sum+row.weight**2,0), medianDistance=sorted[Math.floor(sorted.length*.5)]?.distance || scale;
+  return { expectedReturn:Number.isFinite(expected) ? expected : 0, upProbability:up, samples:Math.round(effectiveSamples), candidateCount:pool.length, momentum:target.medium, volatility:target.volatility, regime:target.regime, matchQuality:clamp(Math.exp(-medianDistance/Math.max(scale,.001)),0,1), distribution:{p10:quantile(.1),p50:quantile(.5),p90:quantile(.9)} };
+}
+function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
+function sigmoid(value) { return 1/(1+Math.exp(-Math.max(-18,Math.min(18,value)))); }
+function logit(probability) { const value=clamp(probability,.001,.999); return Math.log(value/(1-value)); }
+// Time-ordered lightweight fusion model: price features are trained on earlier rows and validated on later unseen rows.
+// 时间顺序轻量融合模型：价格特征仅用较早样本训练、较晚未见样本验证，避免随机切分泄漏。
+function trainFusionModel(candles,horizon) {
+  const closes=candles.map(candle=>Number(candle.close)).filter(value=>Number.isFinite(value)&&value>0), featureAt=index=>{const change=span=>percentChange(closes,index,span)*100, volatility=closes.slice(Math.max(1,index-20),index+1).reduce((sum,value,offset,rows)=>offset?sum+Math.abs(value/rows[offset-1]-1):sum,0)/20*100;return [change(1),change(Math.max(2,Math.round(horizon/2))),change(Math.max(6,horizon*2)),volatility]};
+  const rows=[];for(let index=30;index<closes.length-horizon;index+=3)rows.push({x:featureAt(index),y:closes[index+horizon]>closes[index]?1:0});
+  if(rows.length<90)return null;const split=Math.floor(rows.length*.7),train=rows.slice(0,split),test=rows.slice(split),means=[0,0,0,0],scales=[0,0,0,0];for(const row of train)row.x.forEach((value,index)=>means[index]+=value/train.length);for(const row of train)row.x.forEach((value,index)=>scales[index]+=(value-means[index])**2/train.length);for(let index=0;index<scales.length;index++)scales[index]=Math.sqrt(scales[index])||1;const standardize=row=>row.map((value,index)=>(value-means[index])/scales[index]),weights=[0,0,0,0];let bias=0;for(let epoch=0;epoch<140;epoch++)for(const row of train){const x=standardize(row.x),probability=sigmoid(bias+x.reduce((sum,value,index)=>sum+value*weights[index],0)),error=row.y-probability;bias+=.018*error;x.forEach((value,index)=>weights[index]+=.018*error*value)}const raw=row=>sigmoid(bias+standardize(row).reduce((sum,value,index)=>sum+value*weights[index],0)),validation=test.map(row=>({probability:raw(row.x),y:row.y}));
+  // Platt scaling uses the held-out chronological window, turning raw model scores into calibrated probabilities.
+  // Platt 校准使用按时间保留的验证窗口，将原始分数映射为校准概率。
+  let slope=1,intercept=0;for(let epoch=0;epoch<220;epoch++)for(const row of validation){const z=logit(row.probability),probability=sigmoid(slope*z+intercept),error=row.y-probability;slope+=.018*error*z;intercept+=.018*error}const calibrated=value=>sigmoid(slope*logit(value)+intercept),validated=validation.map(row=>({probability:calibrated(row.probability),y:row.y})),accuracy=validated.filter(row=>(row.probability>=.5?1:0)===row.y).length/validated.length,brier=validated.reduce((sum,row)=>sum+(row.probability-row.y)**2,0)/validated.length;
+  return { probability:raw(featureAt(closes.length-1)), calibrate, calibration:{slope,intercept}, validation:{accuracy,brier,samples:validated.length}, calibrate };
+  function calibrate(value){return calibrated(value)}
+}
+function settleResearchPredictions(histories, now) { const rows=pendingResearchPredictions.all(now);for(const row of rows){const candles=histories[row.candle_interval]||[], target=candles.find(candle=>Number(candle.time)>=row.target_at);if(!target)continue;const settledPrice=Number(target.close);if(!Number.isFinite(settledPrice)||!row.entry_price)continue;const actualReturn=settledPrice/row.entry_price-1,isUp=actualReturn>0?1:0,stored=database.prepare('SELECT calibrated_probability FROM research_predictions WHERE id=?').get(row.id),brier=(Number(stored?.calibrated_probability)-isUp)**2;settleResearchPrediction.run(now,settledPrice,actualReturn,isUp,brier,row.id)}}
+function researchScorecard() { const rows=database.prepare('SELECT horizon_key, COUNT(*) AS settled, AVG(CASE WHEN (calibrated_probability>=.5 AND is_up=1) OR (calibrated_probability<.5 AND is_up=0) THEN 1.0 ELSE 0.0 END) AS hit_rate, AVG(brier) AS brier, AVG(actual_return) AS mean_return FROM research_predictions WHERE settled_at IS NOT NULL GROUP BY horizon_key').all(), pending=database.prepare('SELECT horizon_key, COUNT(*) AS total FROM research_predictions WHERE settled_at IS NULL GROUP BY horizon_key').all();return { rows:Object.fromEntries(rows.map(row=>[row.horizon_key,{settled:Number(row.settled),hitRate:Number(row.hit_rate),brier:Number(row.brier),meanReturn:Number(row.mean_return)}])), pending:Object.fromEntries(pending.map(row=>[row.horizon_key,Number(row.total)])) }; }
+async function researchOutlook({ refresh = false } = {}) {
+  const key='research-outlook', hit=cache.get(key), now=Date.now();
+  if (!refresh && hit && now-hit.time<NEWS_TTL) return { ...cacheResult(hit, now), stale:false };
+  return coalesce(key, async () => {
+    const [intraday,daily,news,sentiment,derivatives,calendar]=await Promise.all([forecastHistory('15m'),forecastHistory('1d'),bitcoinNews({ refresh }),fearGreedSentiment({ refresh }).catch(()=>null),marketContext('okx').catch(()=>null),fedCalendar().catch(()=>null)]);
+    const newsItems=news.items || [], bullish=newsItems.filter(item=>item.sentiment>0).length, bearish=newsItems.filter(item=>item.sentiment<0).length;
+    const newsScore=newsItems.length ? clamp(newsItems.reduce((sum,item)=>{const ageHours=Number.isFinite(item.publishedAt)?Math.max(0,(now-item.publishedAt)/3_600_000):6, timeWeight=Math.exp(-ageHours/4);return sum+item.sentiment*(item.sourceWeight||.7)*(item.eventWeight||.7)*timeWeight},0)/Math.max(1,newsItems.reduce((sum,item)=>sum+(item.sourceWeight||.7),0)),-1,1) : 0;
+    const sentimentScore=Number.isFinite(sentiment?.value) ? clamp((sentiment.value-50)/50,-1,1) : 0;
+    const microstructureScore=derivatives ? clamp((Number(derivatives.orderBook?.imbalancePct)||0)/30*.32 + (Number(derivatives.takerFlow?.imbalancePct)||0)/35*.38 + (Number(derivatives.oiChangePct)||0)/.8*(Number(derivatives.priceChangePct)||0>=0?1:-1)*.18 - (Number(derivatives.fundingRate)||0)/.001*.08 - (Number(derivatives.basisPct)||0)/.25*.04,-1,1) : 0;
+    const eventRisk=(calendar?.events||[]).filter(event=>event.at-now>=0&&event.at-now<=24*3_600_000).map(event=>event.name), eventRangeMultiplier=eventRisk.length?1.35:1;
+    const last=intraday.candles.at(-1)?.close || daily.candles.at(-1)?.close;
+    settleResearchPredictions({'15m':intraday.candles,'1d':daily.candles},now);
+    // Four horizons share the same historical-feature model; the 15m/1h/4h paths use intraday candles, while 1d uses daily candles.
+    // 四个周期共用同一历史特征模型；15 分钟/1 小时/4 小时使用日内 K 线，1 天使用日线。
+    const definitions=[{ key:'15m', label:'约 15 分钟', candles:intraday.candles, horizon:1, cap:.015 },{ key:'1h', label:'约 1 小时', candles:intraday.candles, horizon:4, cap:.03 },{ key:'4h', label:'约 4 小时', candles:intraday.candles, horizon:16, cap:.05 },{ key:'1d', label:'约 1 天', candles:daily.candles, horizon:1, cap:.12 }];
+    const windows=definitions.map(definition => {
+      const history=historicalProjection(definition.candles,definition.horizon);
+      const fusion=trainFusionModel(definition.candles,definition.horizon);
+      const newsWeight=definition.key==='1d'?.25:.12, sentimentWeight=definition.key==='1d'?.08:.04, microWeight=definition.key==='15m'?.14:definition.key==='1h'?.12:definition.key==='4h'?.09:.025;
+      const adjustment=(newsScore*newsWeight + sentimentScore*sentimentWeight + microstructureScore*microWeight)*Math.max(history.volatility,.002);
+      const adjustedReturn=clamp(history.expectedReturn + adjustment,-definition.cap,definition.cap), volatilityUnit=Math.max(history.volatility*Math.sqrt(definition.horizon),.001);
+      const analogueProbability=history.upProbability, learnedProbability=fusion?.probability ?? analogueProbability, baseProbability=.55*analogueProbability+.45*learnedProbability;
+      const rawProbability=sigmoid(logit(baseProbability) + newsScore*.22 + sentimentScore*.12 + microstructureScore*(definition.key==='1d'?.07:.18));
+      const upProbability=clamp(fusion?.calibrate(rawProbability) ?? rawProbability,.05,.95);
+      // A slim probability band is deliberately neutral: a 50%-plus reading is not directional evidence.
+      // 概率落在窄幅中性带时刻意显示中性：仅 50% 多并不构成方向证据。
+      const direction=upProbability>=.56?'up':upProbability<=.44?'down':'flat';
+      const distribution=Object.fromEntries(Object.entries(history.distribution).map(([key,value])=>[key,clamp(value+adjustment,-definition.cap,definition.cap)]));
+      const center=distribution.p50, widened={p10:center+(distribution.p10-center)*eventRangeMultiplier,p50:center,p90:center+(distribution.p90-center)*eventRangeMultiplier};
+      return { ...definition, upProbability, rawProbability, expectedReturn:adjustedReturn, expectedMove:last*adjustedReturn, expectedPrice:last*(1+adjustedReturn), direction, samples:history.samples, candidateCount:history.candidateCount, matchQuality:history.matchQuality, regime:history.regime, volatilityUnit, distribution, priceRange:{p10:last*(1+widened.p10),p50:last*(1+widened.p50),p90:last*(1+widened.p90)}, eventRangeMultiplier, candleInterval:definition.key==='1d'?'1d':'15m', targetAt:Number(definition.candles.at(-1)?.time||now)+(definition.key==='1d'?86_400_000:definition.horizon*900_000), validation:fusion?.validation || null };
+    });
+    // Damp a lone outlier horizon toward neutral; this is a consistency guard, not an attempt to force one direction.
+    // 将孤立周期向中性轻微收缩；这是跨周期一致性保护，不会强行统一方向。
+    windows.forEach((window,index)=>{const neighbors=windows.filter((_,other)=>Math.abs(other-index)===1).map(item=>item.upProbability);if(neighbors.length&&Math.abs(window.upProbability-neighbors.reduce((sum,value)=>sum+value,0)/neighbors.length)>.18)window.upProbability=.5+(window.upProbability-.5)*.65;window.direction=window.upProbability>=.56?'up':window.upProbability<=.44?'down':'flat'});
+    for(const window of windows)safelyStore(()=>storeResearchPrediction.run(Math.floor((Number(window.targetAt)-(window.candleInterval==='1d'?86_400_000:window.horizon*900_000))/900_000)*900_000,now,window.key,window.candleInterval,window.targetAt,last,window.rawProbability,window.upProbability,window.direction,window.regime));
+    const primary=windows[2];
+    const rankedNews=[...newsItems].map(item=>{const ageHours=Number.isFinite(item.publishedAt)?Math.max(0,(now-item.publishedAt)/3_600_000):6;return {...item,impact:Math.abs(item.sentiment)*(item.sourceWeight||.7)*(item.eventWeight||.7)*Math.exp(-ageHours/4)}}).sort((a,b)=>b.impact-a.impact || (b.publishedAt||0)-(a.publishedAt||0));
+    const result={ price:last, windows, scorecard:researchScorecard(), news:{ source:news.source, fetchedAt:news.fetchedAt, bullish, bearish, neutral:newsItems.length-bullish-bearish, score:newsScore, halfLifeHours:4, items:rankedNews.slice(0,6) }, sentiment:sentiment?{ value:sentiment.value, source:sentiment.source || 'Alternative.me' }:null, derivatives:derivatives?{ source:derivatives.source, score:microstructureScore, fundingRate:derivatives.fundingRate, oiChangePct:derivatives.oiChangePct, bookImbalancePct:derivatives.orderBook?.imbalancePct, takerImbalancePct:derivatives.takerFlow?.imbalancePct, cvdSessionNotional:derivatives.takerFlow?.cvdSessionNotional, coverage:['funding','oi-change','order-book','taker-flow','cvd','basis'], unavailable:['funding term structure / long-short ratio','options PCR / 25Δ skew / IV term structure','liquidation heatmap','spot ETF net flows','on-chain exchange / whale flows','Coinbase and Kimchi premiums'] }:null, eventRisk, historical:{ intradaySource:intraday.source, dailySource:daily.source, intradaySamples:intraday.candles.length, dailySamples:daily.candles.length }, primary, fetchedAt:now, refreshMs:NEWS_TTL, cached:false, disclaimer:'Calibrated historical-model research only; not investment advice.' };
+    remember(key,result); return result;
+  });
+}
 async function yahooHistory(symbol) {
   const raw = await request(`https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=2y&interval=1d&events=history`);
   const result = raw.chart?.result?.[0]; const closes = result?.indicators?.quote?.[0]?.close;
   if (!result?.timestamp || !closes) throw new Error(`${symbol} history unavailable`);
+  // Yahoo 偶尔会把尚未完成的日线附为 null 或 0；忽略它，避免临时占位符被误算为 -100% 涨跌。
   // Yahoo occasionally appends the still-forming daily bar as null or 0.
   // Ignore it so a transient placeholder never turns into a false -100% move.
   const candles = result.timestamp.map((time, i) => ({ time:time * 1000, close:+closes[i] })).filter(x => Number.isFinite(x.close) && x.close > 0);
@@ -746,6 +955,7 @@ async function equityHistory(symbol) {
 async function market(interval, limit, preferred) {
   const key = `${interval}:${limit}:${preferred || 'auto'}`; const hit = cache.get(key);
   if (hit && Date.now() - hit.time < MARKET_TTL) return { ...cacheResult(hit), stale:false };
+  // 用户选择的数据源需要锁定：上游暂时失败时，报价和图表不能静默切换交易所。
   // A user-selected source is intentionally locked: displayed price and chart
   // must not silently switch exchanges during a temporary upstream failure.
   try { return await coalesce(key, async () => {
@@ -770,7 +980,7 @@ http.createServer((req, res) => requestTiming.run({ started:performance.now(), u
   const url = new URL(req.url, `http://${req.headers.host}`);
   if (url.pathname === '/api/market') {
     const interval = url.searchParams.get('interval') || '4h';
-    const limit = Math.min(Math.max(Number(url.searchParams.get('limit') || 180), 30), 300);
+    const limit = Math.min(Math.max(Number(url.searchParams.get('limit') || 180), 30), 500);
     try { json(res, 200, await market(interval, limit, url.searchParams.get('source'))); } catch (e) { json(res, 503, { error:e.message, failures:e.failures || {} }); }
     return;
   }
@@ -809,6 +1019,11 @@ http.createServer((req, res) => requestTiming.run({ started:performance.now(), u
       const value = { intraday:intradayResult.candles, daily:dailyResult.candles, source:`${intradayResult.source}/${dailyResult.source}`, fetchedAt:Date.now(), cached:false };
       remember(key, value); persistTrainingRun(value, force); json(res, 200, value);
     } catch (e) { json(res, 503, { error:'Forecast history unavailable', detail:e.message }); }
+    return;
+  }
+  if (url.pathname === '/api/research-outlook') {
+    try { json(res, 200, await researchOutlook({ refresh:url.searchParams.get('refresh') === '1' })); }
+    catch (e) { json(res, 503, { error:'Research outlook unavailable', detail:e.message }); }
     return;
   }
   if (url.pathname === '/api/correlation-history') {

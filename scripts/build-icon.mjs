@@ -1,5 +1,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 
+// 将应用图标集的 PNG 依次封装为 macOS `.icns` 文件。
+// Package the app icon-set PNG files sequentially into a macOS `.icns` file.
 const resource = new URL('../BTC Indicator.app/Contents/Resources/', import.meta.url);
 const blocks = [
   ['icp4', 'icon_16x16.png'],

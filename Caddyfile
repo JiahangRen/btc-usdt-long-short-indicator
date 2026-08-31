@@ -1,3 +1,5 @@
+# HTTPS 入口：压缩响应并转发到本地 Node 服务。
+# HTTPS entry point: compress responses and proxy them to the local Node service.
 renjiahang1201.xyz {
 	encode zstd gzip
 	reverse_proxy app:8787
