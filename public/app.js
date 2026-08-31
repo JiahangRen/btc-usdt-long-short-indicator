@@ -403,13 +403,17 @@ renderRangeExtremaPoints=function(){const box=$('chart')?.closest('.chart-box'),
   const controls = document.querySelector('main>header .controls');
   if (!controls || $('appVersion')) return;
   const version = document.createElement('button');
-  version.type = 'button'; version.id = 'appVersion'; version.textContent = 'v2.0.1';
+  version.type = 'button'; version.id = 'appVersion'; version.textContent = 'v2.1.0';
   version.title = '查看更新日志'; version.setAttribute('aria-expanded', 'false');
   const sourceLabel = controls.querySelector('label');
   if (sourceLabel) controls.insertBefore(version, sourceLabel); else controls.prepend(version);
   const log = document.createElement('section');
   log.id = 'versionChangelog'; log.hidden = true;
   log.innerHTML = `<b>v2.0.1 更新日志</b><dl><dt>情绪加载</dt><dd>情绪指数首屏优先从 SQLite 读取最近一次成功数据，再自动请求 Alternative.me 新数据替换。</dd><dt>失败重试</dt><dd>情绪源失败时显示“暂不可用＋重试”，并约 30 秒后自动重试；刷新频率改为 2 分钟。</dd><dt>连通性测试</dt><dd>改为页面打开 5 秒后自动执行，OKX WebSocket 作为第一项。</dd><dt>连通性检测</dt><dd>从原先市场／历史样本扩展到 10 项，加入 Alternative.me、Fed/BLS、Yahoo、CoinGecko、CoinLore 宏观数据链路。</dd><dt>微观结构</dt><dd>卡片中的长数值不再被省略；压缩字号与间距，必要时换行完整显示。</dd><dt>页面布局</dt><dd>OKX 微观结构移到多周期概率预测上方；周期涨幅紧跟微观结构；移除了无意义空白。</dd><dt>卡片对齐</dt><dd>多周期概率预测卡与恐惧&贪婪指数卡在桌面端底边齐平。</dd></dl><hr><b>v2.0.0 新增／更新</b><dl><dt>OKX 微观结构</dt><dd>新增盘口失衡、主动成交比、持仓量 OI、资金费率趋势、永续价差；基于至少两项同向证据给出短线研究结论。</dd><dt>实时数据</dt><dd>OKX WebSocket 新订阅盘口前五档与成交数据；计算近 60 秒主动买卖流；保存 OI、资金费率、盘口和成交快照以支持趋势比较。</dd><dt>情绪指标</dt><dd>新增恐惧&贪婪仪表盘、五档情绪解释，并在指标明细中显示情绪读数。</dd><dt>宏观监控</dt><dd>新增 BTC × 美联储监控：FOMC、CPI、非农日历及倒计时；增加黄金、美元指数、BTC 市值占比、加密总市值和成交额等公开环境指标。</dd><dt>周期涨幅</dt><dd>从较短周期扩展为：5 分钟、15 分钟、1 小时、4 小时、1 日、2 日、1 周、1 月、半年；改为按相应 K 线历史精确取值。</dd><dt>预测与持仓</dt><dd>补充 15 分钟与 24 小时方向预测展示；增加个人持仓参考／价差相关展示。</dd><dt>页面布局</dt><dd>重构为桌面双栏终端式布局；手机端优先展示规则信号；图表、预测、微观结构和周期涨幅重新编排。</dd><dt>可用性</dt><dd>新增全局说明浮层、版本更新日志入口；修复窗口缩放时周期涨幅跳位、贪婪卡片尺寸突变、说明浮层遮挡、顶部行情文字重叠等问题。</dd><dt>数据存储</dt><dd>SQLite 新增衍生品快照、情绪快照、宏观快照、美联储日历快照，并设置相应保留期和索引。</dd></dl>`;
+  // v2.1.0 只追加相对 v2.0.1 的变更，后续保留完整旧版记录以便追溯。
+  // v2.1.0 contains only changes since v2.0.1; prior release notes remain intact for traceability.
+  const legacyChangelog=log.innerHTML;
+  log.innerHTML=`<b>v2.1.0 更新日志</b><dl><dt>多因子研究预测</dt><dd>新增 BTC 多因子研究预测：融合 SQLite 历史样本、公开 BTC 新闻情绪、恐惧&贪婪指数与 OKX 市场结构，覆盖 15 分钟、1 小时、4 小时、1 日方向与价格区间研究。</dd><dt>概率融合与记分卡</dt><dd>加入时间顺序融合、Platt 概率校准、跨周期一致性约束；展示验证准确率、Brier 分数、已结算实时命中率与待结算预测。</dd><dt>新闻研究</dt><dd>重点新闻支持点击原文，按利好／利空影响排序并按标题相似度去重；显示近 2 小时与近 24 小时窗口，默认最多 6 篇。</dd><dt>宏观日历存储</dt><dd>FOMC、CPI 与非农日历写入 SQLite；首屏优先读取最近成功快照，再后台请求 Federal Reserve／BLS 更新。修正非农日期解析，并在官方源不可达时明确标记发布节奏回退。</dd><dt>数据透明度</dt><dd>所有依赖外部或 SQLite 数据的卡片新增“数据源 · 更新频率”标识，便于确认来源、缓存策略与数据新鲜度。</dd><dt>图表体验</dt><dd>图表工具与显示控制左对齐；新增 15 分钟查看范围；默认改为 1 分钟 K 线与 6 小时查看范围，并支持完整加载该窗口。</dd><dt>持仓与风险研究</dt><dd>完善双持仓参考、方向选择持久化、盈亏颜色提示与强平概率研究输入；长数值保持完整显示，必要时自动换行。</dd><dt>移动端可用性</dt><dd>修复小屏幕说明感叹号的拉伸变形，并优化数据卡片、工具栏与研究卡片的换行和溢出表现。</dd></dl><hr>${legacyChangelog}`;
   document.body.append(log);
   version.onclick = () => {
     const open = log.hidden;
