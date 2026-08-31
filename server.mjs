@@ -827,7 +827,9 @@ async function researchOutlook({ refresh = false } = {}) {
       const adjustedReturn=clamp(history.expectedReturn + adjustment,-definition.cap,definition.cap), volatilityUnit=Math.max(history.volatility*Math.sqrt(definition.horizon),.001);
       const rawProbability=history.upProbability + newsScore*.06 + sentimentScore*.025 + microstructureScore*(definition.key==='1d'?.015:.045);
       const upProbability=clamp((rawProbability*Math.max(1,history.samples)+.5*24)/(Math.max(1,history.samples)+24),.05,.95);
-      const direction=Math.abs(adjustedReturn)<volatilityUnit*.5?'flat':adjustedReturn>0?'up':'down';
+      // Direction follows the signed ensemble return so every forecast states upside or downside.
+      // 方向以融合后的预期收益正负为准，确保每个预测明确显示上涨或下跌。
+      const direction=adjustedReturn>=0?'up':'down';
       const distribution=Object.fromEntries(Object.entries(history.distribution).map(([key,value])=>[key,clamp(value+adjustment,-definition.cap,definition.cap)]));
       const center=distribution.p50, widened={p10:center+(distribution.p10-center)*eventRangeMultiplier,p50:center,p90:center+(distribution.p90-center)*eventRangeMultiplier};
       return { ...definition, upProbability, expectedReturn:adjustedReturn, expectedMove:last*adjustedReturn, expectedPrice:last*(1+adjustedReturn), direction, samples:history.samples, candidateCount:history.candidateCount, matchQuality:history.matchQuality, regime:history.regime, volatilityUnit, distribution, priceRange:{p10:last*(1+widened.p10),p50:last*(1+widened.p50),p90:last*(1+widened.p90)}, eventRangeMultiplier };
