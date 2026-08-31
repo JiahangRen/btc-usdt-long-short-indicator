@@ -2,7 +2,9 @@ const $ = id => document.getElementById(id);
 // 前端控制器：维护首屏状态、定时请求、图表绘制和所有用户交互。
 // Frontend controller: owns initial state, scheduled requests, chart drawing, and user interactions.
 var quoteStripBusy=false;
-const state = { interval:'15m', limit:96, range:'1D', source:'okx', candles:[], ticker:null, lastGood:null, loading:false, zoom:1 };
+// 首屏采用 1 分钟 K 线与 6 小时可见范围，便于直接观察短线结构。
+// The first view uses one-minute candles across six hours for immediate short-horizon context.
+const state = { interval:'1m', limit:400, range:'6时', viewPoints:361, source:'okx', candles:[], ticker:null, lastGood:null, loading:false, zoom:1 };
 const intervals = [['1m','1 分'],['5m','5 分'],['15m','15 分'],['30m','30 分'],['1h','1 时'],['2h','2 时'],['4h','4 时'],['1d','1 日']];
 const ranges = { '1D':['15m',96], '1W':['30m',300], '1M':['4h',180], '6M':['1d',183], '1Y':['1d',300] };
 const money = n => Number.isFinite(n) ? '$' + n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}) : '--';
@@ -499,15 +501,17 @@ microPrediction=function(m){microPredictionWithConsistentDirection(m);const clos
 /* Stable controls, short visible windows, and user position calculator. */
 const buttonsRebuild=buttons;let buttonsSignature='';
 const viewRanges={
-  '1时':{interval:'1m',limit:90,points:61},'6时':{interval:'5m',limit:90,points:73},'12时':{interval:'5m',limit:180,points:145},
+  '15分':{interval:'1m',limit:90,points:16},'1时':{interval:'1m',limit:90,points:61},'6时':{interval:'1m',limit:400,points:361},'12时':{interval:'5m',limit:180,points:145},
   '1D':{interval:'15m',limit:96,points:null},'1W':{interval:'30m',limit:300,points:null},'1M':{interval:'4h',limit:180,points:null},'6M':{interval:'1d',limit:183,points:null},'1Y':{interval:'1d',limit:300,points:null}
 };
-buttons=function(){const key=`${uiLang}:${state.interval}:${state.limit}:${state.range||''}:${state.viewPoints||''}`,intervalBox=$('intervals'),rangeBox=$('ranges'),viewText=label=>uiLang==='zh'?label:({'1时':'1h','6时':'6h','12时':'12h'}[label]||label);if(key===buttonsSignature)return;buttonsSignature=key;
+buttons=function(){const key=`${uiLang}:${state.interval}:${state.limit}:${state.range||''}:${state.viewPoints||''}`,intervalBox=$('intervals'),rangeBox=$('ranges'),viewText=label=>uiLang==='zh'?label:({'15分':'15m','1时':'1h','6时':'6h','12时':'12h'}[label]||label);if(key===buttonsSignature)return;buttonsSignature=key;
   // Keep the control labels (and their help dots) in place while only the
   // selected state changes. Replacing their innerHTML made the help dots blink.
   if(intervalBox.dataset.lang!==uiLang){intervalBox.dataset.lang=uiLang;intervalBox.innerHTML=`<span class="control-label">${tx('K 线周期','Candle interval')}</span>`+intervals.map(([v,n])=>`<button data-candle="${v}">${uiLang==='zh'?n:v}</button>`).join('');intervalBox.querySelectorAll('[data-candle]').forEach(b=>b.onclick=()=>{state.interval=b.dataset.candle;state.limit=300;state.range=null;state.viewPoints=null;buttonsSignature='';loadCurrent()})}
   if(rangeBox.dataset.lang!==uiLang){rangeBox.dataset.lang=uiLang;rangeBox.innerHTML=`<span class="control-label">${tx('查看范围','Visible range')}</span>`+Object.keys(viewRanges).map(label=>`<button data-view="${label}">${viewText(label)}</button>`).join('');rangeBox.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>{const v=viewRanges[b.dataset.view];state.interval=v.interval;state.limit=v.limit;state.range=b.dataset.view;state.viewPoints=v.points;buttonsSignature='';loadCurrent()})}
-  intervalBox.querySelectorAll('[data-candle]').forEach(b=>b.classList.toggle('active',state.range===null&&state.interval===b.dataset.candle));
+  // 即使当前由“查看范围”选择了窗口，也高亮实际使用的 K 线周期，避免 6 小时/1 分钟组合看起来没有周期。
+  // Highlight the effective candle interval even when a visible-range preset is active, so a 6h/1m view is unambiguous.
+  intervalBox.querySelectorAll('[data-candle]').forEach(b=>b.classList.toggle('active',state.interval===b.dataset.candle));
   rangeBox.querySelectorAll('[data-view]').forEach(b=>b.classList.toggle('active',state.range===b.dataset.view));
 };
 const visibleCandlesRange=visibleCandles;

@@ -980,7 +980,7 @@ http.createServer((req, res) => requestTiming.run({ started:performance.now(), u
   const url = new URL(req.url, `http://${req.headers.host}`);
   if (url.pathname === '/api/market') {
     const interval = url.searchParams.get('interval') || '4h';
-    const limit = Math.min(Math.max(Number(url.searchParams.get('limit') || 180), 30), 300);
+    const limit = Math.min(Math.max(Number(url.searchParams.get('limit') || 180), 30), 500);
     try { json(res, 200, await market(interval, limit, url.searchParams.get('source'))); } catch (e) { json(res, 503, { error:e.message, failures:e.failures || {} }); }
     return;
   }
