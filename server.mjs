@@ -129,6 +129,8 @@ function persistMarket(result, interval) {
     const now = result.fetchedAt;
     storeMarketSnapshot.run(result.source, interval, now, result.candles.length, result.ticker.last, 0);
     result.candles.forEach(candle => storeCandle.run(result.source, interval, candle.time, candle.open, candle.high, candle.low, candle.close, candle.volume, now));
+const latestQuoteForSource = database.prepare('SELECT observed_at, last, open24h, change_pct, high24, low24 FROM quote_snapshots WHERE source=? ORDER BY observed_at DESC LIMIT 1');
+const latestCandleUpdateForSource = database.prepare('SELECT MAX(updated_at) AS updated_at FROM candles WHERE source=? AND interval=?');
     result.candles.slice(-2).forEach(candle => updateCandle.run(candle.open, candle.high, candle.low, candle.close, candle.volume, now, result.source, interval, candle.time));
     persistQuote(result.source, result.ticker, now);
     cleanStorage(now);
@@ -207,10 +209,19 @@ function remember(key, value) {
   cache.set(key, { time:Date.now(), value });
   return value;
 }
-function coalesce(key, work) {
+function coalesce(key, work, timeout = 0) {
   const running = inFlight.get(key);
   if (running) return running;
-  const promise = Promise.resolve().then(work).finally(() => inFlight.delete(key));
+  const workPromise = Promise.resolve().then(work);
+  let timer;
+  const deadline = timeout > 0 ? new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`request deadline exceeded (${timeout}ms)`)), timeout);
+  }) : null;
+  const promise = (deadline ? Promise.race([workPromise, deadline]) : workPromise).finally(() => {
+    if (timer) clearTimeout(timer);
+    // Do not let an earlier timed-out request erase a newer in-flight task.
+    if (inFlight.get(key) === promise) inFlight.delete(key);
+  });
   inFlight.set(key, promise);
   return promise;
 }
@@ -221,6 +232,22 @@ const sources = ['okx', 'coinbase', 'gate', 'binance'];
 // 单一进程级公共连接让默认 OKX 永续报价保持在内存中；当流或某频道不可用时，REST 仍是安全回退。
 // A single process-wide public connection keeps the default OKX perpetual
 // quote hot in memory. REST remains the safe fallback if the stream or a
+function storedMarketFallback(source, interval, limit, reason) {
+  const candles = storedCandles(source, interval, limit);
+  const quote = source === 'okx' ? freshOkxTicker() : null;
+  const snapshot = latestQuoteForSource.get(source);
+  const ticker = quote || (snapshot && {
+    last:+snapshot.last, open24h:+snapshot.open24h, changePct:+snapshot.change_pct,
+    high24:+snapshot.high24, low24:+snapshot.low24
+  });
+  const updatedAt = +latestCandleUpdateForSource.get(source, interval)?.updated_at || snapshot?.observed_at || 0;
+  if (candles.length < 30 || !ticker || !Number.isFinite(ticker.last) || !updatedAt) return null;
+  return {
+    source, ticker, candles, fetchedAt:updatedAt, cached:true,
+    cacheAgeMs:Math.max(0, Date.now() - updatedAt), stale:true,
+    transport:quote ? 'websocket' : 'rest', fallbackReason:reason
+  };
+}
 // particular channel is unavailable in a region.
 const okxStream = {
   socket:null, status:'connecting', ticker:null, spotPrice:null,
@@ -247,6 +274,9 @@ function recentTakerFlow(now = Date.now()) {
   } : null;
 }
 function okxDerivativeFeatures(now = Date.now()) {
+// A market request must always finish promptly.  Individual upstream calls have
+// their own abort timer, but this protects callers from a stuck/coalesced task.
+const MARKET_REQUEST_TIMEOUT = 2_200;
   const book = okxStream.orderBook && streamAge(okxStream.bookAt, now) <= 10_000 ? { ...okxStream.orderBook, updatedAt:okxStream.bookAt } : null;
   const takerFlow = recentTakerFlow(now);
   const oiBaseline = priorOiSnapshot.get('okx', now - 300_000);
@@ -970,7 +1000,7 @@ async function market(interval, limit, preferred) {
       const result = { ...value, ticker:streamedTicker || value.ticker, candles, source, fetchedAt: Date.now(), cached:false, cacheAgeMs:0, stale:false, transport:streamedTicker ? 'websocket' : 'rest', failures };
       remember(key, result); persistMarket(result, interval); return result;
     } catch { throw Object.assign(new Error('All data sources failed'), { failures }); }
-  }); } catch (error) {
+  }, MARKET_REQUEST_TIMEOUT); } catch (error) {
     if (hit && Date.now() - hit.time <= STALE_QUOTE_MAX_AGE) return { ...cacheResult(hit), stale:true, fallbackReason:error.message };
     throw error;
   }
