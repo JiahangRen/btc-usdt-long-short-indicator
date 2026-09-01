@@ -199,6 +199,9 @@ const FED_MARKET_SIGNALS_TTL = 600_000;
 const NEWS_TTL = 900_000;
 const QUOTE_TTL = 1_000;
 const UPSTREAM_TIMEOUT = 1_200;
+// A market request must always finish promptly. Individual upstream calls have
+// their own abort timer, but this protects callers from a stuck/coalesced task.
+const MARKET_REQUEST_TIMEOUT = 2_200;
 const STALE_QUOTE_MAX_AGE = 60_000;
 const cache = new Map();
 const inFlight = new Map();
@@ -274,9 +277,6 @@ function recentTakerFlow(now = Date.now()) {
   } : null;
 }
 function okxDerivativeFeatures(now = Date.now()) {
-// A market request must always finish promptly.  Individual upstream calls have
-// their own abort timer, but this protects callers from a stuck/coalesced task.
-const MARKET_REQUEST_TIMEOUT = 2_200;
   const book = okxStream.orderBook && streamAge(okxStream.bookAt, now) <= 10_000 ? { ...okxStream.orderBook, updatedAt:okxStream.bookAt } : null;
   const takerFlow = recentTakerFlow(now);
   const oiBaseline = priorOiSnapshot.get('okx', now - 300_000);
@@ -1002,6 +1002,11 @@ async function market(interval, limit, preferred) {
     } catch { throw Object.assign(new Error('All data sources failed'), { failures }); }
   }, MARKET_REQUEST_TIMEOUT); } catch (error) {
     if (hit && Date.now() - hit.time <= STALE_QUOTE_MAX_AGE) return { ...cacheResult(hit), stale:true, fallbackReason:error.message };
+    const fallbackSources = preferred && loaders[preferred] ? [preferred] : sources;
+    for (const source of fallbackSources) {
+      const fallback = storedMarketFallback(source, interval, limit, error.message);
+      if (fallback) return fallback;
+    }
     throw error;
   }
 }
