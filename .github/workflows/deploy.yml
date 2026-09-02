@@ -12,6 +12,7 @@ on:
         type: choice
         options:
           - preflight
+          - configure-env
           - deploy
 
 concurrency:
@@ -95,6 +96,40 @@ jobs:
             ln -sfn "$backup" /opt/btc-usdt-long-short-indicator-rollback-current
           '
           rsync -az --delete-after --exclude='.git/' --exclude='data/' --exclude='.env' --exclude='.env.*' -e "ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p 22" ./ "$DEPLOY_USER@$DEPLOY_HOST:/opt/btc-usdt-long-short-indicator/"
+
+      - name: Configure cloud alert secrets
+        if: steps.ssh.outputs.ready == 'true' && inputs.mode == 'configure-env'
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          ALERT_ENCRYPTION_KEY: ${{ secrets.ALERT_ENCRYPTION_KEY }}
+        run: |
+          if [ -z "$POSTGRES_PASSWORD" ] || [ -z "$ALERT_ENCRYPTION_KEY" ]; then
+            echo "POSTGRES_PASSWORD and ALERT_ENCRYPTION_KEY repository secrets are required." >&2
+            exit 1
+          fi
+          # Values travel only on SSH stdin. The remote command preserves all
+          # existing .env entries, replaces these two keys, and never echoes
+          # them into the Actions log.
+          printf '%s\n%s\n' "$POSTGRES_PASSWORD" "$ALERT_ENCRYPTION_KEY" | \
+            ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p 22 "$DEPLOY_USER@$DEPLOY_HOST" '
+              set -Eeuo pipefail
+              IFS= read -r postgres_password
+              IFS= read -r encryption_key
+              app=/opt/btc-usdt-long-short-indicator
+              env_file="$app/.env"
+              tmp_file="$(mktemp "$app/.env.XXXXXX")"
+              trap "rm -f \"$tmp_file\"" EXIT
+              if [ -f "$env_file" ]; then
+                grep -v -E "^(POSTGRES_PASSWORD|ALERT_ENCRYPTION_KEY)=" "$env_file" > "$tmp_file" || true
+              fi
+              printf "POSTGRES_PASSWORD=%s\nALERT_ENCRYPTION_KEY=%s\n" "$postgres_password" "$encryption_key" >> "$tmp_file"
+              chmod 600 "$tmp_file"
+              mv "$tmp_file" "$env_file"
+              trap - EXIT
+              echo "Cloud alert environment values are configured."
+            '
 
       - name: Build, deploy and verify local health
         if: steps.ssh.outputs.ready == 'true' && (github.event_name == 'push' || inputs.mode == 'deploy')
