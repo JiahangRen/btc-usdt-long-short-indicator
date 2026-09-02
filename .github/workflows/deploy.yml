@@ -12,6 +12,7 @@ on:
         type: choice
         options:
           - preflight
+          - inspect
           - configure-env
           - deploy
 
@@ -105,6 +106,29 @@ jobs:
             --exclude='.git/' --exclude='data/' --exclude='.env' --exclude='.env.*' \
             --exclude='.releases/' --exclude='.rollback-current' \
             -e "ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p 22" ./ "$DEPLOY_USER@$DEPLOY_HOST:/opt/btc-usdt-long-short-indicator/"
+
+      - name: Inspect remote release state
+        if: steps.ssh.outputs.ready == 'true' && inputs.mode == 'inspect'
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p 22 "$DEPLOY_USER@$DEPLOY_HOST" '
+            set -Eeuo pipefail
+            app=/opt/btc-usdt-long-short-indicator
+            cd "$app"
+            echo "== compose containers =="
+            docker compose ps -a
+            echo "== project containers =="
+            docker ps -a --filter "label=com.docker.compose.project=btc-usdt-long-short-indicator" --format "{{.Names}} {{.Status}} {{.Image}}"
+            echo "== alert dependency candidates =="
+            docker ps -a --filter "name=btc-usdt-long-short-indicator-redis-1" --format "{{.ID}} {{.Names}} {{.Status}} {{.Image}}"
+            docker ps -a --filter "name=btc-usdt-long-short-indicator-postgres-1" --format "{{.ID}} {{.Names}} {{.Status}} {{.Image}}"
+            echo "== release snapshots =="
+            find "$app/.releases" -mindepth 1 -maxdepth 1 -type d -printf "%f\\n" 2>/dev/null || true
+            echo "== active application health =="
+            curl --fail --silent --max-time 10 http://127.0.0.1:8787/api/status >/dev/null && echo healthy
+          '
 
       - name: Configure cloud alert secrets
         if: steps.ssh.outputs.ready == 'true' && inputs.mode == 'configure-env'
