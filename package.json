@@ -1,7 +1,15 @@
 {
   "name": "btc-indicator-rebuilt",
   "private": true,
-  "version": "2.1.0",
+  "version": "2.2.0",
   "type": "module",
-  "scripts": { "start": "node server.mjs", "check": "node --check server.mjs && node --check public/app.js" }
+  "scripts": {
+    "start": "node server.mjs",
+    "alerts:worker": "node alert-worker.mjs",
+    "check": "node --check server.mjs && node --check alert-store.mjs && node --check alert-worker.mjs && node --check public/app.js && node --check public/cloud-alerts.js"
+  },
+  "dependencies": {
+    "pg": "^8.23.0",
+    "redis": "^6.2.1"
+  }
 }

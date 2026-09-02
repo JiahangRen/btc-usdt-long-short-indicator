@@ -4,6 +4,15 @@ on:
   push:
     branches: [master]
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "运行模式：预检不会同步代码或重启容器"
+        required: true
+        default: preflight
+        type: choice
+        options:
+          - preflight
+          - deploy
 
 concurrency:
   group: production
@@ -40,24 +49,72 @@ jobs:
           ssh-keyscan -p 22 -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
           echo "ready=true" >> "$GITHUB_OUTPUT"
 
-      - name: Synchronize application
+      - name: Preflight remote runtime
         if: steps.ssh.outputs.ready == 'true'
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          # This read-only check must pass before source synchronization. It is
+          # also the default manual workflow mode for testing SSH credentials.
+          ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p 22 "$DEPLOY_USER@$DEPLOY_HOST" '
+            set -Eeuo pipefail
+            command -v rsync >/dev/null
+            command -v docker >/dev/null
+            docker info >/dev/null
+            docker compose version >/dev/null
+            if ! docker ps >/dev/null 2>&1; then
+              echo "Deployment user cannot access Docker; add it to the docker group and reconnect." >&2
+              exit 1
+            fi
+          '
+
+      - name: Synchronize application
+        if: steps.ssh.outputs.ready == 'true' && (github.event_name == 'push' || inputs.mode == 'deploy')
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
         run: |
           # Market history and training samples are a persistent server-side
-          # SQLite volume. Never delete or overwrite them during application sync.
-          rsync -az --delete-after --exclude='.git/' --exclude='data/' -e "ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p 22" ./ "$DEPLOY_USER@$DEPLOY_HOST:/opt/btc-usdt-long-short-indicator/"
+          # SQLite, production secrets and the current release must never be
+          # overwritten by source synchronization.
+          ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p 22 "$DEPLOY_USER@$DEPLOY_HOST" '
+            set -Eeuo pipefail
+            app=/opt/btc-usdt-long-short-indicator
+            releases=/opt/btc-usdt-long-short-indicator-releases
+            backup="$releases/rollback-$(date +%Y%m%d%H%M%S)"
+            test -f "$app/.env"
+            for required in POSTGRES_PASSWORD ALERT_ENCRYPTION_KEY; do
+              if ! grep -qE "^${required}=.+" "$app/.env"; then
+                echo "Missing required production setting: $required" >&2
+                exit 1
+              fi
+            done
+            mkdir -p "$releases" "$backup"
+            rsync -a --delete --exclude=".git/" --exclude="data/" "$app/" "$backup/"
+            ln -sfn "$backup" /opt/btc-usdt-long-short-indicator-rollback-current
+          '
+          rsync -az --delete-after --exclude='.git/' --exclude='data/' --exclude='.env' --exclude='.env.*' -e "ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p 22" ./ "$DEPLOY_USER@$DEPLOY_HOST:/opt/btc-usdt-long-short-indicator/"
 
-      - name: Rebuild containers
-        if: steps.ssh.outputs.ready == 'true'
+      - name: Build, deploy and verify local health
+        if: steps.ssh.outputs.ready == 'true' && (github.event_name == 'push' || inputs.mode == 'deploy')
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
         run: |
-          ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p 22 "$DEPLOY_USER@$DEPLOY_HOST" 'cd /opt/btc-usdt-long-short-indicator && docker compose up -d --build'
+          ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p 22 "$DEPLOY_USER@$DEPLOY_HOST" 'bash /opt/btc-usdt-long-short-indicator/scripts/deploy-production.sh'
 
       - name: Verify production
-        if: steps.ssh.outputs.ready == 'true'
+        id: verify_production
+        if: steps.ssh.outputs.ready == 'true' && (github.event_name == 'push' || inputs.mode == 'deploy')
+        continue-on-error: true
         run: curl --fail --silent --show-error --retry 12 --retry-delay 5 --retry-all-errors --max-time 15 https://renjiahang1201.xyz/api/status
+
+      - name: Roll back after failed public verification
+        if: always() && steps.ssh.outputs.ready == 'true' && (github.event_name == 'push' || inputs.mode == 'deploy') && steps.verify_production.outcome == 'failure'
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p 22 "$DEPLOY_USER@$DEPLOY_HOST" 'bash /opt/btc-usdt-long-short-indicator/scripts/rollback-production.sh'
+          exit 1

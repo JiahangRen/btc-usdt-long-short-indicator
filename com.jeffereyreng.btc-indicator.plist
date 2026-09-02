@@ -11,6 +11,15 @@
   </array>
   <key>WorkingDirectory</key>
   <string>/Users/jeffereyreng/Documents/ChatGPT/btc指示器</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>DATABASE_URL</key>
+    <string>postgresql://btc_alerts:local-dev-postgres-password-change-before-production@127.0.0.1:5432/btc_alerts</string>
+    <key>REDIS_URL</key>
+    <string>redis://127.0.0.1:6379</string>
+    <key>ALERT_ENCRYPTION_KEY</key>
+    <string>MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=</string>
+  </dict>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>

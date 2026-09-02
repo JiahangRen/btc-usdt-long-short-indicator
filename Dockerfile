@@ -3,7 +3,8 @@
 FROM node:22-alpine
 
 WORKDIR /app
-COPY --chown=node:node package.json server.mjs ./
+COPY --chown=node:node package.json package-lock.json server.mjs alert-store.mjs alert-worker.mjs ./
+RUN npm ci --omit=dev
 COPY --chown=node:node public ./public
 
 # 容器运行时默认监听所有接口，供反向代理连接。

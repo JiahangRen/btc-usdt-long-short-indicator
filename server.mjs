@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { mkdirSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { createAlertStore } from './alert-store.mjs';
 
 // BTC 指标服务端：负责静态页面、公开数据源、SQLite 快照与实时 OKX 连接。
 // BTC indicator backend: serves the UI, public data sources, SQLite snapshots, and the live OKX connection.
@@ -13,6 +14,8 @@ const PUBLIC = join(process.cwd(), 'public');
 const DATA_DIR = join(process.cwd(), 'data');
 mkdirSync(DATA_DIR, { recursive:true });
 const database = new DatabaseSync(join(DATA_DIR, 'market.sqlite'));
+const alertStore = await createAlertStore();
+if (!alertStore.enabled) console.warn(`Server-side alerts disabled: ${alertStore.reason}`);
 database.exec(`
   PRAGMA journal_mode = WAL;
   PRAGMA synchronous = NORMAL;
@@ -449,6 +452,19 @@ function json(res, status, body) {
   const payload = timing && body && typeof body === 'object' && !Array.isArray(body) ? { ...body, timing } : body;
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
   res.end(JSON.stringify(payload));
+}
+async function readJson(req) {
+  let body=''; for await (const chunk of req) { body+=chunk; if(body.length>64_000) throw Object.assign(new Error('Request body too large'),{statusCode:413}); }
+  try { return body ? JSON.parse(body) : {}; } catch { throw Object.assign(new Error('Invalid JSON body'),{statusCode:400}); }
+}
+function setSessionCookie(res, session) {
+  const secure = process.env.ALERT_COOKIE_SECURE === 'true' || process.env.NODE_ENV === 'production';
+  res.setHeader('set-cookie', `btc_alert_session=${encodeURIComponent(session.token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${30*86400}${secure?'; Secure':''}`);
+}
+function clearSessionCookie(res) { res.setHeader('set-cookie','btc_alert_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0'); }
+async function requireAlertUser(req, res) {
+  if(!alertStore.enabled){json(res,503,{error:'Cloud alerts unavailable',detail:alertStore.reason});return null;}
+  const user=await alertStore.userFromRequest(req);if(!user){json(res,401,{error:'请先登录云端提醒账户。'});return null;}return user;
 }
 function validCandle(c) { return c && [c.time, c.open, c.high, c.low, c.close, c.volume].every(Number.isFinite); }
 function intervalFor(source, interval) {
@@ -1251,6 +1267,41 @@ async function market(interval, limit, preferred) {
 const mime = { '.html':'text/html; charset=utf-8', '.js':'text/javascript; charset=utf-8', '.css':'text/css; charset=utf-8', '.svg':'image/svg+xml', '.png':'image/png', '.ico':'image/x-icon' };
 http.createServer((req, res) => requestTiming.run({ started:performance.now(), upstreamStarted:null, upstreamEnded:null, upstreamCalls:0 }, async () => {
   const url = new URL(req.url, `http://${req.headers.host}`);
+  if (url.pathname === '/api/alerts/health') { json(res,200,{enabled:alertStore.enabled,reason:alertStore.reason||null}); return; }
+  if (url.pathname === '/api/auth/register' && req.method === 'POST') {
+    if(!alertStore.enabled){json(res,503,{error:'Cloud alerts unavailable',detail:alertStore.reason});return;}
+    try { const result=await alertStore.register(...(({email,password})=>[email,password])(await readJson(req))); setSessionCookie(res,result.session); json(res,201,{user:result.user}); } catch(error) { json(res,error.statusCode||500,{error:error.message}); } return;
+  }
+  if (url.pathname === '/api/auth/login' && req.method === 'POST') {
+    if(!alertStore.enabled){json(res,503,{error:'Cloud alerts unavailable',detail:alertStore.reason});return;}
+    try { const result=await alertStore.login(...(({email,password})=>[email,password])(await readJson(req))); setSessionCookie(res,result.session); json(res,200,{user:result.user}); } catch(error) { json(res,error.statusCode||500,{error:error.message}); } return;
+  }
+  if (url.pathname === '/api/auth/logout' && req.method === 'POST') { if(alertStore.enabled) await alertStore.logout(req); clearSessionCookie(res); json(res,204,{}); return; }
+  if (url.pathname === '/api/auth/me') { const user=await requireAlertUser(req,res); if(user) json(res,200,{user,hasSendKey:await alertStore.hasSendKey(user.id)}); return; }
+  if (url.pathname === '/api/account/profile') {
+    const user=await requireAlertUser(req,res); if(!user)return;
+    try { if(req.method==='GET'){json(res,200,{profile:await alertStore.getProfile(user.id)});return;} if(req.method==='PUT'){json(res,200,{profile:await alertStore.setProfile(user.id,await readJson(req))});return;} json(res,405,{error:'GET or PUT required'}); } catch(error) { json(res,error.statusCode||500,{error:error.message}); } return;
+  }
+  if (url.pathname === '/api/alerts/credentials') {
+    const user=await requireAlertUser(req,res); if(!user)return;
+    try { if(req.method==='PUT'){await alertStore.setSendKey(user.id,(await readJson(req)).sendKey);json(res,204,{});return;} if(req.method==='DELETE'){await alertStore.deleteSendKey(user.id);json(res,204,{});return;} json(res,405,{error:'PUT or DELETE required'}); } catch(error) { json(res,error.statusCode||500,{error:error.message}); } return;
+  }
+  if (url.pathname === '/api/alerts/test' && req.method === 'POST') {
+    const user=await requireAlertUser(req,res); if(!user)return;
+    try { json(res,200,await alertStore.testPush(user.id,(await readJson(req)).price)); } catch(error) { json(res,error.statusCode||500,{error:error.message}); } return;
+  }
+  if (url.pathname === '/api/alerts/rules') {
+    const user=await requireAlertUser(req,res); if(!user)return;
+    try { if(req.method==='GET'){json(res,200,{rules:await alertStore.listRules(user.id)});return;} if(req.method==='POST'){const id=await alertStore.createRule(user.id,await readJson(req));json(res,201,{id});return;} json(res,405,{error:'GET or POST required'}); } catch(error) { json(res,error.statusCode||500,{error:error.message}); } return;
+  }
+  if (url.pathname.startsWith('/api/alerts/rules/') && req.method==='DELETE') {
+    const user=await requireAlertUser(req,res); if(!user)return;
+    try { await alertStore.deleteRule(user.id,url.pathname.slice('/api/alerts/rules/'.length)); json(res,204,{}); } catch(error) { json(res,error.statusCode||500,{error:error.message}); } return;
+  }
+  if (url.pathname === '/api/account' && req.method==='DELETE') {
+    const user=await requireAlertUser(req,res); if(!user)return;
+    await alertStore.deleteAccount(user.id);clearSessionCookie(res);json(res,204,{});return;
+  }
   if (url.pathname === '/api/market') {
     const interval = url.searchParams.get('interval') || '4h';
     const limit = Math.min(Math.max(Number(url.searchParams.get('limit') || 180), 30), 500);
