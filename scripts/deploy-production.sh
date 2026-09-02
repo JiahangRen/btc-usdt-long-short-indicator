@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 
 APP_DIR="${APP_DIR:-/opt/btc-usdt-long-short-indicator}"
-ROLLBACK_LINK="${ROLLBACK_LINK:-/opt/btc-usdt-long-short-indicator-rollback-current}"
+ROLLBACK_LINK="${ROLLBACK_LINK:-$APP_DIR/.rollback-current}"
 changed=false
 
 rollback() {
@@ -20,7 +20,9 @@ trap rollback ERR
 cd "$APP_DIR"
 docker compose build app alert-worker
 changed=true
-docker compose up -d --no-deps app alert-worker
+# On the first cloud-alert release PostgreSQL and Redis do not exist yet.
+# Include them explicitly while leaving the existing Caddy container untouched.
+docker compose up -d postgres redis app alert-worker
 
 for attempt in $(seq 1 24); do
   app_id="$(docker compose ps -q app)"

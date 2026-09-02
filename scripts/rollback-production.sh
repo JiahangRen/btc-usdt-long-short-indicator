@@ -4,7 +4,7 @@
 set -Eeuo pipefail
 
 APP_DIR="${APP_DIR:-/opt/btc-usdt-long-short-indicator}"
-ROLLBACK_LINK="${1:-/opt/btc-usdt-long-short-indicator-rollback-current}"
+ROLLBACK_LINK="${1:-$APP_DIR/.rollback-current}"
 ROLLBACK_DIR="$(readlink -f "$ROLLBACK_LINK")"
 
 if [ ! -f "$ROLLBACK_DIR/docker-compose.yml" ]; then
@@ -14,6 +14,7 @@ fi
 
 rsync -a --delete \
   --exclude='.git/' --exclude='data/' --exclude='.env' --exclude='.env.*' \
+  --exclude='.releases/' --exclude='.rollback-current' \
   "$ROLLBACK_DIR/" "$APP_DIR/"
 
 cd "$APP_DIR"

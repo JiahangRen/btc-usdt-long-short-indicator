@@ -82,7 +82,7 @@ jobs:
           ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p 22 "$DEPLOY_USER@$DEPLOY_HOST" '
             set -Eeuo pipefail
             app=/opt/btc-usdt-long-short-indicator
-            releases=/opt/btc-usdt-long-short-indicator-releases
+            releases="$app/.releases"
             backup="$releases/rollback-$(date +%Y%m%d%H%M%S)"
             test -f "$app/.env"
             for required in POSTGRES_PASSWORD ALERT_ENCRYPTION_KEY; do
@@ -91,16 +91,20 @@ jobs:
                 exit 1
               fi
             done
-            # The application directory belongs to deploy, but /opt itself is
-            # root-owned on a standard Ubuntu host. Provision the dedicated
-            # release parent once with deploy ownership before creating a
-            # rollback snapshot.
-            sudo install -d -m 750 -o "$(id -un)" -g "$(id -gn)" "$releases"
+            # Keep snapshots below the deploy-owned app directory so Actions
+            # never needs an interactive sudo password.
+            mkdir -p "$releases"
             mkdir -p "$backup"
-            rsync -a --delete --exclude=".git/" --exclude="data/" "$app/" "$backup/"
-            ln -sfn "$backup" /opt/btc-usdt-long-short-indicator-rollback-current
+            rsync -a --delete \
+              --exclude=".git/" --exclude="data/" --exclude=".env" --exclude=".env.*" \
+              --exclude=".releases/" --exclude=".rollback-current" \
+              "$app/" "$backup/"
+            ln -sfn "$backup" "$app/.rollback-current"
           '
-          rsync -az --delete-after --exclude='.git/' --exclude='data/' --exclude='.env' --exclude='.env.*' -e "ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p 22" ./ "$DEPLOY_USER@$DEPLOY_HOST:/opt/btc-usdt-long-short-indicator/"
+          rsync -az --delete-after \
+            --exclude='.git/' --exclude='data/' --exclude='.env' --exclude='.env.*' \
+            --exclude='.releases/' --exclude='.rollback-current' \
+            -e "ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p 22" ./ "$DEPLOY_USER@$DEPLOY_HOST:/opt/btc-usdt-long-short-indicator/"
 
       - name: Configure cloud alert secrets
         if: steps.ssh.outputs.ready == 'true' && inputs.mode == 'configure-env'
