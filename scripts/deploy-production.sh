@@ -20,9 +20,10 @@ trap rollback ERR
 cd "$APP_DIR"
 docker compose build app alert-worker
 changed=true
-# On the first cloud-alert release PostgreSQL and Redis do not exist yet.
-# Include them explicitly while leaving the existing Caddy container untouched.
-docker compose up -d postgres redis app alert-worker
+# Do not enumerate PostgreSQL/Redis here: Compose follows app/worker
+# dependencies itself. Listing both the dependencies and dependants can race
+# container creation on older Compose releases.
+docker compose up -d app alert-worker
 
 for attempt in $(seq 1 24); do
   app_id="$(docker compose ps -q app)"

@@ -18,7 +18,11 @@ rsync -a --delete \
   "$ROLLBACK_DIR/" "$APP_DIR/"
 
 cd "$APP_DIR"
-docker compose up -d --build app alert-worker
+services=(app)
+if docker compose config --services | grep -qx 'alert-worker'; then
+  services+=(alert-worker)
+fi
+docker compose up -d --build "${services[@]}"
 
 for attempt in $(seq 1 24); do
   if curl --fail --silent --max-time 5 http://127.0.0.1:8787/api/status >/dev/null; then
