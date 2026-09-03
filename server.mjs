@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { mkdirSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { Communicate } from 'edge-tts.js';
 import { createAlertStore } from './alert-store.mjs';
 
 // BTC 指标服务端：负责静态页面、公开数据源、SQLite 快照与实时 OKX 连接。
@@ -122,6 +123,15 @@ catch (error) { if (!/duplicate column name/i.test(error.message)) throw error; 
 const storeQuote = database.prepare('INSERT INTO quote_snapshots (source, observed_at, last, open24h, change_pct, high24, low24) VALUES (?, ?, ?, ?, ?, ?, ?)');
 const storeCandle = database.prepare('INSERT OR IGNORE INTO candles (source, interval, candle_time, open, high, low, close, volume, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
 const updateCandle = database.prepare('UPDATE candles SET open=?, high=?, low=?, close=?, volume=?, updated_at=? WHERE source=? AND interval=? AND candle_time=?');
+// OKX does not publish sub-minute candles for this perpetual contract.  These
+// rows are built strictly from the public OKX trade stream and remain local.
+const upsertSyntheticOkxCandle = database.prepare(`INSERT INTO candles
+  (source, interval, candle_time, open, high, low, close, volume, updated_at)
+  VALUES ('okx', ?, ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(source, interval, candle_time) DO UPDATE SET
+    high=MAX(candles.high, excluded.high), low=MIN(candles.low, excluded.low),
+    close=excluded.close, volume=candles.volume + excluded.volume,
+    updated_at=excluded.updated_at`);
 const storeMarketSnapshot = database.prepare('INSERT INTO market_snapshots (source, interval, observed_at, candle_count, last, cached) VALUES (?, ?, ?, ?, ?, ?)');
 const storeTrainingRun = database.prepare('INSERT INTO training_runs (observed_at, source, intraday_count, daily_count, forced) VALUES (?, ?, ?, ?, ?)');
 const storeDerivativeSnapshot = database.prepare('INSERT INTO derivative_snapshots (source, observed_at, funding_rate, oi, book_imbalance_pct, book_ratio, taker_buy_ratio_pct, taker_trade_count, ofi_pct) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
@@ -312,6 +322,19 @@ const okxStream = {
   lastMessageAt:0, tickerAt:0, contextAt:0, connectedAt:0,
   reconnects:0, lastError:null, retryMs:1_000, heartbeat:null, retryTimer:null
 };
+const syntheticOkxIntervals = new Map([['5s', 5_000], ['10s', 10_000], ['30s', 30_000]]);
+const isSyntheticOkxInterval = interval => syntheticOkxIntervals.has(interval);
+function recordSyntheticOkxTrade(trade, receivedAt = Date.now()) {
+  const price = Number(trade.px), size = Number(trade.sz);
+  // `ts` is the exchange event time.  It keeps bucket boundaries independent
+  // of local WebSocket latency.
+  const tradeAt = Number(trade.ts) || receivedAt;
+  if (!Number.isFinite(price) || !Number.isFinite(size) || size <= 0 || !Number.isFinite(tradeAt)) return;
+  for (const [interval, bucketMs] of syntheticOkxIntervals) {
+    const bucketAt = Math.floor(tradeAt / bucketMs) * bucketMs;
+    safelyStore(() => upsertSyntheticOkxCandle.run(interval, bucketAt, price, price, price, price, size, receivedAt));
+  }
+}
 function streamAge(at, now = Date.now()) { return at ? Math.max(0, now - at) : null; }
 function freshOkxTicker(maxAge = 5_000) {
   return okxStream.ticker && streamAge(okxStream.tickerAt) <= maxAge ? { ...okxStream.ticker } : null;
@@ -403,7 +426,7 @@ function updateOkxStream(message) {
   } else if (channel === 'trades') {
     for (const trade of rows) {
       const price = +trade.px, size = +trade.sz, side = trade.side === 'buy' ? 'buy' : trade.side === 'sell' ? 'sell' : null;
-      if (side && Number.isFinite(price) && Number.isFinite(size) && size > 0) { const notional=price*size;okxStream.takerTrades.push({ time:now, side, notional });okxStream.cvdNotional+=side==='buy'?notional:-notional; }
+      if (side && Number.isFinite(price) && Number.isFinite(size) && size > 0) { const notional=price*size;okxStream.takerTrades.push({ time:now, side, notional });okxStream.cvdNotional+=side==='buy'?notional:-notional; recordSyntheticOkxTrade(trade, now); }
     }
     okxStream.tradeAt = now;
     recentTakerFlow(now);
@@ -528,6 +551,21 @@ async function okxCandleRows(interval, limit) {
 }
 async function fromOKX(interval, limit) {
   const streamedTicker = freshOkxTicker();
+  if (isSyntheticOkxInterval(interval)) {
+    const tickerPayload = streamedTicker ? null : await request('https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT-SWAP');
+    const row = tickerPayload?.data?.[0];
+    const ticker = streamedTicker || (row && tickerPayload.code === '0' ? {
+      last:+row.last, open24h:+row.open24h, changePct:(+row.last / +row.open24h - 1) * 100,
+      high24:+row.high24h, low24:+row.low24h
+    } : null);
+    if (!ticker || !Object.values(ticker).every(Number.isFinite)) throw new Error('OKX ticker unavailable');
+    const candles = storedCandles('okx', interval, limit);
+    if (candles.length < 30) {
+      const seconds = syntheticOkxIntervals.get(interval) / 1000;
+      throw new Error(`OKX ${seconds} 秒本地聚合正在积累：已有 ${candles.length}/30 根，请保持服务运行后再试`);
+    }
+    return { ticker, candles, synthetic:true, syntheticIntervalMs:syntheticOkxIntervals.get(interval) };
+  }
   const [ticker, rows] = await Promise.all([
     // 仪表盘必须沿用 OKX 移动端永续合约的同一市场，不能混入 BTC-USDT 现货价格。
     // Keep the dashboard on the same market as the OKX mobile perpetual
@@ -1236,7 +1274,8 @@ async function equityHistory(symbol) {
 }
 async function market(interval, limit, preferred) {
   const key = `${interval}:${limit}:${preferred || 'auto'}`; const hit = cache.get(key);
-  if (hit && Date.now() - hit.time < MARKET_TTL) return { ...cacheResult(hit), stale:false };
+  const ttl = isSyntheticOkxInterval(interval) ? 1_000 : MARKET_TTL;
+  if (hit && Date.now() - hit.time < ttl) return { ...cacheResult(hit), stale:false };
   // 用户选择的数据源需要锁定：上游暂时失败时，报价和图表不能静默切换交易所。
   // A user-selected source is intentionally locked: displayed price and chart
   // must not silently switch exchanges during a temporary upstream failure.
@@ -1250,7 +1289,11 @@ async function market(interval, limit, preferred) {
       if (candles.length < 30 || !Number.isFinite(value.ticker.last)) throw new Error('insufficient valid market data');
       const streamedTicker = source === 'okx' ? freshOkxTicker() : null;
       const result = { ...value, ticker:streamedTicker || value.ticker, candles, source, fetchedAt: Date.now(), cached:false, cacheAgeMs:0, stale:false, transport:streamedTicker ? 'websocket' : 'rest', failures };
-      remember(key, result); persistMarket(result, interval); captureAbExperiments(source, interval, candles, result.fetchedAt); settleAbExperiments({[interval]:candles},result.fetchedAt); return result;
+      remember(key, result);
+      // Synthetic candles are already persisted per trade; writing the entire
+      // window again on each short refresh would inflate their volume.
+      if (!isSyntheticOkxInterval(interval)) persistMarket(result, interval);
+      captureAbExperiments(source, interval, candles, result.fetchedAt); settleAbExperiments({[interval]:candles},result.fetchedAt); return result;
     } catch { throw Object.assign(new Error('All data sources failed'), { failures }); }
   }, MARKET_REQUEST_TIMEOUT); } catch (error) {
     if (hit && Date.now() - hit.time <= STALE_QUOTE_MAX_AGE) return { ...cacheResult(hit), stale:true, fallbackReason:error.message };
@@ -1265,9 +1308,24 @@ async function market(interval, limit, preferred) {
   }
 }
 const mime = { '.html':'text/html; charset=utf-8', '.js':'text/javascript; charset=utf-8', '.css':'text/css; charset=utf-8', '.svg':'image/svg+xml', '.png':'image/png', '.ico':'image/x-icon' };
+async function edgeTtsAudio(text, voice='zh-CN-XiaoxiaoNeural') {
+  const chunks=[];
+  for await (const chunk of new Communicate(text, voice, { rate:'+5%' }).stream()) if (chunk.type==='audio') chunks.push(Buffer.from(chunk.data));
+  const audio=Buffer.concat(chunks); if(!audio.length) throw new Error('Edge TTS returned no audio'); return audio;
+}
 http.createServer((req, res) => requestTiming.run({ started:performance.now(), upstreamStarted:null, upstreamEnded:null, upstreamCalls:0 }, async () => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   if (url.pathname === '/api/alerts/health') { json(res,200,{enabled:alertStore.enabled,reason:alertStore.reason||null}); return; }
+  if (url.pathname === '/api/voice/edge' && req.method==='POST') {
+    try {
+      const {text,voice}=await readJson(req),safeText=String(text||'').trim();
+      if(!safeText||safeText.length>240) throw new Error('Voice text must be 1–240 characters');
+      const safeVoice=['zh-CN-XiaoxiaoNeural','zh-CN-XiaoyiNeural','zh-CN-liaoning-XiaobeiNeural','zh-CN-shaanxi-XiaoniNeural','zh-TW-HsiaoChenNeural','zh-HK-HiuGaaiNeural','zh-CN-YunxiNeural','zh-CN-YunyangNeural','en-US-AvaNeural','en-US-EmmaNeural','en-US-AnaNeural','en-US-AriaNeural','en-US-JennyNeural','en-US-MichelleNeural','en-US-AndrewNeural','en-US-BrianNeural','en-US-ChristopherNeural','en-US-EricNeural','en-US-GuyNeural','en-US-RogerNeural','en-US-SteffanNeural'].includes(voice)?voice:'zh-CN-XiaoxiaoNeural';
+      const audio=await edgeTtsAudio(safeText,safeVoice);
+      res.writeHead(200,{'content-type':'audio/mpeg','cache-control':'no-store','content-length':audio.length});res.end(audio);
+    } catch(error) { json(res,503,{error:'Edge voice unavailable',detail:error.message}); }
+    return;
+  }
   if (url.pathname === '/api/auth/register' && req.method === 'POST') {
     if(!alertStore.enabled){json(res,503,{error:'Cloud alerts unavailable',detail:alertStore.reason});return;}
     try { const result=await alertStore.register(...(({email,password})=>[email,password])(await readJson(req))); setSessionCookie(res,result.session); json(res,201,{user:result.user}); } catch(error) { json(res,error.statusCode||500,{error:error.message}); } return;

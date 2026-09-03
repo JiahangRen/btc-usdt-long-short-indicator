@@ -1,7 +1,7 @@
 {
   "name": "btc-indicator-rebuilt",
   "private": true,
-  "version": "2.2.0",
+  "version": "2.3.0",
   "type": "module",
   "scripts": {
     "start": "node server.mjs",
@@ -9,6 +9,7 @@
     "check": "node --check server.mjs && node --check alert-store.mjs && node --check alert-worker.mjs && node --check public/app.js && node --check public/cloud-alerts.js"
   },
   "dependencies": {
+    "edge-tts.js": "^2.0.4",
     "pg": "^8.23.0",
     "redis": "^6.2.1"
   }
