@@ -1,0 +1,43 @@
+/* Base document rules prepared for the modular stylesheet.
+   This layer intentionally sits below the unlayered legacy stylesheet until
+   the matching legacy rules have passed visual comparison and are removed. */
+@layer btc-base {
+  /* Keep sizing predictable for every component. */
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  /* Preserve the document's dark terminal defaults. */
+  :root {
+    color-scheme: dark;
+    font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+      "PingFang SC", sans-serif;
+    background: var(--bg-base);
+    color: var(--text-primary);
+  }
+
+  /* Keep the page background and text inheritance in one base location. */
+  body {
+    min-height: 100vh;
+    margin: 0;
+    background: var(--bg-base);
+    color: var(--text-primary);
+  }
+
+  /* Define the original document reading width before responsive overrides. */
+  main {
+    max-width: 1360px;
+    margin-inline: auto;
+    padding: 28px 30px 32px;
+  }
+
+  /* Establish browser-native control inheritance before component styling. */
+  button,
+  select,
+  input {
+    color: inherit;
+    font: inherit;
+  }
+}

@@ -1,0 +1,37 @@
+/* Shared responsive contracts.
+   These rules are staged below the legacy stylesheet while visual parity is
+   measured at each breakpoint. */
+@layer btc-responsive {
+  /* Tablet: prioritize one readable chart column over a narrow sidebar. */
+  @media (max-width: 1024px) {
+    .terminal-layout {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .side-stack {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+
+  /* Phone: avoid fixed-width metric grids and keep controls reachable. */
+  @media (max-width: 680px) {
+    main {
+      width: 100%;
+      padding: 14px 12px 28px;
+    }
+
+    .hero,
+    main > header {
+      align-items: flex-start;
+    }
+
+    .side-stack,
+    .metrics {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .chart-box {
+      height: 310px;
+    }
+  }
+}

@@ -1,0 +1,23 @@
+/* Authoritative dashboard design tokens.
+   Loaded before the legacy stylesheet during migration, so existing output stays unchanged. */
+:root {
+  /* Surface and border colors used by the terminal layout. */
+  --bg-base: #0e1014;
+  --bg-surface: #161a20;
+  --bg-surface-2: #1c2129;
+  --bg-elevated: #232a33;
+  --border-subtle: #2a313b;
+  --border-strong: #3a434f;
+  /* Semantic market colors. */
+  --bull: #00d4aa;
+  --bear: #ff4d6a;
+  --warn: #ffb020;
+  --live: #3ddc84;
+  /* Accent and typography colors. */
+  --accent-cyan: #22d3ee;
+  --accent-orange: #fb923c;
+  --accent-purple: #a78bfa;
+  --text-primary: #e8eaed;
+  --text-secondary: #9aa4b2;
+  --text-muted: #5b6573;
+}

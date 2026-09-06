@@ -1,0 +1,59 @@
+/* Structural layout contracts for the dashboard.
+   Kept in a lower layer during the visual-equivalence migration. */
+@layer btc-layout {
+  /* Keep the header content and controls on opposite ends of the desktop row. */
+  main > header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  /* Give the price summary a stable horizontal reading order. */
+  .hero {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  /* Define the primary chart-and-decision desktop composition. */
+  .terminal-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1.62fr) minmax(330px, 1fr);
+    gap: 18px;
+    align-items: start;
+  }
+
+  /* Keep the final inter-column spacing stable across the desktop shell. */
+  .terminal-layout {
+    gap: 18px !important;
+  }
+
+  /* Keep stacked decision cards independent from the chart column. */
+  .side-stack {
+    display: grid;
+    gap: 16px;
+  }
+
+  /* Preserve the chart's positioning context for canvas overlays. */
+  .chart-box {
+    position: relative;
+  }
+
+  /* Collapse to one reading column before the narrow-screen layout. */
+  @media (max-width: 1024px) {
+    .terminal-layout {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  /* Keep the document comfortably padded on phones. */
+  @media (max-width: 680px) {
+    main {
+      padding: 18px 14px 26px;
+    }
+
+    .terminal-layout {
+      gap: 14px;
+    }
+  }
+}

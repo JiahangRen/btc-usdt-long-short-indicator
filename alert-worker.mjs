@@ -1,4 +1,4 @@
-import { createAlertStore } from './alert-store.mjs';
+import { createAlertStore, fetchWithTimeout } from './alert-store.mjs';
 
 const store = await createAlertStore();
 if (!store.enabled) throw new Error(`Server-side alert worker is disabled: ${store.reason}`);
@@ -30,7 +30,7 @@ async function consumePushes() {
     const target = Number(job.rule.targetPrice).toLocaleString('en-US',{maximumFractionDigits:2});
     const current = Number(job.price).toLocaleString('en-US',{maximumFractionDigits:2});
     try {
-      const response = await fetch(`https://sctapi.ftqq.com/${encodeURIComponent(job.sendKey)}.send`,{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({title:title(job.rule.kind,target),short:short(job.rule.kind,target),desp:`${title(job.rule.kind,target)}\n\n${phrase(job.rule.kind,target)} USDT\n触发时市价 ${current} USDT`})});
+      const response = await fetchWithTimeout(`https://sctapi.ftqq.com/${encodeURIComponent(job.sendKey)}.send`,{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({title:title(job.rule.kind,target),short:short(job.rule.kind,target),desp:`${title(job.rule.kind,target)}\n\n${phrase(job.rule.kind,target)} USDT\n触发时市价 ${current} USDT`})});
       const payload = await response.json().catch(()=>({}));
       await store.finishPush(job.deliveryId,{ok:response.ok && Number(payload.code)===0,payload,error:response.ok?'':'Server酱请求失败'});
     } catch (error) { await store.finishPush(job.deliveryId,{ok:false,payload:{},error:error.message}); }

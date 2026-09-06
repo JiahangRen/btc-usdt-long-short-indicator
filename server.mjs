@@ -1,7 +1,8 @@
 import http from 'node:http';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { readFile } from 'node:fs/promises';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
+import { execFile } from 'node:child_process';
 import { extname, join, normalize } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Communicate } from 'edge-tts.js';
@@ -9,6 +10,12 @@ import { createAlertStore } from './alert-store.mjs';
 
 // BTC 指标服务端：负责静态页面、公开数据源、SQLite 快照与实时 OKX 连接。
 // BTC indicator backend: serves the UI, public data sources, SQLite snapshots, and the live OKX connection.
+
+// 进程级兜底：任何漏网的 rejection / 异常只记录，不再导致整个行情服务崩溃（launchd 拉起前仍有窗口期）。
+// Process-level safety net: a stray rejection or exception is logged, never crashes the whole service.
+process.on('unhandledRejection', (reason) => console.error('[fatal] unhandledRejection:', reason));
+process.on('uncaughtException', (error) => console.error('[fatal] uncaughtException:', error && error.stack || error));
+
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || '127.0.0.1';
 const PUBLIC = join(process.cwd(), 'public');
@@ -319,6 +326,7 @@ const okxStream = {
   socket:null, status:'connecting', ticker:null, spotPrice:null,
   fundingRate:null, nextFundingRate:null, oi:null, oiUnit:'BTC',
   orderBook:null, takerTrades:[], cvdNotional:0, bookAt:0, tradeAt:0,
+  premiumPct:null, premiumAt:0,
   lastMessageAt:0, tickerAt:0, contextAt:0, connectedAt:0,
   reconnects:0, lastError:null, retryMs:1_000, heartbeat:null, retryTimer:null
 };
@@ -351,7 +359,146 @@ function recentTakerFlow(now = Date.now()) {
     cvd60Notional:buys-sells, cvdSessionNotional:okxStream.cvdNotional,
     windowSeconds:60, updatedAt:okxStream.tradeAt || null
   } : null;
+  }
+// --- 后台语音接力：页面关闭后服务端继续按规则播报 ---
+// Background voice relay: when the browser tab is closed, the server keeps evaluating rules and speaks via macOS afplay.
+const VOICE_STATE_FILE = join(DATA_DIR, 'voice_state.json');
+const VOICE_HEARTBEAT_TIMEOUT_MS = 60_000; // 前端心跳断 60s 即接管
+const VOICE_RELAY_INTERVAL_MS = 2_000;
+const RELAY_VOICE_ALLOWLIST = ['zh-CN-XiaoxiaoNeural','zh-CN-XiaoyiNeural','zh-CN-YunxiNeural','zh-CN-YunyangNeural','zh-CN-shaanxi-XiaoniNeural','zh-CN-liaoning-XiaobeiNeural','zh-HK-HiuGaaiNeural','zh-TW-HsiaoChenNeural'];
+let voiceState = { settings:null, personalEntries:[], rules:[], lastHeartbeatAt:0, lastSpokenAt:0, inFlightUntil:0 };
+const loadVoiceState = () => {
+  try {
+    const raw = readFileSync(VOICE_STATE_FILE, 'utf8');
+    const obj = JSON.parse(raw);
+    if (obj && Array.isArray(obj.rules)) voiceState = { ...voiceState, ...obj, rules: obj.rules, personalEntries: Array.isArray(obj.personalEntries) ? obj.personalEntries : [], lastHeartbeatAt: Number(obj.lastHeartbeatAt)||0, lastSpokenAt: Number(obj.lastSpokenAt)||0 };
+  } catch { /* first run */ }
+};
+loadVoiceState();
+const persistVoiceState = () => { try { writeFileSync(VOICE_STATE_FILE, JSON.stringify(voiceState)); } catch (error) { console.warn('[voice] persist failed:', error.message); } };
+// 触发判定：状态语义 + 首次/未知价格参考
+function ruleMatches(rule, prev, next) {
+  if (!Number.isFinite(next)) return false;
+  const target = Number(rule.targetPrice);
+  const direction = (prev === undefined || prev === null) ? null : (next > prev) ? 'up' : (next < prev ? 'down' : null);
+  if (rule.kind === 'price_reached') {
+    if (!Number.isFinite(target)) return false;
+    if (prev === undefined) return next >= target; // 离目标多近算"接近"
+    return (prev - target) * (next - target) <= 0;
+  }
+  if (rule.kind === 'price_above') {
+    if (!Number.isFinite(target)) return false;
+    return next >= target; // 状态：到达即满足
+  }
+  if (rule.kind === 'price_below') {
+    if (!Number.isFinite(target)) return false;
+    return next <= target;
+  }
+  if (rule.kind === 'price_tick_move') {
+    const delta = prev === undefined ? Math.abs(target) : Math.abs(next - prev);
+    return delta >= Math.abs(target);
+  }
+  if (rule.kind === 'long_liquidation') return next >= target;
+  if (rule.kind === 'short_liquidation') return next <= target;
+  return false;
 }
+function ruleCooldownMs(rule) {
+  if (!rule.repeat) return 0;
+  const min = Math.max(0, Number(rule.cooldownMinutes)||0) * 60_000;
+  const poll = VOICE_RELAY_INTERVAL_MS;
+  // 重复规则：冷却 < 评估间隔会被无限狂响，强制下限 = 评估间隔 + 5s
+  return Math.max(min, VOICE_RELAY_INTERVAL_MS + 5_000);
+}
+const describeVoiceRule = (rule, last) => {
+  const target = Number(rule.targetPrice);
+  let message;
+  if (rule.kind === 'price_above') message = last >= target ? `上涨目标已到达，BTC 当前价格 ${Math.round(last)} 美元` : `等待 BTC 上行至 ${Math.round(target)}，当前 ${Math.round(last)} 美元`;
+  else if (rule.kind === 'price_below') message = last <= target ? `下跌目标已到达，BTC 当前价格 ${Math.round(last)} 美元` : `等待 BTC 下行至 ${Math.round(target)}，当前 ${Math.round(last)} 美元`;
+  else if (rule.kind === 'price_reached') message = `BTC 当前价格 ${Math.round(last)} 美元，接近目标 ${Math.round(target)} 美元`;
+  else message = `BTC 当前价格 ${Math.round(last)} 美元`;
+  const comparisons = describePersonalEntries(last).replace(/^BTC 当前价格[^。]*。?/, '');
+  return comparisons ? `${message}。${comparisons}` : message;
+};
+function describePersonalEntries(last) {
+  const entries = (voiceState.personalEntries || []).filter(entry => Number.isFinite(Number(entry?.price)) && Number(entry.price) > 0);
+  if (!entries.length) return `BTC 当前价格 ${Math.round(last)} 美元`;
+  const fmt = value => Number(value).toLocaleString('en-US', { maximumFractionDigits: 2 });
+  const comparisons = entries.map(entry => {
+    const entryPrice = Number(entry.price), delta = last - entryPrice;
+    const isShort = entry.side === 'short', priceUp = delta >= 0, inProfit = isShort ? delta <= 0 : delta >= 0;
+    const amount = fmt(Math.abs(delta)), percent = Math.abs(delta / entryPrice * 100).toFixed(2);
+    const side = isShort ? '做空' : '做多', label = isShort ? '做空买入价' : '做多买入价';
+    return `相对${label}${fmt(entryPrice)}，现价${priceUp ? '上涨' : '下跌'}${amount}，${priceUp ? '涨幅' : '跌幅'}${percent}%。差价${amount}美元。${side}${inProfit ? '盈利中' : '亏损中'}。`;
+  });
+  return `BTC 当前价格 ${fmt(last)} 美元。${comparisons.join('')}`;
+}
+async function playVoiceOnServer(text, voice) {
+  const safeVoice = RELAY_VOICE_ALLOWLIST.includes(voice) ? voice : 'zh-CN-XiaoxiaoNeural';
+  const audio = await edgeTtsAudio(text.slice(0, 240), safeVoice);
+  const tmp = join(DATA_DIR, `voice-${Date.now()}-${Math.random().toString(36).slice(2, 7)}.mp3`);
+  writeFileSync(tmp, audio);
+  await new Promise(resolve => execFile('afplay', [tmp], error => { if (error) console.warn('[voice] afplay error:', error.message); resolve(); }))
+    .finally(() => { try { unlinkSync(tmp); } catch {} });
+}
+async function relayTick() {
+  const now = Date.now();
+  // 仍在心跳窗口内：前端接管，不抢权
+  if (voiceState.lastHeartbeatAt && now - voiceState.lastHeartbeatAt < VOICE_HEARTBEAT_TIMEOUT_MS) return;
+  if (!voiceState.settings || !voiceState.settings.enabled) return;
+  const rules = voiceState.rules.filter(rule => rule.enabled !== false);
+  const settings = voiceState.settings || {};
+  const hasLivePriceBroadcast = Boolean(settings.livePriceEnabled) && (voiceState.personalEntries || []).some(entry => Number(entry?.price) > 0);
+  if (!rules.length && !hasLivePriceBroadcast) return;
+  if (now < voiceState.inFlightUntil) return; // 防止上次未播完又被启用
+  // 选最新行情：优先 OKX WS 缓存，否则主动拉一次
+  let last = null;
+  const fresh = freshOkxTicker(VOICE_HEARTBEAT_TIMEOUT_MS);
+  if (fresh) last = fresh.last;
+  if (!Number.isFinite(last)) {
+    try {
+      const fetched = await fetch('https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT', { signal: AbortSignal.timeout(4_000) });
+      if (fetched.ok) {
+        const data = await fetched.json();
+        last = Number(data?.data?.[0]?.last);
+      }
+    } catch {}
+  }
+  if (!Number.isFinite(last)) return;
+  // 定时行情播报与网页打开时的内容保持一致；仅在页面心跳中断后接力。
+  const intervalMs = Math.max(15, Number(settings.interval) || 60) * 1_000;
+  if (hasLivePriceBroadcast && now - Number(voiceState.lastSpokenAt || 0) >= intervalMs) {
+    voiceState.lastSpokenAt = now;
+    voiceState.inFlightUntil = now + 8_000;
+    persistVoiceState();
+    const voice = settings.voice || 'zh-CN-XiaoxiaoNeural';
+    playVoiceOnServer(describePersonalEntries(last), voice).catch(error => console.warn('[voice] play failed:', error.message))
+      .finally(() => { voiceState.inFlightUntil = 0; persistVoiceState(); });
+    return;
+  }
+  for (const rule of rules) {
+    if (!rule.repeat && rule.lastTriggeredAt) continue;
+    const cd = ruleCooldownMs(rule);
+    if (cd && rule.lastTriggeredAt && now - rule.lastTriggeredAt < cd) continue;
+    const prev = Number(rule._lastPrice);
+    if (ruleMatches(rule, prev, last)) {
+      rule._lastPrice = last; // 立即更新，避免同轮多次触发
+      rule.lastTriggeredAt = now;
+      voiceState.lastSpokenAt = now;
+      voiceState.inFlightUntil = now + 8_000;
+      // 状态判定用一次后立即冷却是为了避免同价持续命中；保留 _lastPrice 让下一根价格继续检测（如果隔太久会重新检测）
+      persistVoiceState();
+      const text = describeVoiceRule(rule, last);
+      const voice = voiceState.settings.voice || 'zh-CN-XiaoxiaoNeural';
+      playVoiceOnServer(text, voice).catch(error => console.warn('[voice] play failed:', error.message))
+        .finally(() => { voiceState.inFlightUntil = 0; persistVoiceState(); });
+      // 同一 tick 内只处理一条规则
+      break;
+    }
+    rule._lastPrice = last;
+  }
+  persistVoiceState();
+}
+setInterval(relayTick, VOICE_RELAY_INTERVAL_MS).unref?.();
 function okxDerivativeFeatures(now = Date.now()) {
   const book = okxStream.orderBook && streamAge(okxStream.bookAt, now) <= 10_000 ? { ...okxStream.orderBook, updatedAt:okxStream.bookAt } : null;
   const takerFlow = recentTakerFlow(now);
@@ -363,6 +510,8 @@ function okxDerivativeFeatures(now = Date.now()) {
   const priceChangePct = Number.isFinite(okxStream.ticker?.last) && Number.isFinite(+priceBaseline?.last) && +priceBaseline.last !== 0 ? (okxStream.ticker.last / +priceBaseline.last - 1) * 100 : null;
   return {
     orderBook:book, takerFlow,
+    premiumPct:streamAge(okxStream.premiumAt, now) <= 60_000 ? okxStream.premiumPct : null,
+    liquidationHeat:null, topTraderRatio:null,
     oiChangePct, oiChangeWindowSeconds:oiBaseline ? Math.round((now - +oiBaseline.observed_at) / 1000) : null,
     fundingChangePct, fundingChangeWindowSeconds:fundingBaseline ? Math.round((now - +fundingBaseline.observed_at) / 1000) : null,
     priceChangePct, priceChangeWindowSeconds:priceBaseline ? Math.round((now - +priceBaseline.observed_at) / 1000) : null
@@ -422,7 +571,8 @@ function updateOkxStream(message) {
     // a historical model input until sufficient snapshots have accumulated.
     const previousTotal=(previous?.bidDepth || 0)+(previous?.askDepth || 0);
     const ofiPct=previousTotal>0 ? ((bidDepth-(previous?.bidDepth || 0))-(askDepth-(previous?.askDepth || 0))) / Math.max(total,previousTotal,1)*100 : null;
-    if (total > 0) { okxStream.orderBook = { bidDepth, askDepth, ratio:askDepth ? bidDepth / askDepth : null, imbalancePct:(bidDepth - askDepth) / total * 100, ofiPct }; okxStream.bookAt = now; }
+    const bestBid=+row.bids?.[0]?.[0],bestAsk=+row.asks?.[0]?.[0],mid=(bestBid+bestAsk)/2,spreadBps=Number.isFinite(mid)&&mid>0&&Number.isFinite(bestBid)&&Number.isFinite(bestAsk)?(bestAsk-bestBid)/mid*10_000:null;
+    if (total > 0) { okxStream.orderBook = { bidDepth, askDepth, ratio:askDepth ? bidDepth / askDepth : null, imbalancePct:(bidDepth - askDepth) / total * 100, ofiPct, spreadBps }; okxStream.bookAt = now; }
   } else if (channel === 'trades') {
     for (const trade of rows) {
       const price = +trade.px, size = +trade.sz, side = trade.side === 'buy' ? 'buy' : trade.side === 'sell' ? 'sell' : null;
@@ -457,6 +607,14 @@ function openOkxStream() {
   } catch (error) { okxStream.status = 'reconnecting'; okxStream.lastError = error.message; scheduleOkxReconnect(); }
 }
 openOkxStream();
+async function refreshOkxPremium(){
+  // This public historical endpoint can take longer than the quote path; run it
+  // out of band with its own deadline so it never delays the market response.
+  try { const payload=await request('https://www.okx.com/api/v5/public/premium-history?instId=BTC-USDT-SWAP',8_000),row=payload.data?.[0],value=+row?.premium; if(payload.code==='0'&&Number.isFinite(value)){okxStream.premiumPct=value*100;okxStream.premiumAt=Date.now()} } catch { /* Feature remains unavailable; it never becomes a synthetic value. */ }
+}
+// Defer the initial pass until module-level request timing state is initialized.
+queueMicrotask(refreshOkxPremium);
+const premiumRefreshTimer=setInterval(refreshOkxPremium,30_000);premiumRefreshTimer.unref?.();
 const derivativePersistTimer = setInterval(persistOkxDerivativeSnapshot, 10_000);
 derivativePersistTimer.unref?.();
 // 每个 API 响应都携带请求范围的耗时，浏览器可区分“浏览器→本站”与“本站→交易所”的耗时。
@@ -532,7 +690,24 @@ async function fromGate(interval, limit) {
   return { ticker: { last:+d.last, open24h:+d.last / (1 + (+d.change_percentage || 0) / 100), changePct:+d.change_percentage, high24:+d.high_24h, low24:+d.low_24h }, candles: rows.map(c => ({ time:+c.t*1000, volume:+c.v, close:+c.c, high:+c.h, low:+c.l, open:+c.o })).reverse() };
 }
 async function okxCandleRows(interval, limit) {
-  if (interval !== '3h') return request(`https://www.okx.com/api/v5/market/candles?instId=BTC-USDT-SWAP&bar=${intervalFor('okx', interval)}&limit=${limit}`);
+  if (interval !== '3h') {
+    // OKX returns at most 300 rows per request.  A one-year daily view needs
+    // 366 rows, so fetch backwards page-by-page instead of silently returning
+    // a shorter chart while the UI still says “1Y”.
+    if (limit <= 300) return request(`https://www.okx.com/api/v5/market/candles?instId=BTC-USDT-SWAP&bar=${intervalFor('okx', interval)}&limit=${limit}`);
+    const pages = [], pageSize = 300;
+    let after = '';
+    for (let page = 0; page < Math.ceil(limit / pageSize); page++) {
+      const suffix = after ? `&after=${after}` : '';
+      const payload = await request(`https://www.okx.com/api/v5/market/candles?instId=BTC-USDT-SWAP&bar=${intervalFor('okx', interval)}&limit=${pageSize}${suffix}`);
+      if (payload.code !== '0' || !payload.data?.length) return payload;
+      pages.push(...payload.data);
+      after = payload.data.at(-1)?.[0];
+      if (payload.data.length < pageSize) break;
+    }
+    const unique = [...new Map(pages.map(row => [row[0], row])).values()];
+    return { code:'0', data:unique.slice(0, limit) };
+  }
   // OKX 没有原生 3 小时 K 线：分页取得足量 1 小时 K 线后，按 UTC 3 小时边界聚合，确保信号仍有 200 根数据。
   // OKX has no native 3H bar. Fetch enough native 1H bars in pages, then
   // aggregate them on a UTC 3-hour boundary so the signal still has 200 bars.
@@ -818,13 +993,18 @@ async function refreshFedCalendar(now = Date.now()) {
         requestText('https://www.bls.gov/schedule/news_release/bls.ics', 8_000)
       ]);
       const textAt = index => pages[index].status === 'fulfilled' ? plainText(pages[index].value) : '', rawAt=index=>pages[index].status === 'fulfilled'?String(pages[index].value):'';
-      const events = [
+      let events = [
         { key:'fomc', name:'FOMC 利率决议', source:'Federal Reserve', ...nearestDate(textAt(0), { range:true }) },
         // CPI 与非农都优先解析 BLS 统一 ICS 日历，网页明细仅作为兼容回退。
         // Parse both CPI and payrolls from BLS's canonical ICS calendar first; use detail pages only as compatibility fallbacks.
         { key:'cpi', name:'美国 CPI', source:'U.S. Bureau of Labor Statistics', ...(nearestIcsEvent(rawAt(3),/Consumer Price Index/i) || nearestDate(textAt(1)) || cpiCadenceFallback(now)) },
         { key:'payrolls', name:'美国非农就业', source:'U.S. Bureau of Labor Statistics', ...(nearestIcsEvent(rawAt(3),/Employment Situation/i) || nearestDate(textAt(2)) || payrollCadenceFallback(now)) }
       ].filter(event => Number.isFinite(event.at));
+      // Keep an event visible through its release window even after calendar
+      // pages advance to the next date, so the published value can replace its countdown.
+      const recentlyReleased=latestFedCalendarSnapshots.all().filter(row=>Number.isFinite(+row.event_at)&&+row.event_at<=now&&now-(+row.event_at)<24*3_600_000).map(row=>({ key:String(row.event_key),name:String(row.event_name),at:+row.event_at,source:String(row.source||'SQLite'),fallback:Boolean(row.is_fallback) }));
+      for(const released of recentlyReleased)if(!events.some(event=>event.key===released.key&&event.at===released.at))events.push(released);
+      events=events.sort((a,b)=>a.at-b.at);
       if (!events.length) throw new Error('no upcoming public macro events found');
       const result = { events:events.sort((a,b) => a.at - b.at), fetchedAt:now, cached:false, cacheAgeMs:0, refreshMs:FED_CALENDAR_TTL, unavailable:pages.map((page,index) => page.status === 'rejected' ? ['Federal Reserve','BLS CPI','BLS Employment','BLS calendar'][index] : null).filter(Boolean), sources:['https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm','https://www.bls.gov/schedule/news_release/cpi.htm','https://www.bls.gov/schedule/news_release/empsit.htm','https://www.bls.gov/schedule/news_release/bls.ics'] };
       persistFedCalendarSnapshots(result.events, now);
@@ -833,7 +1013,9 @@ async function refreshFedCalendar(now = Date.now()) {
 }
 async function fedCalendar() {
   const key = 'fed-calendar', hit = cache.get(key), now = Date.now();
-  if (hit && now - hit.time < FED_CALENDAR_TTL) return { ...cacheResult(hit, now), stale:false };
+  const releaseWindow=events=>Array.isArray(events)&&events.some(event=>Math.abs(Number(event.at)-now)<15*60_000);
+  const ttl=releaseWindow(hit?.value?.events)?30_000:FED_CALENDAR_TTL;
+  if (hit && now - hit.time < ttl) return { ...cacheResult(hit, now), stale:false };
   const stored = storedFedCalendar(now);
   if (stored) {
     remember(key, stored);
@@ -886,12 +1068,38 @@ async function fedMarketSignals() {
     remember(key,result); return result;
   });
 }
+// BLS publishes the nonfarm payroll level as a public time series.  The monthly
+// difference is the released headline change; we never invent a result when the
+// official series has not updated yet.
+async function payrollReleaseActual() {
+  const key='bls-payroll-release', hit=cache.get(key), now=Date.now();
+  if(hit && now-hit.time<30_000)return cacheResult(hit,now);
+  return coalesce(key,async()=>{
+    const year=new Date().getUTCFullYear();
+    const data=await request(`https://api.bls.gov/publicAPI/v2/timeseries/data/CES0000000001?startyear=${year-1}&endyear=${year}`,8_000);
+    const rows=Array.isArray(data?.Results?.series?.[0]?.data)?data.Results.series[0].data:[];
+    const monthly=rows.filter(row=>/^M\d{2}$/.test(String(row.period||''))&&Number.isFinite(Number(row.value))).sort((a,b)=>Number(b.year)-Number(a.year)||Number(b.period.slice(1))-Number(a.period.slice(1)));
+    if(monthly.length<2)throw new Error('BLS payroll series has insufficient monthly observations');
+    const latest=monthly[0],previous=monthly[1],change=Math.round(Number(latest.value)-Number(previous.value));
+    const value={ value:`新增非农就业 ${change>=0?'+':''}${change.toLocaleString('en-US')}K`, source:'U.S. Bureau of Labor Statistics', period:`${latest.year}-${latest.period.slice(1)}`, fetchedAt:now };
+    remember(key,value);return value;
+  });
+}
+async function attachReleasedMacroActuals(events, now=Date.now()) {
+  const payroll=events.find(event=>event.key==='payrolls'&&event.at<=now&&now-event.at<24*3_600_000);
+  if(!payroll)return events;
+  try {
+    const actual=await payrollReleaseActual();
+    return events.map(event=>event===payroll?{...event,actual}:event);
+  } catch { return events; }
+}
 async function fedMonitor() {
   const calendar=await fedCalendar();
+  const events=await attachReleasedMacroActuals(calendar.events||[]);
   let signals;
   try { signals=await fedMarketSignals(); }
   catch { signals={ market:[], fetchedAt:Date.now(), refreshMs:FED_MARKET_SIGNALS_TTL }; }
-  return { ...calendar, marketSignals:signals.market, marketSignalsFetchedAt:signals.fetchedAt, marketSignalsRefreshMs:signals.refreshMs };
+  return { ...calendar, events, marketSignals:signals.market, marketSignalsFetchedAt:signals.fetchedAt, marketSignalsRefreshMs:signals.refreshMs };
 }
 async function binanceHistory(interval, limit = 1000) {
   const rows = await request(`https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${interval}&limit=${limit}`, 8_000);
@@ -1272,6 +1480,26 @@ async function equityHistory(symbol) {
   }
   throw new Error(failures.join('; '));
 }
+async function yahooLiveEquityQuote(symbol) {
+  const raw = await request(`https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=1d&interval=1m&includePrePost=false`, 5_000);
+  const meta = raw?.chart?.result?.[0]?.meta || {};
+  const last = Number(meta.regularMarketPrice), previous = Number(meta.regularMarketPreviousClose ?? meta.previousClose);
+  if (!Number.isFinite(last) || !Number.isFinite(previous) || previous <= 0) throw new Error(`${symbol} live quote unavailable`);
+  const regular = meta.currentTradingPeriod?.regular, regularSession=Number(regular?.start) * 1000 <= Date.now() && Date.now() < Number(regular?.end) * 1000;
+  return { symbol, last, previous, marketState:String(meta.marketState || '').toUpperCase(), regularSession };
+}
+async function usEquityQuotes() {
+  const key = 'us-equity-quotes', hit = cache.get(key);
+  if (hit && Date.now() - hit.time < 10_000) return cacheResult(hit);
+  try {
+    const quotes = await Promise.all(['SPY','QQQ'].map(yahooLiveEquityQuote));
+    const value = { open:quotes.every(quote => quote.marketState === 'REGULAR' || quote.regularSession), quotes, source:'Yahoo Finance', fetchedAt:Date.now(), cached:false };
+    remember(key, value); return value;
+  } catch {
+    // A missing live quote must not be rendered as a stale or empty market row.
+    return { open:false, quotes:[], source:'unavailable', fetchedAt:Date.now(), cached:false };
+  }
+}
 async function market(interval, limit, preferred) {
   const key = `${interval}:${limit}:${preferred || 'auto'}`; const hit = cache.get(key);
   const ttl = isSyntheticOkxInterval(interval) ? 1_000 : MARKET_TTL;
@@ -1314,6 +1542,7 @@ async function edgeTtsAudio(text, voice='zh-CN-XiaoxiaoNeural') {
   const audio=Buffer.concat(chunks); if(!audio.length) throw new Error('Edge TTS returned no audio'); return audio;
 }
 http.createServer((req, res) => requestTiming.run({ started:performance.now(), upstreamStarted:null, upstreamEnded:null, upstreamCalls:0 }, async () => {
+ try {
   const url = new URL(req.url, `http://${req.headers.host}`);
   if (url.pathname === '/api/alerts/health') { json(res,200,{enabled:alertStore.enabled,reason:alertStore.reason||null}); return; }
   if (url.pathname === '/api/voice/edge' && req.method==='POST') {
@@ -1324,6 +1553,67 @@ http.createServer((req, res) => requestTiming.run({ started:performance.now(), u
       const audio=await edgeTtsAudio(safeText,safeVoice);
       res.writeHead(200,{'content-type':'audio/mpeg','cache-control':'no-store','content-length':audio.length});res.end(audio);
     } catch(error) { json(res,503,{error:'Edge voice unavailable',detail:error.message}); }
+    return;
+  }
+  // 语音规则同步：前端保存时 POST 上当前 settings + rules；服务端持久化以便页面关闭后接力
+  if (url.pathname === '/api/voice/sync' && req.method === 'POST') {
+    try {
+      const body = await readJson(req);
+      const settingsIn = body && body.settings;
+      const entriesIn = Array.isArray(body && body.personalEntries) ? body.personalEntries : [];
+      const rulesIn = Array.isArray(body && body.rules) ? body.rules : [];
+      if (settingsIn && typeof settingsIn === 'object') voiceState.settings = settingsIn;
+      voiceState.personalEntries = entriesIn.slice(0, 2).flatMap(entry => {
+        const price = Number(entry?.price);
+        return Number.isFinite(price) && price > 0 ? [{ price, side: entry?.side === 'short' ? 'short' : 'long' }] : [];
+      });
+      // 同步规则：保留服务端 _lastPrice / lastTriggeredAt 状态（按 id 匹配）
+      const prevById = new Map(voiceState.rules.map(rule => [rule.id, rule]));
+      voiceState.rules = rulesIn.map(rule => {
+        const prev = prevById.get(rule.id) || {};
+        return { ...prev, ...rule };
+      });
+      voiceState.lastHeartbeatAt = Date.now(); // 同步即视为在线
+      persistVoiceState();
+      json(res, 200, { ok:true, relayed:false, inFlightUntil: voiceState.inFlightUntil });
+    } catch (error) {
+      json(res, 400, { error: 'Bad voice sync payload', detail: error.message });
+    }
+    return;
+  }
+  // 心跳：前端每 30s 一次，断 60s 服务端接管
+  if (url.pathname === '/api/voice/heartbeat' && req.method === 'POST') {
+    voiceState.lastHeartbeatAt = Date.now();
+    persistVoiceState();
+    json(res, 200, {
+      ok: true,
+      relayed: false,
+      inFlightUntil: voiceState.inFlightUntil,
+      nextRelayWindowMs: VOICE_HEARTBEAT_TIMEOUT_MS,
+    });
+    return;
+  }
+  // 状态：前端启动时回拉服务端 lastTriggeredAt / lastSpokenAt
+  if (url.pathname === '/api/voice/status' && (req.method === 'GET' || req.method === 'POST')) {
+    json(res, 200, {
+      ok: true,
+      lastHeartbeatAt: voiceState.lastHeartbeatAt,
+      lastSpokenAt: voiceState.lastSpokenAt,
+      inFlightUntil: voiceState.inFlightUntil,
+      rules: voiceState.rules.map(({ _lastPrice, ...rest }) => rest), // 不泄露内部字段
+      settings: voiceState.settings,
+    });
+    return;
+  }
+  if (url.pathname === '/api/voice/state' && (req.method === 'GET' || req.method === 'POST')) {
+    // 历史别名（前端状态回拉使用）
+    json(res, 200, {
+      rules: voiceState.rules.map(({ _lastPrice, ...rest }) => rest),
+      settings: voiceState.settings,
+      lastHeartbeatAt: voiceState.lastHeartbeatAt,
+      lastSpokenAt: voiceState.lastSpokenAt,
+      inFlightUntil: voiceState.inFlightUntil,
+    });
     return;
   }
   if (url.pathname === '/api/auth/register' && req.method === 'POST') {
@@ -1428,8 +1718,25 @@ http.createServer((req, res) => requestTiming.run({ started:performance.now(), u
     } catch (e) { json(res, 503, { error:'Correlation history unavailable', detail:e.message }); }
     return;
   }
+  if (url.pathname === '/api/us-equity-quotes') {
+    json(res, 200, await usEquityQuotes());
+    return;
+  }
   const relative = url.pathname === '/' ? 'index.html' : normalize(url.pathname).replace(/^[/\\]+/, '');
   if (relative.includes('..')) { res.writeHead(403); res.end(); return; }
-  try { const file = join(PUBLIC, relative); const body = await readFile(file); res.writeHead(200, { 'content-type': mime[extname(file)] || 'application/octet-stream' }); res.end(body); }
-  catch { res.writeHead(404); res.end('Not found'); }
+  try {
+    const file = join(PUBLIC, relative);
+    const body = await readFile(file);
+    const immutable = url.searchParams.has('v') || url.searchParams.has('t');
+    res.writeHead(200, { 'content-type': mime[extname(file)] || 'application/octet-stream', 'cache-control': immutable ? 'public, max-age=31536000, immutable' : 'no-cache' });
+    res.end(body);
+  } catch (readError) {
+    if (readError && readError.code !== 'ENOENT') console.error('[static]', readError.message);
+    res.writeHead(404); res.end('Not found');
+  }
+  } catch (error) {
+    console.error('[fatal] unhandled request error:', error && error.stack || error);
+    if (!res.headersSent) res.writeHead(500, { 'content-type': 'application/json; charset=utf-8' });
+    if (!res.writableEnded) res.end(JSON.stringify({ error: 'Internal server error' }));
+  }
 })).listen(PORT, HOST, () => console.log(`BTC indicator: http://${HOST}:${PORT}`));

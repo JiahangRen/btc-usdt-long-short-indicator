@@ -1,0 +1,235 @@
+/* Verified base rules migrated out of the legacy cascade.
+   This file loads after the legacy stylesheet so each rule becomes the single
+   authoritative final declaration before its legacy counterpart is removed. */
+body {
+  background: var(--bg-base);
+  color: var(--text-primary);
+}
+
+/* Preserve the verified desktop and tablet container dimensions. */
+@media (min-width: 681px) {
+  main {
+    width: min(calc(100% - 48px), 1360px) !important;
+    max-width: 1360px !important;
+    padding: 20px 0 38px !important;
+  }
+}
+
+/* Preserve the final chart surface shared by every viewport. */
+.chart-box {
+  background: linear-gradient(180deg, #0a1424, #0a1120);
+  border: 1px solid rgba(92, 122, 165, 0.18);
+  border-radius: 12px;
+}
+
+/* Canvas always fills the chart surface; this was identical in the legacy sheet. */
+.chart-box canvas {
+  width: 100%;
+  height: 100%;
+}
+
+/* Preserve the final shared card surface outside of feature-specific cards. */
+.card,
+.optional,
+.backtest-details {
+  border-color: rgba(121, 151, 196, 0.27);
+  border-radius: 16px;
+  background: linear-gradient(
+    135deg,
+    rgba(20, 30, 48, 0.94),
+    rgba(13, 20, 34, 0.95)
+  );
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.045),
+    0 14px 34px rgba(0, 0, 0, 0.18);
+}
+
+/* Preserve the final shared card typography. */
+.card h2 {
+  color: #e7eefb;
+}
+
+.card p {
+  color: var(--text-secondary);
+}
+
+/* Preserve the final chart-control containers. */
+.toolbar #intervals,
+.toolbar #ranges,
+.zoom-tools {
+  border: 1px solid rgba(105, 133, 173, 0.2);
+  background: rgba(7, 15, 29, 0.46);
+}
+
+/* Hover/focus a compact control to reveal its full selector. */
+.toolbar #intervals,
+.toolbar #ranges { position: relative; overflow: visible; padding: 0; border: 0; background: transparent; }
+.toolbar .control-popover { position: relative; }
+.toolbar .control-trigger { display: inline-flex; align-items: center; gap: 8px; min-height: 42px; padding: 8px 12px !important; border: 1px solid rgba(105,133,173,.3) !important; background: rgba(7,15,29,.62) !important; color: var(--text-secondary,#9eacc5); }
+.toolbar .control-trigger .control-label { width: auto; min-width: 0; color: inherit; font-size: 12px; }
+.toolbar .control-trigger b { color: #eaf1ff; font-size: 15px; }
+.toolbar .control-trigger i { font-style: normal; font-size: 10px; }
+.toolbar .control-popover-panel { position: absolute; z-index: 30; top: calc(100% + 7px); left: 0; visibility: hidden; opacity: 0; pointer-events: none; transform: translateY(-4px); transition: opacity .14s ease,transform .14s ease,visibility .14s; padding: 9px; border: 1px solid rgba(105,133,173,.36); border-radius: 12px; background: rgba(8,17,31,.98); box-shadow: 0 14px 32px rgba(0,0,0,.32); }
+.toolbar .control-popover:hover .control-popover-panel,
+.toolbar .control-popover:focus-within .control-popover-panel,
+.toolbar .control-popover.is-open .control-popover-panel { visibility: visible; opacity: 1; pointer-events: auto; transform: translateY(0); }
+.toolbar #intervals .interval-wheel {
+  display: flex;
+  gap: 6px;
+  width: min(700px, calc(100vw - 66px));
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scroll-behavior: smooth;
+  scroll-snap-type: x proximity;
+  scrollbar-width: none;
+  -webkit-mask-image: linear-gradient(to right,transparent,#000 18px,#000 calc(100% - 18px),transparent);
+  mask-image: linear-gradient(to right,transparent,#000 18px,#000 calc(100% - 18px),transparent);
+}
+.toolbar #intervals .interval-wheel::-webkit-scrollbar { display: none; }
+.toolbar #intervals .interval-wheel button { flex: 0 0 auto; scroll-snap-align: center; }
+.toolbar .range-options { display: flex; flex-wrap: wrap; gap: 6px; width: min(470px, calc(100vw - 66px)); }
+
+/* Chart-display choices use the same compact hover card as the time controls. */
+.toolbar .chart-display-controls { position: relative; margin-left: 0 !important; }
+.toolbar .chart-display-controls .control-popover { position: relative; }
+.toolbar .chart-display-controls .control-trigger { display: inline-flex; align-items: center; gap: 8px; min-height: 42px; padding: 8px 12px !important; border: 1px solid rgba(105,133,173,.3) !important; background: rgba(7,15,29,.62) !important; color: var(--text-secondary,#9eacc5); }
+.toolbar .chart-display-controls .control-label { width: auto; min-width: 0; color: inherit; font-size: 12px; }
+.toolbar .chart-display-controls .control-trigger b { color: #eaf1ff; font-size: 15px; }
+.toolbar .chart-display-controls .control-trigger i { font-style: normal; font-size: 10px; }
+.toolbar .chart-display-controls .control-popover-panel { position: absolute; z-index: 30; top: calc(100% + 7px); left: 0; visibility: hidden; opacity: 0; pointer-events: none; transform: translateY(-4px); transition: opacity .14s ease,transform .14s ease,visibility .14s; padding: 9px; border: 1px solid rgba(105,133,173,.36); border-radius: 12px; background: rgba(8,17,31,.98); box-shadow: 0 14px 32px rgba(0,0,0,.32); }
+.toolbar .chart-display-controls .control-popover:hover .control-popover-panel,
+.toolbar .chart-display-controls .control-popover:focus-within .control-popover-panel,
+.toolbar .chart-display-controls .control-popover.is-open .control-popover-panel { visibility: visible; opacity: 1; pointer-events: auto; transform: translateY(0); }
+.toolbar .chart-display-options { display: grid; gap: 7px; min-width: 260px; }
+.toolbar .chart-series-options,
+.toolbar .chart-line-toggles { display: flex; flex-wrap: wrap; gap: 6px; padding-left: 0; border-left: 0; }
+.toolbar .chart-line-toggles { padding-top: 7px; border-top: 1px solid rgba(105,133,173,.2); }
+.toolbar .chart-display-options button { flex: 0 0 auto; }
+
+/* Keep the chart controls as one compact, intentional control strip instead
+   of letting the buttons, legend, and pan hint wrap into unrelated gaps. */
+@media (min-width: 861px) {
+  .toolbar {
+    display: grid !important;
+    grid-template-columns: max-content max-content max-content minmax(0, 1fr) max-content;
+    grid-template-areas:
+      "interval range chart . zoom"
+      "legend legend legend . pan";
+    align-items: center;
+    gap: 10px 12px;
+    padding: 14px 16px 12px;
+  }
+  .toolbar #intervals { grid-area: interval; }
+  .toolbar #ranges { grid-area: range; }
+  .toolbar .chart-display-controls { grid-area: chart; }
+  .toolbar .zoom-tools { grid-area: zoom; }
+  .toolbar #chartLegend { grid-area: legend; }
+  .toolbar #panTools { grid-area: pan; }
+}
+
+/* A single visual language for the three summary controls.  The label stays
+   quiet and the selected value becomes the part that users scan first. */
+.toolbar .control-trigger,
+.toolbar .chart-display-controls .control-trigger {
+  height: 38px;
+  min-height: 38px;
+  max-width: 214px;
+  gap: 6px;
+  padding: 0 10px !important;
+  border-color: rgba(99, 136, 185, 0.26) !important;
+  border-radius: 8px !important;
+  background: rgba(9, 23, 43, 0.72) !important;
+  box-shadow: inset 0 1px 0 rgba(220, 238, 255, 0.035);
+}
+.toolbar .control-trigger:hover,
+.toolbar .control-popover.is-open .control-trigger,
+.toolbar .chart-display-controls .control-trigger:hover,
+.toolbar .chart-display-controls .control-popover.is-open .control-trigger {
+  border-color: rgba(71, 201, 255, 0.52) !important;
+  background: rgba(15, 40, 67, 0.92) !important;
+}
+.toolbar .control-trigger .control-label,
+.toolbar .chart-display-controls .control-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.035em;
+  color: #8fa5c3;
+}
+.toolbar .control-trigger b,
+.toolbar .chart-display-controls .control-trigger b {
+  max-width: 132px;
+  overflow: hidden;
+  font-size: 14px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #edf5ff;
+}
+.toolbar .control-trigger i,
+.toolbar .chart-display-controls .control-trigger i {
+  margin-left: 1px;
+  color: #6d89af;
+}
+.toolbar .zoom-tools {
+  width: max-content !important;
+  height: 38px;
+  flex: 0 0 auto !important;
+  justify-self: end;
+  margin-left: 0 !important;
+  padding: 2px 4px;
+  border: 1px solid rgba(99, 136, 185, 0.18);
+  border-radius: 8px;
+  background: rgba(9, 23, 43, 0.5);
+}
+.toolbar .zoom-tools button { min-width: 26px; height: 28px; padding: 3px 5px !important; font-size: 11px !important; }
+.toolbar .zoom-tools span { min-width: 30px; font-size: 9px; }
+.toolbar #chartLegend {
+  min-height: 22px;
+  padding-left: 2px;
+  gap: 10px;
+  font-size: 10px;
+}
+.toolbar .pan-tools {
+  width: max-content !important;
+  min-height: 28px;
+  padding: 1px 4px;
+  border: 1px solid rgba(99, 136, 185, 0.13);
+  border-radius: 7px;
+  background: transparent;
+}
+.toolbar .pan-tools #panLabel { min-width: 112px; font-size: 9px; }
+.toolbar .pan-tools button { min-width: 24px; height: 24px; padding: 2px 5px !important; font-size: 12px !important; }
+
+@media (max-width: 860px) {
+  .toolbar { gap: 8px; padding: 10px; }
+  .toolbar .control-trigger,
+  .toolbar .chart-display-controls .control-trigger { height: 36px; min-height: 36px; }
+  .toolbar .zoom-tools { height: 36px; }
+}
+
+/* Preserve the final neutral toolbar button geometry. */
+.toolbar button {
+  border: 1px solid transparent !important;
+  border-radius: 8px !important;
+}
+
+/* Preserve the final selected toolbar state. */
+.toolbar button.active {
+  border-color: rgba(111, 151, 218, 0.67) !important;
+  background: linear-gradient(
+    135deg,
+    rgba(66, 100, 162, 0.72),
+    rgba(45, 64, 112, 0.72)
+  ) !important;
+  color: #eaf1ff !important;
+}
+
+
+/* Retain the existing narrow-screen corner radius. */
+@media (max-width: 680px) {
+  .card,
+  .optional,
+  .backtest-details {
+    border-radius: 13px;
+  }
+}

@@ -7,6 +7,14 @@ const scrypt = promisify(scryptCallback);
 const { Pool } = pg;
 const json = value => JSON.stringify(value ?? {});
 const unjson = value => { try { return JSON.parse(value || '{}'); } catch { return {}; } };
+// 统一封装带超时的 fetch，避免外部推送服务卡住时无限挂起（推送在 worker 循环里，挂起会卡死单条投递）。
+// Single timeout-guarded fetch so an external push endpoint can never hang the delivery loop forever.
+export const fetchWithTimeout = async (url, options = {}, timeout = 8000) => {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeout);
+  try { return await fetch(url, { ...options, signal: ctrl.signal }); }
+  finally { clearTimeout(timer); }
+};
 const tokenHash = token => createHash('sha256').update(token).digest('hex');
 const parseCookies = value => Object.fromEntries((value || '').split(';').map(part => part.trim().split('=').map(decodeURIComponent)).filter(parts => parts.length === 2));
 
@@ -41,6 +49,9 @@ export async function createAlertStore() {
   if (!connectionString) return { enabled:false, reason:'DATABASE_URL is not configured' };
   let key; try { key = masterKey(); } catch (error) { return { enabled:false, reason:error.message }; }
   const pool = new Pool({ connectionString, max:Number(process.env.ALERT_DB_POOL_SIZE || 10), ssl:process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized:true } : undefined });
+  // 空闲连接异常必须监听，否则会冒泡成未处理事件导致进程崩溃。
+  // Idle connection errors must be observed; otherwise they surface as unhandled events and crash the process.
+  pool.on('error', error => console.error('Alert Postgres pool error:', error.message));
   const redis = createClient({ url:process.env.REDIS_URL || 'redis://redis:6379' });
   redis.on('error', error => console.error('Alert Redis error:', error.message));
   try { await pool.query('SELECT 1'); await redis.connect(); } catch (error) { await pool.end().catch(()=>{}); if(redis.isOpen) await redis.quit().catch(()=>{}); return { enabled:false, reason:`alert infrastructure unavailable: ${error.message}` }; }
@@ -68,7 +79,7 @@ export async function createAlertStore() {
     async setSendKey(userId,sendKey) { if(!/^SCT/i.test(String(sendKey||''))) throw Object.assign(new Error('请输入以 SCT 开头的 SendKey。'),{statusCode:400}); await pool.query('INSERT INTO alert_credentials(user_id,sendkey_ciphertext) VALUES($1,$2) ON CONFLICT(user_id) DO UPDATE SET sendkey_ciphertext=EXCLUDED.sendkey_ciphertext,updated_at=now()',[userId,encrypt(sendKey,key)]); },
     async deleteSendKey(userId) { await pool.query('DELETE FROM alert_credentials WHERE user_id=$1',[userId]); },
     async hasSendKey(userId) { return (await pool.query('SELECT 1 FROM alert_credentials WHERE user_id=$1',[userId])).rowCount>0; },
-    async testPush(userId,price) { const row=(await pool.query('SELECT sendkey_ciphertext FROM alert_credentials WHERE user_id=$1',[userId])).rows[0]; if(!row) throw Object.assign(new Error('请先保存云端 SendKey。'),{statusCode:400}); const current=Number(price); if(!Number.isFinite(current)||current<=0) throw Object.assign(new Error('实时价格无效。'),{statusCode:400}); const quote=current.toLocaleString('en-US',{maximumFractionDigits:2}),title=`价格告警【测试】 BTC当前价格 ${quote}`,response=await fetch(`https://sctapi.ftqq.com/${encodeURIComponent(decrypt(row.sendkey_ciphertext,key))}.send`,{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({title,short:`BTC 当前价格 ${quote} USDT`,desp:`${title}\n\n当前市价 ${quote} USDT\n\n该测试不会创建或触发规则。`})}),payload=await response.json().catch(()=>({})); if(!response.ok||Number(payload.code)!==0) throw Object.assign(new Error(payload.message||'云端测试推送请求失败。'),{statusCode:502}); return {pushId:payload.data?.pushid||null}; },
+    async testPush(userId,price) { const row=(await pool.query('SELECT sendkey_ciphertext FROM alert_credentials WHERE user_id=$1',[userId])).rows[0]; if(!row) throw Object.assign(new Error('请先保存云端 SendKey。'),{statusCode:400}); const current=Number(price); if(!Number.isFinite(current)||current<=0) throw Object.assign(new Error('实时价格无效。'),{statusCode:400}); const quote=current.toLocaleString('en-US',{maximumFractionDigits:2}),title=`价格告警【测试】 BTC当前价格 ${quote}`,response=await fetchWithTimeout(`https://sctapi.ftqq.com/${encodeURIComponent(decrypt(row.sendkey_ciphertext,key))}.send`,{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({title,short:`BTC 当前价格 ${quote} USDT`,desp:`${title}\n\n当前市价 ${quote} USDT\n\n该测试不会创建或触发规则。`})}),payload=await response.json().catch(()=>({})); if(!response.ok||Number(payload.code)!==0) throw Object.assign(new Error(payload.message||'云端测试推送请求失败。'),{statusCode:502}); return {pushId:payload.data?.pushid||null}; },
     async listRules(userId) { return (await pool.query('SELECT id,kind,target_price::float AS "targetPrice",repeat_enabled AS repeat,"cooldown_seconds"/60 AS "cooldownMinutes",enabled,last_triggered_at AS "lastTriggeredAt",last_triggered_price::float AS "lastTriggeredPrice",created_at AS "createdAt" FROM alert_rules WHERE user_id=$1 ORDER BY created_at DESC',[userId])).rows; },
     async createRule(userId,input) { const kind=String(input.kind||''), target=Number(input.targetPrice), repeat=Boolean(input.repeat), cooldown=Math.max(0,Math.round(Number(input.cooldownMinutes||5)*60)); if(!['price_reached','price_above','price_below','long_liquidation','short_liquidation'].includes(kind)||!Number.isFinite(target)||target<=0) throw Object.assign(new Error('规则参数无效。'),{statusCode:400}); const id=randomUUID(); await pool.query('INSERT INTO alert_rules(id,user_id,kind,target_price,repeat_enabled,cooldown_seconds) VALUES($1,$2,$3,$4,$5,$6)',[id,userId,kind,target,repeat,cooldown]); return id; },
     async deleteRule(userId,id) { if(!await ownRule(userId,id)) throw Object.assign(new Error('规则不存在。'),{statusCode:404}); await pool.query('DELETE FROM alert_rules WHERE id=$1 AND user_id=$2',[id,userId]); },

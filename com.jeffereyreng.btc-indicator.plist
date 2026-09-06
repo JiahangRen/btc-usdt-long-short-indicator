@@ -7,10 +7,10 @@
   <key>ProgramArguments</key>
   <array>
     <string>/Users/jeffereyreng/.local/share/mise/installs/node/26/bin/node</string>
-    <string>/Users/jeffereyreng/Documents/ChatGPT/btc指示器/server.mjs</string>
+    <string>/Users/jeffereyreng/ChatGPT/btc指示器/server.mjs</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>/Users/jeffereyreng/Documents/ChatGPT/btc指示器</string>
+  <string>/Users/jeffereyreng/ChatGPT/btc指示器</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>DATABASE_URL</key>
@@ -25,8 +25,8 @@
   <key>KeepAlive</key>
   <true/>
   <key>StandardOutPath</key>
-  <string>/Users/jeffereyreng/Documents/ChatGPT/btc指示器/btc-indicator.log</string>
+  <string>/Users/jeffereyreng/ChatGPT/btc指示器/btc-indicator.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/jeffereyreng/Documents/ChatGPT/btc指示器/btc-indicator.error.log</string>
+  <string>/Users/jeffereyreng/ChatGPT/btc指示器/btc-indicator.error.log</string>
 </dict>
 </plist>

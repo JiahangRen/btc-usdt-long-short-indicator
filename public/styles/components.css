@@ -1,0 +1,51 @@
+/* Reusable visual component contracts.
+   Legacy rules continue to win until each component has screenshot parity. */
+@layer btc-components {
+  /* Give every content card a shared neutral surface contract. */
+  .card {
+    border: 1px solid var(--border-subtle);
+    border-radius: 12px;
+    background: var(--bg-surface);
+  }
+
+  /* Preserve the dashboard's semantic market colors. */
+  .bull {
+    color: var(--bull);
+  }
+
+  .bear {
+    color: var(--bear);
+  }
+
+  .flat {
+    color: var(--text-secondary);
+  }
+
+  /* Keep compact indicator rows readable as label, value, and state. */
+  .metric {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    gap: 10px;
+    align-items: center;
+  }
+
+  /* Ensure status badges do not inherit italic emphasis. */
+  .badge {
+    border-radius: 999px;
+    font-style: normal;
+  }
+
+  /* Establish a consistent control affordance before component overrides. */
+  button,
+  select {
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    background: var(--bg-elevated);
+  }
+
+  /* Preserve the tooltip positioning contract above chart content. */
+  #chartTooltip {
+    position: absolute;
+    z-index: 5;
+  }
+}
