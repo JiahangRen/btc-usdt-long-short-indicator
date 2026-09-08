@@ -54,9 +54,11 @@ const state = {
   viewPoints: 361,
   source: "okx",
   candles: [],
+  marketMeta: null,
   ticker: null,
   lastGood: null,
   loading: false,
+  reloadQueued: false,
   zoom: 1,
 };
 const intervals = [
@@ -262,9 +264,12 @@ function renderTicker() {
     el.classList.add(pulse);
   });
   previousTickerPrice = t.last;
-  $("open24").textContent = money(t.open24h);
-  $("highlow").textContent = `${money(t.high24)} / ${money(t.low24)}`;
-  $("sourceUsed").textContent = state.lastGood.source;
+  const compactOpen24 = $("open24"),
+    compactHighLow = $("highlow"),
+    compactSource = $("sourceUsed");
+  if (compactOpen24) compactOpen24.textContent = money(t.open24h);
+  if (compactHighLow) compactHighLow.textContent = `${money(t.high24)} / ${money(t.low24)}`;
+  if (compactSource) compactSource.textContent = state.lastGood.source;
 }
 function diagnostics(payload) {
   const f = payload.failures || {},
@@ -301,6 +306,10 @@ async function loadCurrent() {
     const data = await r.json();
     if (!r.ok) throw data;
     state.candles = data.candles;
+    state.marketMeta = {
+      synthetic: Boolean(data.synthetic),
+      syntheticIntervalMs: Number(data.syntheticIntervalMs) || null,
+    };
     state.ticker = data.ticker;
     state.lastGood = data;
     $("chartError").hidden = true;
@@ -403,48 +412,38 @@ let hoverIndex = null,
   hoverPoint = null;
 function renderAnalysis() {
   const m = metrics(state.candles),
-    [label, cls] = classification(m.score),
-    direction = m.score >= 0 ? "做多" : "做空",
+    [, cls] = classification(m.score),
+    sigLabel = cls === "bull" ? tx("偏多", "Bullish") : cls === "bear" ? tx("偏空", "Bearish") : tx("观望", "Neutral"),
+    direction = m.score >= 0 ? tx("做多", "Long") : tx("做空", "Short"),
     strength = Math.min(100, Math.abs(m.score));
   $("signal").textContent =
-    `${label} ${m.score > 0 ? "+" : ""}${m.score.toFixed(2)}`;
+    `${sigLabel} ${m.score > 0 ? "+" : ""}${m.score.toFixed(2)}`;
   $("signal").className = `signal ${cls}`;
   $("signalReason").innerHTML =
-    `<span>EMA20 ${money(m.e20)} · EMA50 ${money(m.e50)} · RSI(14) ${m.rsi.toFixed(2)} · MACD ${m.macd.toFixed(2)}</span><div class="signal-gauge"><div class="gauge-top"><b>做空 −100.00</b><span>当前：${direction} ${m.score > 0 ? "+" : ""}${m.score.toFixed(2)}</span><b>做多 +100.00</b></div><div class="gauge-track"><i style="left:${(m.score + 100) / 2}%"></i></div><div class="gauge-strength"><em style="width:${strength}%"></em><span>信号强度：${strength.toFixed(2)}</span></div></div><small>基于当前 K 线的确定性规则打分，不是机器学习预测。</small>`;
+    `<span>EMA20 ${money(m.e20)} · EMA50 ${money(m.e50)} · RSI(14) ${m.rsi.toFixed(2)} · MACD ${m.macd.toFixed(2)}</span><div class="signal-gauge"><div class="gauge-top"><b>${tx("做空", "Short")} −100.00</b><span>${tx("当前", "Now")}：${direction} ${m.score > 0 ? "+" : ""}${m.score.toFixed(2)}</span><b>${tx("做多", "Long")} +100.00</b></div><div class="gauge-track"><i style="left:${(m.score + 100) / 2}%"></i></div><div class="gauge-strength"><em style="width:${strength}%"></em><span>${tx("信号强度", "Signal strength")}：${strength.toFixed(2)}</span></div></div><small>${tx("基于当前 K 线的确定性规则打分，不是机器学习预测。", "Deterministic rule score from the current candle, not a machine-learning forecast.")}</small>`;
   $("sl").textContent = money(m.close - m.atr * 1.5);
   $("tp").textContent = money(m.close + m.atr * 3);
   const rows = [
-    ["EMA20", money(m.e20), m.close >= m.e20 ? "看多" : "看空"],
-    ["EMA50", money(m.e50), m.close >= m.e50 ? "看多" : "看空"],
-    [
-      "EMA200",
-      money(m.e200),
-      Number.isFinite(m.e200) && m.close >= m.e200 ? "看多" : "中性",
-    ],
-    [
-      "RSI(14)",
-      m.rsi.toFixed(2),
-      m.rsi > 55 ? "看多" : m.rsi < 45 ? "看空" : "中性",
-    ],
-    [
-      "布林位置",
-      (m.bb * 100).toFixed(2) + "%",
-      m.bb > 0.6 ? "看多" : m.bb < 0.4 ? "看空" : "中性",
-    ],
-    ["ATR(14)", money(m.atr), "中性"],
+    ["EMA20", money(m.e20), m.close >= m.e20 ? "bull" : "bear"],
+    ["EMA50", money(m.e50), m.close >= m.e50 ? "bull" : "bear"],
+    ["EMA200", money(m.e200), Number.isFinite(m.e200) && m.close >= m.e200 ? "bull" : "flat"],
+    ["RSI(14)", m.rsi.toFixed(2), m.rsi > 55 ? "bull" : m.rsi < 45 ? "bear" : "flat"],
+    [tx("布林位置", "Bollinger position"), (m.bb * 100).toFixed(2) + "%", m.bb > 0.6 ? "bull" : m.bb < 0.4 ? "bear" : "flat"],
+    ["ATR(14)", money(m.atr), "flat"],
   ];
+  const dirLabel = { bull: tx("看多", "Bullish"), bear: tx("看空", "Bearish"), flat: tx("中性", "Neutral") };
   $("indicators").innerHTML = rows
     .map(
-      ([k, v, tag]) =>
-        `<div class="metric"><span>${k}</span><b>${v}</b><i class="badge ${tag === "看多" ? "bull" : tag === "看空" ? "bear" : "flat"}">${tag}</i></div>`,
+      ([k, v, key]) =>
+        `<div class="metric"><span>${k}</span><b>${v}</b><i class="badge ${key}">${dirLabel[key]}</i></div>`,
     )
     .join("");
   const tags = [
-    ["5分", 20],
-    ["15分", 60],
-    ["1时", 240],
-    ["4时", 960],
-    ["1日", Math.min(1439, state.candles.length - 1)],
+    [tx("5分", "5m"), 20],
+    [tx("15分", "15m"), 60],
+    [tx("1时", "1h"), 240],
+    [tx("4时", "4h"), 960],
+    [tx("1日", "1d"), Math.min(1439, state.candles.length - 1)],
   ]
     .map(([label, n]) => {
       const start =
@@ -621,7 +620,7 @@ function buttons() {
       rangePrefix = tx("查看范围", "Visible range"),
       intervalPrefix = tx("K 线周期", "Candle interval");
     if (raw.startsWith(rangePrefix) || raw.startsWith(intervalPrefix)) return;
-    coverage.textContent = `${state.range ? `${rangePrefix} ${state.range}` : `${intervalPrefix} ${state.interval}`} · ${raw}`;
+    coverage.textContent = `${state.range ? `${rangePrefix} ${txInterval(state.range)}` : `${intervalPrefix} ${txInterval(state.interval)}`} · ${raw}`;
   }).observe(coverage, { childList: true, characterData: true, subtree: true });
 })();
 (() => {
@@ -909,7 +908,7 @@ async function loadCorrelation() {
     details = document.createElement("details");
   card.className = "card leverage-card";
   card.innerHTML =
-    '<div class="forecast-head leverage-head"><div><h2>高杠杆强平缓冲参考</h2><p>逐仓近似演示；实际强平以标记价格、仓位档位、费用和保证金模式为准。</p></div><div class="leverage-controls"><label class="leverage-exchange">交易所 <select id="leverageExchange"><option value="binance">Binance</option><option value="okx">OKX</option><option value="coinbase">Coinbase</option></select></label></div></div><p id="leverageMethod" class="leverage-method">正在根据近期震荡幅度计算缓冲…</p><div id="leverageGrid" class="leverage-grid"></div>';
+    '<div class="forecast-head leverage-head"><div><h2 data-zh="高杠杆强平缓冲参考" data-en="High-leverage liquidation buffer">高杠杆强平缓冲参考</h2><p data-zh="逐仓近似演示；实际强平以标记价格、仓位档位、费用和保证金模式为准。" data-en="Isolated-margin approximation; actual liquidation depends on mark price, position tier, fees, and margin mode.">逐仓近似演示；实际强平以标记价格、仓位档位、费用和保证金模式为准。</p></div><div class="leverage-controls"><label class="leverage-exchange">交易所 <select id="leverageExchange"><option value="binance">Binance</option><option value="okx">OKX</option><option value="coinbase">Coinbase</option></select></label></div></div><p id="leverageMethod" class="leverage-method" data-zh="正在根据近期震荡幅度计算缓冲…" data-en="Computing buffer from recent volatility…">正在根据近期震荡幅度计算缓冲…</p><div id="leverageGrid" class="leverage-grid"></div>';
   details.id = "leverageDetails";
   details.className = "position-details leverage-details";
   // This initializer runs before the language helper exists; applyLanguage()
@@ -960,10 +959,23 @@ function locale() {
 }
 function applyTheme() {
   document.documentElement.dataset.theme = themeMode;
+  applyAmbientLight();
   localStorage.setItem("btc_theme", themeMode);
   const b = $("themeToggle");
   if (b)
     b.textContent = `◐ ${locale().theme[["auto", "light", "dark"].indexOf(themeMode)]}`;
+}
+function applyAmbientLight() {
+  const hour = new Date().getHours();
+  const ambientTime =
+    hour >= 6 && hour < 10
+      ? "dawn"
+      : hour >= 10 && hour < 17
+        ? "day"
+        : hour >= 17 && hour < 21
+          ? "dusk"
+          : "night";
+  document.documentElement.dataset.ambientTime = ambientTime;
 }
 function syncFullscreenButton() {
   const b = $("fullscreenToggle");
@@ -1008,7 +1020,7 @@ function applyLanguage() {
   const c = document.querySelector(".correlation-card h2");
   if (c) c.textContent = x.correlation;
   const b = $("langToggle");
-  if (b) b.textContent = `⌗ ${uiLang === "zh" ? "EN" : "中文"}`;
+  if (b) b.textContent = uiLang === "zh" ? "EN" : "中文";
   applyTheme();
   syncFullscreenButton();
 }
@@ -1125,6 +1137,7 @@ function updateClocks() {
   updateClocks();
   loadUsEquityStrip();
   setInterval(updateClocks, 1000);
+  setInterval(applyAmbientLight, 10 * 60 * 1000);
   setInterval(loadUsEquityStrip, 10_000);
 })();
 
@@ -1132,6 +1145,145 @@ function updateClocks() {
 let chartSelection = null,
   requestLatency = 0;
 const tx = (zh, en) => (uiLang === "zh" ? zh : en);
+// 通用「按 key 取本地化名」辅助：maps 为 { key: [zh, en] }，缺失时回退到 key 本身。
+const tname = (maps, key) => {
+  const entry = maps && maps[key];
+  if (!entry) return key;
+  return Array.isArray(entry) ? (uiLang === "zh" ? entry[0] : entry[1]) : entry;
+};
+// 宏观事件（FOMC / CPI / 非农等）双语名，key 与 /api/fed-calendar 返回一致。
+const MACRO_EVENT_NAMES = {
+  fomc: ["FOMC 议息会议", "FOMC meeting"],
+  cpi: ["美国 CPI 公布", "US CPI release"],
+  payrolls: ["美国非农就业", "US nonfarm payrolls"],
+  ppi: ["美国 PPI 公布", "US PPI release"],
+  gdp: ["美国 GDP 初值", "US GDP (advance)"],
+  retail: ["美国零售销售", "US retail sales"],
+  housing: ["美国房屋数据", "US housing data"],
+  minutes: ["FOMC 会议纪要", "FOMC minutes"],
+  speech: ["美联储官员讲话", "Fed speaker"],
+};
+// 跨市场环境指标（传统市场 + 加密）双语名，key 与 /api/fed-calendar marketSignals 返回一致。
+const ENV_SIGNAL_NAMES = {
+  gold: ["黄金", "Gold"],
+  dxy: ["美元指数", "US Dollar Index"],
+  "btc-dominance": ["BTC 总市值占比", "BTC dominance"],
+  "crypto-total-cap": ["全网加密总市值", "Total crypto market cap"],
+  "crypto-volume": ["全网 24h 成交额", "Total 24h crypto volume"],
+  "exchange-btc-reserve": ["交易所 BTC 钱包余额", "Exchange BTC reserves"],
+};
+// 周期/范围内部标签（中文 token → 英文显示）。Interval/range internal tokens (zh → en display).
+const INTERVAL_LABELS = {
+  "5分": "5m", "15分": "15m", "30分": "30m", "1时": "1h", "3时": "3h",
+  "6时": "6h", "12时": "12h", "1小时": "1h", "3小时": "3h",
+  "5分钟": "5 min", "15分钟": "15 min", "30分钟": "30 min",
+  "1小时": "1 hour", "3小时": "3 hours",
+};
+const txInterval = (v) => (uiLang === "zh" ? v : INTERVAL_LABELS[v] || v);
+// 跨市场指标的数据频率（cadence）与不可用说明（detail）双语映射。
+// Bilingual maps for cross-market indicator cadence labels and unavailable details.
+const SIGNAL_CADENCE = {
+  "日线": "Daily",
+  "快照": "Snapshot",
+  "24h 快照": "24h snapshot",
+  "实时": "Live",
+};
+const SIGNAL_DETAIL = {
+  "需要可验证的链上数据订阅；当前未接入 Key":
+    "Needs a verifiable on-chain data subscription; no API key connected yet",
+};
+// 研究 / A-B 实验中心里由后端返回的中文名称与描述，做中英映射。
+// Chinese experiment names/candidates returned by the research backend, with EN equivalents.
+const RESEARCH_EXP_NAMES = {
+  "当前规则信号（旧口径）": "Current rule signal (legacy)",
+  "GitHub 规则信号对照（Walk-forward）": "GitHub rule-signal comparison (walk-forward)",
+  "当前规则信号（严格对照）": "Current rule signal (strict comparison)",
+  "短线机器预测": "Short-horizon ML forecast",
+  "多周期概率预测": "Multi-timeframe probability forecast",
+  "多周期共振": "Multi-timeframe resonance",
+  "形态与关键位": "Patterns & key levels",
+  "OKX 微观结构": "OKX microstructure",
+  "恐惧贪婪 / 新闻": "Fear & Greed / News",
+  "美股联动": "US equity correlation",
+  "强平缓冲": "Liquidation buffer",
+  "宏观日历": "Macro calendar",
+  "图表、周期涨幅、指标明细": "Charts, period returns, indicator details",
+};
+const RESEARCH_EXP_CANDS = {
+  "旧版近似基线；仅保留历史参照，不作为升级依据":
+    "Legacy approximate baseline; kept only as historical reference, not an upgrade target",
+  "A：GitHub v2.4.0 即时分数；B：当前 ±45 / ±28 稳定化核心与连续收盘确认。相同 15m 已收盘 K 线、相同 1h / 4h / 24h 结算与 0.08% 往返成本。":
+    "A: GitHub v2.4.0 instant score; B: current ±45/±28 stabilized core with consecutive-close confirmation. Same 15m closed candles, same 1h/4h/24h settlement and 0.08% round-trip cost.",
+  "线上同分数基线 + 连续 3 根收盘确认 + EMA 排列 / RSI / 成交量确认":
+    "Live same-score baseline + 3 consecutive close confirmations + EMA alignment / RSI / volume confirmation",
+  "仅已收盘 K 线的波动归一化候选":
+    "Volatility-normalized candidate from closed candles only",
+  "时间顺序、波动归一化的校准候选":
+    "Time-ordered, volatility-normalized calibration candidate",
+  "按趋势强度与波动率加权的一致性":
+    "Consistency weighted by trend strength and volatility",
+  "突破需成交量、ATR 与收盘确认":
+    "Breakouts need volume, ATR, and close confirmation",
+  "OFI、流动性质量与点差过滤":
+    "OFI, liquidity quality, and spread filtering",
+  "事件分类、时间衰减、价格吸收标记":
+    "Event classification, time decay, price-absorption markers",
+  "滚动相关、正则化与市场状态过滤":
+    "Rolling correlation, regularization, and market-state filtering",
+  "分位数波动与状态自适应缓冲":
+    "Quantile volatility with state-adaptive buffer",
+  "事件前后波动区间模型":
+    "Pre/post-event volatility-range model",
+  "数据一致性、缺失率与公式复算":
+    "Data consistency, missing-rate, and formula recomputation",
+};
+const RESEARCH_WINDOW_LABELS = {
+  "约 15 分钟": "~15 min",
+  "约 1 小时": "~1 hour",
+  "约 4 小时": "~4 hours",
+  "约 1 天": "~1 day",
+  "约 1 日": "~1 day",
+};
+const txExpName = (v) => (uiLang === "zh" ? v : RESEARCH_EXP_NAMES[v] || v);
+const txExpCand = (v) => (uiLang === "zh" ? v : RESEARCH_EXP_CANDS[v] || v);
+const txWinLabel = (v) => (uiLang === "zh" ? v : RESEARCH_WINDOW_LABELS[v] || v);
+// 实验备注（note）双语映射。
+// Bilingual map for experiment notes (note) from the research backend.
+const RESEARCH_EXP_NOTES = {
+  "先以当前可用 OFI 快照记录；深度历史成熟前不作升级结论":
+    "Recording with current OFI snapshots first; no upgrade decision until deep history matures",
+  "等待 BTC、SPY、QQQ 的同步日线快照":
+    "Awaiting synchronized daily snapshots of BTC, SPY, QQQ",
+  "按实际触及率验证风险覆盖率，不用方向准确率":
+    "Validated by realized hit rate / risk coverage, not directional accuracy",
+  "按波动覆盖率验证，不用涨跌准确率":
+    "Validated by volatility coverage, not up/down accuracy",
+  "描述 / 公式型：不适用方向准确率":
+    "Descriptive/formula module: directional accuracy does not apply",
+  "每个周期需 30 个已配对结算样本；当前样本不足。":
+    "Each horizon needs 30 paired settled samples; current samples are insufficient.",
+};
+// 评估结论（verdict.reason / verdict.label）双语映射。
+// Bilingual map for evaluation verdict reasons and labels from the research backend.
+const RESEARCH_VERDICT_REASON = {
+  "样本量已达到最低门槛，但候选尚未同时达到正 Brier Skill、成本后正收益与市场状态稳健性要求。":
+    "Sample size meets the minimum threshold, but the candidate does not yet achieve positive Brier Skill, post-cost positive return, and market-state robustness at the same time.",
+  "每个周期及已覆盖市场状态均需 100 个已结算配对样本。":
+    "Each horizon and covered market state requires 100 settled paired samples.",
+  "每个已覆盖市场状态均有足量样本":
+    "Every covered market state has sufficient samples",
+};
+const RESEARCH_VERDICT_LABEL = {
+  "继续影子评估": "Continue shadow scoring",
+  "不建议升级": "Not recommended for upgrade",
+};
+const txExpNote = (v) => (uiLang === "zh" ? v : RESEARCH_EXP_NOTES[v] || v);
+const txVerdictReason = (v) =>
+  uiLang === "zh" ? v : RESEARCH_VERDICT_REASON[v] || v;
+const txVerdictLabel = (v) =>
+  uiLang === "zh" ? v : RESEARCH_VERDICT_LABEL[v] || v;
+const txMap = (map, value, fallback) =>
+  value == null ? fallback : (uiLang === "zh" ? value : (map[value] || value));
 function pointTime(ms) {
   return new Intl.DateTimeFormat(uiLang === "zh" ? "zh-CN" : "en-US", {
     month: "2-digit",
@@ -1158,7 +1310,7 @@ function showFloatingHelpTip(dot) {
   if (!text) return;
   const tip = ensureFloatingHelpTip();
   activeHelpDot = dot;
-  tip.textContent = text;
+  tip.innerHTML = text;
   tip.hidden = false;
   const rect = dot.getBoundingClientRect(),
     margin = 12,
@@ -1228,6 +1380,28 @@ function ensureInteractionUI() {
   // The former short-horizon prediction is deliberately not shown: it is not
   // part of the rule signal and invited an unwarranted trading interpretation.
   $("microForecast")?.remove();
+  if (signalCard) {
+    const signalHeading = signalCard.querySelector("h2");
+    addHelp(
+      signalHeading,
+      `<b>综合信号状态说明</b><br><br>` +
+      `<b style="color:#00d4aa">● 做多 +分数</b> / <b style="color:#ff4d6a">● 做空 +分数</b><br>已确认信号 — 多周期（15m/1h）交叉验证通过，综合评分露出。最强状态，可作参考。<br><br>` +
+      `<b style="color:#00d4aa">● 做多趋势</b> / <b style="color:#ff4d6a">● 做空趋势</b><br>已确认弱信号 — 当前周期连续 3 根同向，但其他周期未跟上。方向锁定但置信度中等。<br><br>` +
+      `<b style="color:#00d4aa">● 偏多趋势 · 待收盘</b> / <b style="color:#ff4d6a">● 偏空趋势 · 待收盘</b><br>观察期 — 当前周期算出方向，但还未通过多周期验证。等 K 线收盘后可能升级或回落。<br><br>` +
+      `<b>● 观望 · 等待确认</b><br>无明确方向（评分在 ±45 之间），指标中性，不触发任何信号。<br><br>` +
+      `<b style="color:var(--text-muted)">● 重新评估中</b><br>信号曾被清除/止损，正在重新积累 K 线（需 2 根），期间不给出新信号。<br><br>` +
+      `<hr style="border-color:var(--border);margin:8px 0"><b>速查：</b>带数字 = 已确认最强信号；带「待收盘」= 还在观察期；带「趋势」二字无数字 = 弱确认<br><br>` +
+      `<small>提示：信号仅基于技术指标（EMA/RSI/MACD/布林），不构成投资建议。</small>`,
+      `<b>Rule Signal States</b><br><br>` +
+      `<b style="color:#00d4aa">● Long +score</b> / <b style="color:#ff4d6a">● Short +score</b><br>Confirmed — multi-timeframe (15m/1h) cross-validated. Strongest state.<br><br>` +
+      `<b style="color:#00d4aa">● Long trend</b> / <b style="color:#ff4d6a">● Short trend</b><br>Weak confirmation — 3 consecutive same-direction candles on base TF only.<br><br>` +
+      `<b style="color:#00d4aa">● Bullish trend · close pending</b> / <b style="color:#ff4d6a">● Bearish trend · close pending</b><br>Observation — direction detected but awaiting multi-TF confirmation after candle close.<br><br>` +
+      `<b>● Wait · confirmation pending</b><br>No clear direction (score between ±45). Neutral.<br><br>` +
+      `<b style="color:var(--text-muted)">● Re-evaluating</b><br>Signal was invalidated; re-accumulating candles (need 2).<br><br>` +
+      `<hr style="border-color:var(--border);margin:8px 0"><b>Quick ref:</b> +score = confirmed (strongest); "close pending" = observing; "trend" without score = weak confirmation<br><br>` +
+      `<small>Note: signals are based on technical indicators only, not investment advice.</small>`,
+    );
+  }
   document
     .querySelectorAll(".optional h2,.change-card h2")
     .forEach((x) =>
@@ -1369,13 +1543,20 @@ renderTicker = function () {
     el.classList.add(pulse);
   });
   previousTickerPrice = t.last;
-  $("open24").textContent = money(t.open24h);
-  $("highlow").textContent = `${money(t.high24)} / ${money(t.low24)}`;
-  $("sourceUsed").textContent = state.lastGood.source;
+  const compactOpen24 = $("open24"),
+    compactHighLow = $("highlow"),
+    compactSource = $("sourceUsed");
+  if (compactOpen24) compactOpen24.textContent = money(t.open24h);
+  if (compactHighLow) compactHighLow.textContent = `${money(t.high24)} / ${money(t.low24)}`;
+  if (compactSource) compactSource.textContent = state.lastGood.source;
 };
 loadCurrent = async function () {
-  if (state.loading) return;
+  if (state.loading) {
+    state.reloadQueued = true;
+    return false;
+  }
   state.loading = true;
+  const requestKey = `${state.interval}:${state.limit}:${state.source}`;
   buttons();
   const started = performance.now();
   $("connection").textContent = tx("正在刷新行情…", "Refreshing market…");
@@ -1386,11 +1567,19 @@ loadCurrent = async function () {
       limit: state.limit,
     });
     if (state.source) q.set("source", state.source);
-    const r = await apiFetch("/api/market?" + q);
+    const r = await apiFetch("/api/market?" + q, 12_000);
     const data = await r.json();
     if (!r.ok) throw data;
+    if (requestKey !== `${state.interval}:${state.limit}:${state.source}`) {
+      state.reloadQueued = true;
+      return false;
+    }
     requestLatency = Math.round(performance.now() - started);
     state.candles = data.candles;
+    state.marketMeta = {
+      synthetic: Boolean(data.synthetic),
+      syntheticIntervalMs: Number(data.syntheticIntervalMs) || null,
+    };
     state.ticker = data.ticker;
     state.lastGood = data;
     renderTicker();
@@ -1412,6 +1601,7 @@ loadCurrent = async function () {
     $("connection").textContent =
       `${mode} · ${requestLatency} ms · ${tx("K线/指标每10秒更新；价格每秒刷新", "Candles/indicators every 10s; quote every second")}`;
     $("freshness").textContent = pointTime(data.fetchedAt);
+    return true;
   } catch (e) {
     $("connection").textContent = tx(
       "行情暂不可用，保留最近成功图表",
@@ -1423,8 +1613,13 @@ loadCurrent = async function () {
         `${tx("无法获取数据。", "Could not fetch data. ")}${e.error || ""}`;
     }
     $("diagnostics").textContent = JSON.stringify(e.failures || e, null, 2);
+    return false;
   } finally {
     state.loading = false;
+    if (state.reloadQueued) {
+      state.reloadQueued = false;
+      queueMicrotask(() => loadCurrent());
+    }
   }
 };
 buttons = function () {
@@ -1504,7 +1699,7 @@ applyLanguage = function () {
       "High-leverage liquidation buffer",
     );
   const b = $("langToggle");
-  if (b) b.textContent = `⌗ ${uiLang === "zh" ? "EN" : "中文"}`;
+  if (b) b.textContent = uiLang === "zh" ? "EN" : "中文";
   applyTheme();
   buttons();
   if (state.candles.length) renderAnalysis();
@@ -1953,7 +2148,7 @@ setTimeout(() => {
   const card = document.createElement("section");
   card.id = "wechatAlertCard";
   card.className = "card wechat-alert-card";
-  card.innerHTML = `<div class="forecast-head"><div><h2>${tx("消息推送", "Message alerts")}</h2><p id="localAlertDescription">${tx("未登录时，SendKey 与规则只保存在本机浏览器；登录后可保存到云端。", "When signed out, the SendKey and rules stay in this browser; sign in to save them to the cloud.")}</p></div><span id="localAlertState" class="badge flat"></span></div><form id="localKeyForm" class="wechat-key-form"><label>Server酱 SendKey<input name="key" type="password" autocomplete="off" placeholder="SCT…"></label><a href="https://sct.ftqq.com/sendkey" target="_blank" rel="noopener">${tx("获取 SendKey", "Get SendKey")}</a><button id="localKeySave">${tx("仅保存到本机", "Save locally only")}</button><button type="button" id="localAlertTest">${tx("测试当前市价", "Test current price")}</button><button type="button" id="localAlertClear" class="danger">${tx("清除本机 Key", "Clear local Key")}</button></form><div class="alert-rule-toolbar"><b>₿ BTCUSDT ${tx("永续", "Perpetual")}</b><div><button type="button" id="clearLocalAlerts" class="danger">${tx("批量全删", "Delete all")}</button><button type="button" id="openLocalAlert">＋ ${tx("添加预警", "Add alert")}</button></div></div><div id="localAlertList" class="wechat-alert-detail"></div><div id="localAlertModal" class="alert-composer" hidden><section><header><b>${tx("添加预警", "Add alert")}</b><button type="button" id="closeLocalAlert">×</button></header><p class="alert-symbol">₿ <b>BTCUSDT ${tx("永续", "Perpetual")}</b></p><form id="localAlertForm"><label>${tx("预警类型", "Alert type")}<select name="kind"><option value="price_reached">${tx("价格达到", "Price reached")}</option><option value="price_above">${tx("价格上涨至", "Price rises to")}</option><option value="price_below">${tx("价格下跌至", "Price falls to")}</option><option value="long_liquidation">${tx("多头爆仓价", "Long liquidation")}</option><option value="short_liquidation">${tx("空头爆仓价", "Short liquidation")}</option></select></label><label>${tx("价格", "Price")}<span class="mark-price">${tx("市价", "Mark")} <button type="button" id="useLocalMark">--</button></span><input name="target" type="number" inputmode="decimal" min="0" step="0.01" required placeholder="80000"><em>USDT</em></label><div class="frequency"><b>${tx("频率", "Frequency")}</b><div><button type="button" data-local-frequency="once" class="active">${tx("仅提醒一次", "Once")}</button><button type="button" data-local-frequency="repeat">${tx("重复提醒", "Repeat")}</button></div></div><label id="localCooldown" hidden>${tx("冷却时间（分钟）", "Cooldown (minutes)")}<input name="cooldown" type="number" inputmode="numeric" min="1" step="1" value="5"></label><label class="voice-rule-option"><input name="voiceEnabled" type="checkbox" checked>${tx("触发时语音播报", "Speak when triggered")}</label><button class="alert-submit">${tx("添加", "Add")}</button></form></section></div>`;
+  card.innerHTML = `<div class="forecast-head"><div><h2>${tx("消息推送", "Message alerts")}</h2><p id="localAlertDescription">${tx("未登录时，SendKey 与规则只保存在本机浏览器；登录后可保存到云端。", "When signed out, the SendKey and rules stay in this browser; sign in to save them to the cloud.")}</p></div><span id="localAlertState" class="badge flat"></span></div><form id="localKeyForm" class="wechat-key-form"><label>${tx("Server酱 SendKey", "ServerChan SendKey")}<input name="key" type="password" autocomplete="off" placeholder="SCT…"></label><a href="https://sct.ftqq.com/sendkey" target="_blank" rel="noopener">${tx("获取 SendKey", "Get SendKey")}</a><button id="localKeySave">${tx("仅保存到本机", "Save locally only")}</button><button type="button" id="localAlertTest">${tx("测试当前市价", "Test current price")}</button><button type="button" id="localAlertClear" class="danger">${tx("清除本机 Key", "Clear local Key")}</button></form><div class="alert-rule-toolbar"><b>₿ BTCUSDT ${tx("永续", "Perpetual")}</b><div><button type="button" id="clearLocalAlerts" class="danger">${tx("批量全删", "Delete all")}</button><button type="button" id="openLocalAlert">＋ ${tx("添加预警", "Add alert")}</button></div></div><div id="localAlertList" class="wechat-alert-detail"></div><div id="localAlertModal" class="alert-composer" hidden><section><header><b>${tx("添加预警", "Add alert")}</b><button type="button" id="closeLocalAlert">×</button></header><p class="alert-symbol">₿ <b>BTCUSDT ${tx("永续", "Perpetual")}</b></p><form id="localAlertForm"><label>${tx("预警类型", "Alert type")}<select name="kind"><option value="price_reached">${tx("价格达到", "Price reached")}</option><option value="price_above">${tx("价格上涨至", "Price rises to")}</option><option value="price_below">${tx("价格下跌至", "Price falls to")}</option><option value="long_liquidation">${tx("多头爆仓价", "Long liquidation")}</option><option value="short_liquidation">${tx("空头爆仓价", "Short liquidation")}</option></select></label><label>${tx("价格", "Price")}<span class="mark-price">${tx("市价", "Mark")} <button type="button" id="useLocalMark">--</button></span><input name="target" type="number" inputmode="decimal" min="0" step="0.01" required placeholder="80000"><em>USDT</em></label><div class="frequency"><b>${tx("频率", "Frequency")}</b><div><button type="button" data-local-frequency="once" class="active">${tx("仅提醒一次", "Once")}</button><button type="button" data-local-frequency="repeat">${tx("重复提醒", "Repeat")}</button></div></div><label id="localCooldown" hidden>${tx("冷却时间（分钟）", "Cooldown (minutes)")}<input name="cooldown" type="number" inputmode="numeric" min="1" step="1" value="5"></label><label class="voice-rule-option"><input name="voiceEnabled" type="checkbox" checked>${tx("触发时语音播报", "Speak when triggered")}</label><button class="alert-submit">${tx("添加", "Add")}</button></form></section></div>`;
   const submitAlert = card.querySelector(".alert-submit"),
     alertActions = document.createElement("div");
   alertActions.className = "alert-actions";
@@ -1989,34 +2184,42 @@ setTimeout(() => {
   };
   const label = (kind) =>
     ({
-      price_reached: "价格达到",
-      price_above: "价格上涨至",
-      price_below: "价格下跌至",
-      long_liquidation: "多头爆仓价",
-      short_liquidation: "空头爆仓价",
+      price_reached: tx("价格达到", "Price reaches"),
+      price_above: tx("价格上涨至", "Price rises to"),
+      price_below: tx("价格下跌至", "Price falls to"),
+      long_liquidation: tx("多头爆仓价", "Long liquidation"),
+      short_liquidation: tx("空头爆仓价", "Short liquidation"),
     })[kind] || kind;
   const alertCategory = (kind) =>
     kind === "long_liquidation" || kind === "short_liquidation"
-      ? "爆仓告警"
-      : "价格告警";
+      ? tx("爆仓告警", "Liquidation alert")
+      : tx("价格告警", "Price alert");
   const alertPhrase = (kind, price) =>
-    ({
-      price_reached: `BTC价格达到 ${price}`,
-      price_above: `BTC价格上涨至 ${price}`,
-      price_below: `BTC价格下跌至 ${price}`,
-      long_liquidation: `BTC价格接近多头爆仓价 ${price}`,
-      short_liquidation: `BTC价格接近空头爆仓价 ${price}`,
-    })[kind] || `BTC价格 ${price}`;
+    uiLang === "zh"
+      ? ({
+          price_reached: `BTC价格达到 ${price}`,
+          price_above: `BTC价格上涨至 ${price}`,
+          price_below: `BTC价格下跌至 ${price}`,
+          long_liquidation: `BTC价格接近多头爆仓价 ${price}`,
+          short_liquidation: `BTC价格接近空头爆仓价 ${price}`,
+        })[kind] || `BTC价格 ${price}`
+      : ({
+          price_reached: `BTC price reaches ${price}`,
+          price_above: `BTC price rises to ${price}`,
+          price_below: `BTC price falls to ${price}`,
+          long_liquidation: `BTC price nears long liquidation ${price}`,
+          short_liquidation: `BTC price nears short liquidation ${price}`,
+        })[kind] || `BTC price ${price}`;
   const alertTitle = (kind, target, { test = false } = {}) => {
     const phrase = alertPhrase(kind, target);
-    if (test) return `${alertCategory(kind)}【测试】 ${phrase}`;
+    if (test) return `${alertCategory(kind)}【${tx("测试", "Test")}】 ${phrase}`;
     return kind === "long_liquidation" || kind === "short_liquidation"
-      ? `【爆仓】${phrase.replace(/^BTC价格/, "")}`
-      : `【价格】${phrase}`;
+      ? `【${tx("爆仓", "Liquidation")}】${phrase.replace(/^BTC价格/, uiLang === "zh" ? "BTC价格" : "BTC price")}`
+      : `【${tx("价格", "Price")}】${phrase}`;
   };
   const triggerText = (rule) =>
     rule.lastTriggeredAt
-      ? `${new Date(rule.lastTriggeredAt).toLocaleString("zh-CN", { hour12: false })} · 实时 ${Number.isFinite(Number(rule.lastTriggeredPrice)) ? `${fmt(rule.lastTriggeredPrice)} USDT` : "--"}`
+      ? `${new Date(rule.lastTriggeredAt).toLocaleString(uiLang === "zh" ? "zh-CN" : "en-US", { hour12: false })} · ${tx("实时", "Live")} ${Number.isFinite(Number(rule.lastTriggeredPrice)) ? `${fmt(rule.lastTriggeredPrice)} USDT` : "--"}`
       : "";
   const render = () => {
     const ready = /^SCT/i.test((localStorage.getItem(keyStore) || "").trim()),
@@ -2026,26 +2229,26 @@ setTimeout(() => {
     stateEl.className = `badge ${cloudCount || ready || cloudReady ? "bull" : "flat"}`;
     stateEl.textContent = cloudSession.loggedIn
       ? cloudReady
-        ? `云端接管 ${cloudCount} 条`
-        : "云端待配置 Key"
+        ? tx(`云端接管 ${cloudCount} 条`, `Cloud takes over ${cloudCount} rule(s)`)
+        : tx("云端待配置 Key", "Cloud key not set")
       : ready
-        ? "本机推送已就绪"
-        : "未填本机 Key";
+        ? tx("本机推送已就绪", "Local push ready")
+        : tx("未填本机 Key", "No local key set");
     description.textContent = cloudSession.loggedIn
-      ? "已登录：当前 SendKey 会加密保存到云端；云端规则会在网页关闭后继续监测并推送。"
-      : "未登录时，SendKey 与规则只保存在本机浏览器；登录后可保存到云端。";
+      ? tx("已登录：当前 SendKey 会加密保存到云端；云端规则会在网页关闭后继续监测并推送。", "Signed in: the SendKey is saved encrypted to the cloud; cloud rules keep monitoring after the page closes.")
+      : tx("未登录时，SendKey 与规则只保存在本机浏览器；登录后可保存到云端。", "Signed out: the SendKey and rules stay in this browser; sign in to save them to the cloud.");
     saveKeyButton.textContent = cloudSession.loggedIn
-      ? "保存到云端"
-      : "仅保存到本机";
+      ? tx("保存到云端", "Save to cloud")
+      : tx("仅保存到本机", "Save locally only");
     testButton.textContent = cloudSession.loggedIn
-      ? "测试云端推送"
-      : "测试当前市价";
+      ? tx("测试云端推送", "Test cloud push")
+      : tx("测试当前市价", "Test current price");
     clearKeyButton.textContent = cloudSession.loggedIn
-      ? "清空输入"
-      : "清除本机 Key";
+      ? tx("清空输入", "Clear input")
+      : tx("清除本机 Key", "Clear local Key");
     const summary = cloudCount
-      ? `<p><b>云端已接管 ${cloudCount} 条规则</b>：由服务器后台持续监测，网页关闭后仍会推送。${localCount ? `其余 ${localCount} 条为本地触发，页面关闭后停止。` : "当前没有本地触发规则。"}</p>`
-      : "<p>当前浏览器独立保存；页面保持打开时才会监测。</p>";
+      ? `<p><b>${tx(`云端已接管 ${cloudCount} 条规则`, `Cloud takes over ${cloudCount} rule(s)`)}</b>：${tx("由服务器后台持续监测，网页关闭后仍会推送。", "Monitored by the server in the background and pushed even after the page closes.")}${localCount ? tx(`其余 ${localCount} 条为本地触发，页面关闭后停止。`, `The other ${localCount} are local-triggered and stop when the page closes.`) : tx("当前没有本地触发规则。", "No local-triggered rules now.")}</p>`
+      : `<p>${tx("当前浏览器独立保存；页面保持打开时才会监测。", "Saved independently in this browser; only monitored while the page stays open.")}</p>`;
     list.innerHTML = `${summary}<div class="notification-rule-list">${
       rules.length
         ? rules
@@ -2053,10 +2256,10 @@ setTimeout(() => {
               const cloudManaged = Boolean(r.cloudManaged),
                 triggered =
                   !cloudManaged && r.repeat === false && r.lastTriggeredAt;
-              return `<article class="${cloudManaged ? "cloud-managed-rule" : ""}"><span><b>→ BTC-USDT 价格预警</b><small>${label(r.kind)} ${fmt(r.targetPrice)} · ${r.repeat === false ? "仅提醒一次" : `重复提醒 · ${r.cooldownMinutes} 分钟冷却`}</small>${triggered ? `<small class="notification-triggered">已触发执行：${triggerText(r)}</small>` : ""}</span><em class="${cloudManaged ? "cloud-managed" : triggered ? "flat" : "bull"}">${cloudManaged ? "云端接管" : triggered ? "已执行" : "本地触发"}</em><button type="button" data-remove-local-alert="${r.id}">删除</button></article>`;
+              return `<article class="${cloudManaged ? "cloud-managed-rule" : ""}"><span><b>→ BTC-USDT ${tx("价格预警", "price alert")}</b><small>${label(r.kind)} ${fmt(r.targetPrice)} · ${r.repeat === false ? tx("仅提醒一次", "Once only") : tx(`重复提醒 · ${r.cooldownMinutes} 分钟冷却`, `Repeat · ${r.cooldownMinutes} min cooldown`)}</small>${triggered ? `<small class="notification-triggered">${tx("已触发执行：", "Triggered: ")}${triggerText(r)}</small>` : ""}</span><em class="${cloudManaged ? "cloud-managed" : triggered ? "flat" : "bull"}">${cloudManaged ? tx("云端接管", "Cloud-managed") : triggered ? tx("已执行", "Executed") : tx("本地触发", "Local")}</em><button type="button" data-remove-local-alert="${r.id}">${tx("删除", "Delete")}</button></article>`;
             })
             .join("")
-        : "<small>尚未添加预警。</small>"
+        : `<small>${tx("尚未添加预警。", "No alerts added yet.")}</small>`
     }</div>`;
     list.querySelectorAll("[data-remove-local-alert]").forEach(
       (b) =>
@@ -2385,6 +2588,9 @@ setTimeout(() => {
     engine: "edge",
     edgeVoice: "zh-CN-XiaoxiaoNeural",
     chimeType: "station",
+    riseChimeType: "rise",
+    dropChimeType: "drop",
+    liquidationChimeType: "warning",
     chimeVolume: 100,
     speechVolume: 100,
   };
@@ -2400,30 +2606,99 @@ setTimeout(() => {
     settings.interval = 300;
   const supported =
     "speechSynthesis" in window && "SpeechSynthesisUtterance" in window;
+  const voicePlaybackAvailable = supported || "Audio" in window;
   const save = () => localStorage.setItem(store, JSON.stringify(settings));
+  /* 播报优先级：多条语音同时触发时按此顺序依次播报（设置面板可自定义排序）。 */
+  const speechPriorityDefault = [
+    "liquidation",
+    "speed",
+    "price",
+    "move",
+    "tick",
+    "gap",
+    "live",
+  ];
+  settings.speakPriority = Array.isArray(settings.speakPriority)
+    ? [
+        ...new Set(
+          settings.speakPriority.filter((key) =>
+            speechPriorityDefault.includes(key),
+          ),
+        ),
+      ]
+    : [];
+  speechPriorityDefault.forEach((key) => {
+    if (!settings.speakPriority.includes(key))
+      settings.speakPriority.push(key);
+  });
+  const speechRankOfKey = (key) => {
+      const index = settings.speakPriority.indexOf(key);
+      return index < 0 ? speechPriorityDefault.length : index;
+    },
+    speechCategoryOfRule = (rule) =>
+      rule?.kind === "long_liquidation" || rule?.kind === "short_liquidation"
+        ? "liquidation"
+        : rule?.kind === "price_speed"
+          ? "speed"
+          : rule?.kind === "price_move"
+            ? "move"
+            : rule?.kind === "price_tick_move"
+              ? "tick"
+              : rule?.kind === "theoretical_liquidation_gap"
+                ? "gap"
+                : "price",
+    speechRankOfRule = (rule) => speechRankOfKey(speechCategoryOfRule(rule));
+  const speechQueue = [];
+  let speechQueueBusy = false;
+  const drainSpeechQueue = () => {
+      if (speechQueueBusy || !speechQueue.length) return;
+      const item = speechQueue.shift();
+      speechQueueBusy = true;
+      const done = () => {
+        speechQueueBusy = false;
+        window.setTimeout(drainSpeechQueue, 300);
+      };
+      /* say 返回 false（总开关已关）时放弃整条队列，避免 busy 永久卡住。 */
+      if (!say(item.text, { ...item.options, onEnded: done, onFailure: done })) {
+        speechQueueBusy = false;
+        speechQueue.length = 0;
+      }
+    },
+    enqueueSpeech = (text, options = {}, rank = 0) => {
+      speechQueue.push({ text, options, rank });
+      speechQueue.sort((a, b) => a.rank - b.rank);
+      drainSpeechQueue();
+      return true;
+    };
   let voices = [],
     audioContext = null,
-    currentAudio = null;
+    currentAudio = null,
+    isSpeaking = false,
+    speechSequence = 0,
+    lastLiveSpokenPrice = null;
+  let setSpeaking = () => {};
   const volume = (value) => {
     const normalized = Math.max(0, Math.min(1, Number(value) / 100));
     return normalized * normalized;
   };
-  const playChime = () => {
+  const chimePresets = {
+    station: { notes: [523.25, 659.25, 783.99], wave: "sine", gap: 0.15 },
+    airport: { notes: [880, 1046.5, 1318.5], wave: "sine", gap: 0.13 },
+    gentle: { notes: [392, 493.88, 587.33], wave: "triangle", gap: 0.2 },
+    alert: { notes: [740, 740, 988, 988], wave: "square", gap: 0.11 },
+    rise: { notes: [440, 554.37, 659.25], wave: "triangle", gap: 0.14 },
+    drop: { notes: [659.25, 554.37, 440], wave: "sine", gap: 0.14 },
+    warning: { notes: [880, 880, 660, 880], wave: "square", gap: 0.12 },
+    siren: { notes: [740, 988, 740, 988, 740], wave: "sawtooth", gap: 0.12 },
+    critical: { notes: [1046.5, 1046.5, 1046.5, 740], wave: "square", gap: 0.1 },
+  };
+  const playChime = (chimeType = settings.chimeType) => {
     const Context = window.AudioContext || window.webkitAudioContext;
     if (!Context) return 0;
     audioContext ||= new Context();
     audioContext.resume?.().catch(() => {});
-    const preset = {
-        station: { notes: [523.25, 659.25, 783.99], wave: "sine", gap: 0.15 },
-        airport: { notes: [880, 1046.5, 1318.5], wave: "sine", gap: 0.13 },
-        gentle: { notes: [392, 493.88, 587.33], wave: "triangle", gap: 0.2 },
-        alert: { notes: [740, 740, 988, 988], wave: "square", gap: 0.11 },
-      }[settings.chimeType] || {
-        notes: [523.25, 659.25, 783.99],
-        wave: "sine",
-        gap: 0.15,
-      },
-      level = Math.max(0, Math.min(2, Number(settings.chimeVolume) / 100)),
+    const preset = chimePresets[chimeType] || chimePresets.station,
+      level = Math.max(0, Math.min(1, Number(settings.chimeVolume) / 100)),
       peak = Math.max(0.0001, Math.min(1, 0.72 * Math.pow(level, 1.35))),
       start = audioContext.currentTime + 0.02;
     preset.notes.forEach((frequency, index) => {
@@ -2441,7 +2716,7 @@ setTimeout(() => {
     });
     return preset.notes.length * preset.gap * 1000 + 290;
   };
-  const saySystem = (text) => {
+  const saySystem = (text, { onStarted, onEnded, onFailure } = {}) => {
     if (!supported) return false;
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(text),
@@ -2453,10 +2728,13 @@ setTimeout(() => {
     utterance.rate = 1;
     utterance.pitch = 1;
     utterance.volume = volume(settings.speechVolume);
+    utterance.onstart = onStarted;
+    utterance.onend = onEnded;
+    utterance.onerror = onFailure;
     window.speechSynthesis.speak(utterance);
     return true;
   };
-  const sayEdge = async (text) => {
+  const sayEdge = async (text, { onStarted, onEnded, onFailure } = {}) => {
     const response = await fetch("/api/voice/edge", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -2470,31 +2748,51 @@ setTimeout(() => {
     const audio = new Audio(URL.createObjectURL(await response.blob()));
     currentAudio = audio;
     audio.volume = volume(settings.speechVolume);
+    audio.onplay = onStarted;
     audio.onended = () => {
       URL.revokeObjectURL(audio.src);
+      onEnded?.();
     };
+    audio.onerror = onFailure;
     await audio.play();
     return true;
   };
-  const say = (text, { onStarted, onFailure } = {}) => {
-    if (!settings.enabled) return false;
+  const say = (text, { force = false, chimeType, onStarted, onEnded, onFailure } = {}) => {
+    if (!settings.enabled && !force) return false;
     // Edge TTS does not depend on the browser's system speech API.  Some
     // embedded browsers omit speechSynthesis entirely, so only touch it when
     // it exists; otherwise the exception prevented the Edge request as well.
+    const sequence = ++speechSequence;
     if (supported) window.speechSynthesis.cancel();
     currentAudio?.pause();
-    const delay = playChime();
+    const started = () => {
+        if (sequence !== speechSequence) return;
+        setSpeaking(true);
+        onStarted?.();
+      },
+      /* 被更高优先级的插队打断时也要回调 onEnded/onFailure，语音队列才能继续。 */
+      ended = () => {
+        if (sequence === speechSequence) setSpeaking(false);
+        onEnded?.();
+      },
+      failed = (error) => {
+        if (sequence === speechSequence) setSpeaking(false);
+        onFailure?.(error);
+      };
+    const delay = playChime(chimeType);
     window.setTimeout(() => {
-      const started = () => onStarted?.();
+      if (sequence !== speechSequence) {
+        onEnded?.();
+        return;
+      }
       if (settings.engine === "edge") {
-        sayEdge(text)
-          .then(started)
+        sayEdge(text, { onStarted: started, onEnded: ended, onFailure: failed })
           .catch((error) => {
-            if (saySystem(text)) started();
-            else onFailure?.(error);
+            if (!saySystem(text, { onStarted: started, onEnded: ended, onFailure: failed }))
+              failed(error);
           });
-      } else if (saySystem(text)) started();
-      else onFailure?.(new Error("System speech is unavailable"));
+      } else if (!saySystem(text, { onStarted: started, onEnded: ended, onFailure: failed }))
+        failed(new Error("System speech is unavailable"));
     }, delay);
     return true;
   };
@@ -2524,13 +2822,24 @@ setTimeout(() => {
           maximumFractionDigits: 2,
         }),
         percent = Math.abs((delta / entryPrice) * 100).toFixed(2),
+        positionSize = Number(entry.amount),
+        actualPnl =
+          Number.isFinite(positionSize) && positionSize > 0
+            ? positionSize * (pnlDelta / entryPrice)
+            : null,
+        actualPnlText =
+          actualPnl === null
+            ? ""
+            : Math.abs(actualPnl).toLocaleString("en-US", {
+                maximumFractionDigits: 2,
+              }),
         sideZh = isShort ? "做空" : "做多",
         sideEn = isShort ? "Short" : "Long",
         labelZh = isShort ? "做空买入价" : "做多买入价",
         labelEn = isShort ? "short entry price" : "long entry price";
       return uiLang === "zh"
-        ? `相对${labelZh} ${entryPrice.toLocaleString("en-US", { maximumFractionDigits: 2 })}，现价${priceUp ? "上涨" : "下跌"} ${amount}，${priceUp ? "涨幅" : "跌幅"} ${percent}%。差价 ${amount} 美元。${sideZh}${inProfit ? "盈利中" : "亏损中"}。`
-        : `Compared with your ${labelEn} of ${entryPrice.toLocaleString("en-US", { maximumFractionDigits: 2 })}, price is ${priceUp ? "up" : "down"} ${amount}, a ${priceUp ? "gain" : "drop"} of ${percent} percent. The price difference is ${amount} USD. ${sideEn} ${inProfit ? "profit" : "loss"} is ${amount} USD.`;
+        ? `相对${labelZh} ${entryPrice.toLocaleString("en-US", { maximumFractionDigits: 2 })}，现价${priceUp ? "上涨" : "下跌"} ${amount}，${priceUp ? "涨幅" : "跌幅"} ${percent}%。差价 ${amount} 美元。${sideZh}${inProfit ? "盈利中" : "亏损中"}${actualPnlText ? `，${inProfit ? "盈利" : "亏损"} ${actualPnlText} 美元` : ""}。`
+        : `Compared with your ${labelEn} of ${entryPrice.toLocaleString("en-US", { maximumFractionDigits: 2 })}, price is ${priceUp ? "up" : "down"} ${amount}, a ${priceUp ? "gain" : "drop"} of ${percent} percent. The price difference is ${amount} USD. ${sideEn} ${inProfit ? "is in profit" : "is at a loss"}${actualPnlText ? `, ${inProfit ? "profit" : "loss"} ${actualPnlText} USD` : ""}.`;
     });
   };
   const priceText = (value) => {
@@ -2546,7 +2855,26 @@ setTimeout(() => {
   trigger.id = "voiceQuickToggle";
   trigger.type = "button";
   trigger.className = "voice-quick-toggle";
+  trigger.setAttribute("aria-haspopup", "dialog");
+  trigger.setAttribute("aria-expanded", "false");
+  trigger.innerHTML = `<span class="voice-pulse voice-pulse-one" aria-hidden="true"></span><span class="voice-pulse voice-pulse-two" aria-hidden="true"></span><svg viewBox="0 0 64 64" aria-hidden="true"><path d="M8 25h13l18-14v42L21 39H8z"/><path class="voice-wave" d="M46 23c5 5 5 13 0 18M52 16c10 10 10 22 0 32"/></svg><span class="voice-quick-toggle-label" aria-hidden="true"></span>`;
   priceCard.append(trigger);
+  setSpeaking = (playing) => {
+    isSpeaking = Boolean(playing);
+    trigger.classList.toggle("is-speaking", isSpeaking);
+    trigger.classList.toggle("is-muted", !settings.enabled);
+    trigger.disabled = !voicePlaybackAvailable;
+    const label = !voicePlaybackAvailable
+      ? tx("当前环境不支持语音播报", "Voice broadcast is unavailable")
+      : isSpeaking
+        ? tx("语音播报设置（正在播报）", "Voice settings (speaking)")
+        : tx("打开语音播报设置", "Open voice settings");
+    trigger.setAttribute("aria-label", label);
+    trigger.title = label;
+    trigger.querySelector(".voice-quick-toggle-label").textContent = isSpeaking
+      ? tx("播报中", "Speaking")
+      : "";
+  };
   const settingsModal = document.createElement("div");
   settingsModal.id = "voiceSettingsModal";
   settingsModal.className = "alert-composer voice-settings-modal";
@@ -2556,8 +2884,111 @@ setTimeout(() => {
   const settingsBody = settingsModal.querySelector(".voice-settings-body");
   const panel = document.createElement("section");
   panel.className = "voice-alert-panel";
-  panel.innerHTML = `<div class="voice-panel-head"><div><b>${tx("语音播报", "Voice alerts")}</b><small id="voiceAlertStatus"></small></div></div><div class="voice-panel-grid"><section class="voice-panel-group voice-panel-toggles"><label class="voice-switch"><input id="voiceAlertEnabled" type="checkbox"><span>${tx("语音总开关", "Voice master")}</span></label><label class="voice-switch"><input id="voiceLivePriceEnabled" type="checkbox"><span>${tx("定时播报实时价", "Speak live price")}</span></label><label class="voice-live-interval">${tx("播报间隔", "Interval")}<select id="voiceAlertInterval"><option value="15">15 ${tx("秒", "sec")}</option><option value="30">30 ${tx("秒", "sec")}</option><option value="60">1 ${tx("分钟", "min")}</option><option value="300">5 ${tx("分钟", "min")}</option></select></label></section><section class="voice-panel-group"><label>${tx("播报引擎", "Engine")}<select id="voiceAlertEngine"><option value="edge">Edge 神经语音（免费）</option><option value="system">本机系统语音</option></select></label><label>${tx("音色", "Voice")}<select id="voiceAlertEdgeVoice"><optgroup label="自然女声"><option value="zh-CN-XiaoxiaoNeural">小晓 · 普通话</option><option value="zh-CN-XiaoyiNeural">小艺 · 普通话</option><option value="zh-CN-liaoning-XiaobeiNeural">小北 · 辽宁口音</option><option value="zh-CN-shaanxi-XiaoniNeural">小妮 · 陕西口音</option><option value="zh-TW-HsiaoChenNeural">晓臻 · 台湾国语</option><option value="zh-HK-HiuGaaiNeural">晓佳 · 粤语</option></optgroup><optgroup label="自然男声"><option value="zh-CN-YunxiNeural">云希 · 普通话</option><option value="zh-CN-YunyangNeural">云扬 · 普通话</option></optgroup></select></label><label class="system-voice-label">${tx("系统回退", "System fallback")}<select id="voiceAlertVoice"><option>${tx("正在加载系统语音…", "Loading system voices…")}</option></select></label><label>${tx("提示音音量", "Chime volume")}<span class="voice-volume-row"><input id="voiceChimeVolume" type="range" min="0" max="100" step="1"><output id="voiceChimeVolumeValue"></output></span></label><label>${tx("语音音量", "Speech volume")}<span class="voice-volume-row"><input id="voiceSpeechVolume" type="range" min="0" max="100" step="1"><output id="voiceSpeechVolumeValue"></output></span></label></section><section class="voice-panel-group voice-panel-actions"><button type="button" id="voiceAlertAddRule">＋ ${tx("配置语音规则", "Voice rules")}</button><button type="button" id="voiceAlertTest">${tx("试听", "Test voice")}</button></section></div><small class="voice-rule-note">${tx("语音规则支持价格达到、上涨、下跌及爆仓价；在“添加预警”中勾选“触发时语音播报”。", "Voice rules support reached, rise, fall and liquidation prices; enable Speak when triggered in Add alert.")}</small>`;
+  panel.innerHTML = `<div class="voice-panel-head"><div><b>${tx("语音播报", "Voice alerts")}</b><small id="voiceAlertStatus"></small></div></div><div class="voice-panel-grid"><section class="voice-panel-group voice-panel-toggles"><label class="voice-switch"><input id="voiceAlertEnabled" type="checkbox"><span>${tx("语音总开关", "Voice master")}</span></label><label class="voice-switch"><input id="voiceLivePriceEnabled" type="checkbox"><span>${tx("定时播报实时价", "Speak live price")}</span></label><label class="voice-live-interval">${tx("播报间隔", "Interval")}<select id="voiceAlertInterval"><option value="15">15 ${tx("秒", "sec")}</option><option value="30">30 ${tx("秒", "sec")}</option><option value="60">1 ${tx("分钟", "min")}</option><option value="300">5 ${tx("分钟", "min")}</option></select></label></section><section class="voice-panel-group"><label>${tx("播报引擎", "Engine")}<select id="voiceAlertEngine"><option value="edge">${tx("Edge 神经语音（免费）", "Edge neural (free)")}</option><option value="system">${tx("本机系统语音", "System voice")}</option></select></label><label>${tx("音色", "Voice")}<select id="voiceAlertEdgeVoice"><optgroup label="${tx("自然女声", "Female (natural)")}"><option value="zh-CN-XiaoxiaoNeural">${tx("小晓 · 普通话", "Xiaoxiao · Mandarin")}</option><option value="zh-CN-XiaoyiNeural">${tx("小艺 · 普通话", "Xiaoyi · Mandarin")}</option><option value="zh-CN-liaoning-XiaobeiNeural">${tx("小北 · 辽宁口音", "Xiaobei · Liaoning")}</option><option value="zh-CN-shaanxi-XiaoniNeural">${tx("小妮 · 陕西口音", "Xiaoni · Shaanxi")}</option><option value="zh-TW-HsiaoChenNeural">${tx("晓臻 · 台湾国语", "HsiaoChen · Taiwanese")}</option><option value="zh-HK-HiuGaaiNeural">${tx("晓佳 · 粤语", "HiuGaai · Cantonese")}</option></optgroup><optgroup label="${tx("自然男声", "Male (natural)")}"><option value="zh-CN-YunxiNeural">${tx("云希 · 普通话", "Yunxi · Mandarin")}</option><option value="zh-CN-YunyangNeural">${tx("云扬 · 普通话", "Yunyang · Mandarin")}</option></optgroup></select></label><label class="system-voice-label">${tx("系统回退", "System fallback")}<select id="voiceAlertVoice"><option>${tx("正在加载系统语音…", "Loading system voices…")}</option></select></label><label>${tx("提示音音量", "Chime volume")}<span class="voice-volume-row"><input id="voiceChimeVolume" type="range" min="0" max="200" step="1"><output id="voiceChimeVolumeValue"></output></span></label><label>${tx("语音音量", "Speech volume")}<span class="voice-volume-row"><input id="voiceSpeechVolume" type="range" min="0" max="100" step="1"><output id="voiceSpeechVolumeValue"></output></span></label></section><section class="voice-panel-group voice-panel-actions"><button type="button" id="voiceAlertAddRule">＋ ${tx("配置语音规则", "Voice rules")}</button><button type="button" id="voiceAlertTest">${tx("试听", "Test voice")}</button></section></div><small class="voice-rule-note">${tx("语音规则支持价格达到、上涨、下跌及爆仓价；在“添加预警”中勾选“触发时语音播报”。", "Voice rules support reached, rise, fall and liquidation prices; enable Speak when triggered in Add alert.")}</small>`;
   settingsBody.append(panel);
+  const voicePanelGrid = panel.querySelector(".voice-panel-grid"),
+    voicePanelToggles = panel.querySelector(".voice-panel-toggles"),
+    voicePanelActions = panel.querySelector(".voice-panel-actions");
+  voicePanelToggles.append(voicePanelActions);
+  /* 播报优先级排序面板：多条语音同时触发时，按此列表从上到下依次播报。 */
+  /* 优先级标签与「配置语音规则 → 播报条件」下拉项保持一致，避免用户对排序对象产生歧义。 */
+  const speechPriorityLabels = {
+    liquidation: ["做多 / 做空爆仓价", "Long / short liquidation price"],
+    speed: ["短时间急涨／急跌", "Rapid move in a short window"],
+    price: ["价格达到", "Price reached"],
+    move: ["每上涨／下跌指定金额", "Every rise or drop by amount"],
+    tick: ["与前一次报价变动差", "Difference from previous quote"],
+    gap: ["距理论强平价警告", "Theoretical liquidation distance"],
+    live: ["定时播报实时价", "Timed live price"],
+  };
+  const priorityPanel = document.createElement("section");
+  priorityPanel.className = "voice-priority-panel";
+  priorityPanel.innerHTML =
+    `<b>${tx("播报优先级", "Speech priority")}</b><small>${tx(
+      "按住条目上下拖动即可调整顺序；多条语音同时触发时按此顺序从上到下依次播报，越靠上越优先。",
+      "Drag entries up or down to reorder; when several alerts fire together they play top to bottom, higher entries first.",
+    )}</small><ol class="voice-priority-list"></ol>`;
+  voicePanelToggles.append(priorityPanel);
+  const priorityList = priorityPanel.querySelector(".voice-priority-list");
+  /* 拖拽排序：按住条目上下拖动，松手即按新顺序保存。 */
+  let dragKey = null,
+    renderPriority;
+  renderPriority = () => {
+    priorityList.innerHTML = settings.speakPriority
+      .map((key, index) => {
+        const label = speechPriorityLabels[key]
+          ? tx(speechPriorityLabels[key][0], speechPriorityLabels[key][1])
+          : key;
+        return (
+          '<li draggable="true" data-priority-key="' +
+          key +
+          '"><span class="voice-priority-grip" aria-hidden="true">⠿</span><span class="voice-priority-index">' +
+          (index + 1) +
+          ".</span><span>" +
+          label +
+          "</span></li>"
+        );
+      })
+      .join("");
+    priorityList.querySelectorAll("li").forEach((item) => {
+      item.addEventListener("dragstart", (event) => {
+        dragKey = item.dataset.priorityKey;
+        item.classList.add("is-dragging");
+        event.dataTransfer.effectAllowed = "move";
+        /* Firefox 需要显式 setData 才会启动拖拽。 */
+        try {
+          event.dataTransfer.setData("text/plain", dragKey);
+        } catch {}
+      });
+      item.addEventListener("dragend", () => {
+        item.classList.remove("is-dragging");
+        dragKey = null;
+        priorityList.querySelectorAll("li").forEach((el) =>
+          el.classList.remove("drop-before", "drop-after"),
+        );
+        /* 松手：按当前 DOM 顺序写回设置并保存。 */
+        const order = [...priorityList.querySelectorAll("li")].map(
+          (el) => el.dataset.priorityKey,
+        );
+        if (
+          order.length === settings.speakPriority.length &&
+          order.some((key, i) => key !== settings.speakPriority[i])
+        ) {
+          settings.speakPriority = order;
+          save();
+        }
+        renderPriority();
+      });
+      item.addEventListener("dragover", (event) => {
+        if (!dragKey || item.dataset.priorityKey === dragKey) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
+        const rect = item.getBoundingClientRect(),
+          before = event.clientY < rect.top + rect.height / 2;
+        const draggingEl = priorityList.querySelector(
+          '[data-priority-key="' + dragKey + '"]',
+        );
+        if (!draggingEl) return;
+        /* 实时预览：把拖拽项移动到目标前/后，形成无级插入。 */
+        if (before && draggingEl.nextElementSibling !== item) {
+          priorityList.insertBefore(draggingEl, item);
+        } else if (
+          !before &&
+          (item.nextElementSibling !== draggingEl ||
+            item.nextElementSibling === null)
+        ) {
+          if (item.nextElementSibling !== draggingEl)
+            priorityList.insertBefore(draggingEl, item.nextElementSibling);
+        }
+        /* 序号即时更新，让用户看到生效后的排名。 */
+        priorityList.querySelectorAll("li").forEach((el, i) => {
+          const idx = el.querySelector(".voice-priority-index");
+          if (idx) idx.textContent = i + 1 + ".";
+        });
+      });
+    });
+  };
+  renderPriority();
   const enabled = $("voiceAlertEnabled"),
     livePriceEnabled = $("voiceLivePriceEnabled"),
     engine = $("voiceAlertEngine"),
@@ -2581,25 +3012,33 @@ setTimeout(() => {
     .closest("label")
     .insertAdjacentHTML(
       "beforebegin",
-      "<label>" +
-        tx("提示音样式", "Chime style") +
-        '<select id="voiceChimeType"><option value="station">' +
-        tx("车站三音", "Station three-tone") +
-        '</option><option value="airport">' +
-        tx("机场登机", "Airport boarding") +
-        '</option><option value="gentle">' +
-        tx("轻柔提示", "Gentle chime") +
-        '</option><option value="alert">' +
-        tx("短促提醒", "Short alert") +
-        "</option></select></label>",
+      `<label>${tx("默认提示音", "Default chime")}<select id="voiceChimeType">${Object.keys(chimePresets).map((key) => `<option value="${key}">${({ station: tx("车站三音", "Station three-tone"), airport: tx("机场登机", "Airport boarding"), gentle: tx("轻柔提示", "Gentle chime"), alert: tx("短促提醒", "Short alert"), rise: tx("上涨音", "Rising tone"), drop: tx("下跌音", "Falling tone"), warning: tx("警示音", "Warning"), siren: tx("警报器", "Siren"), critical: tx("紧急警报", "Critical alert") })[key]}</option>`).join("")}</select></label><label>${tx("上涨提示音", "Rise chime")}<select id="voiceRiseChimeType"></select></label><label>${tx("下跌提示音", "Drop chime")}<select id="voiceDropChimeType"></select></label><label>${tx("爆仓警示音", "Liquidation alert")}<select id="voiceLiquidationChimeType"></select></label>`,
     );
-  const chimeType = $("voiceChimeType");
+  const chimeType = $("voiceChimeType"),
+    riseChimeType = $("voiceRiseChimeType"),
+    dropChimeType = $("voiceDropChimeType"),
+    liquidationChimeType = $("voiceLiquidationChimeType");
+  [riseChimeType, dropChimeType, liquidationChimeType].forEach((select) => {
+    select.innerHTML = chimeType.innerHTML;
+  });
   chimeType.value = settings.chimeType;
-  chimeVolume.max = "200";
+  riseChimeType.value = settings.riseChimeType;
+  dropChimeType.value = settings.dropChimeType;
+  liquidationChimeType.value = settings.liquidationChimeType;
+  const normalizeChimeType = (value, fallback) =>
+    chimePresets[value] ? value : fallback;
+  settings.chimeType = normalizeChimeType(settings.chimeType, "station");
+  settings.riseChimeType = normalizeChimeType(settings.riseChimeType, "rise");
+  settings.dropChimeType = normalizeChimeType(settings.dropChimeType, "drop");
+  settings.liquidationChimeType = normalizeChimeType(
+    settings.liquidationChimeType,
+    "warning",
+  );
+  chimeVolume.max = "100";
   interval.innerHTML = `<option value="15">15 ${tx("秒", "sec")}</option><option value="30">30 ${tx("秒", "sec")}</option><option value="60">1 ${tx("分钟", "min")}</option><option value="300">5 ${tx("分钟", "min")}</option><option value="600">10 ${tx("分钟", "min")}</option><option value="900">15 ${tx("分钟", "min")}</option><option value="1800">30 ${tx("分钟", "min")}</option><option value="3600">1 ${tx("小时", "hour")}</option>`;
   panel.querySelector(".voice-rule-note").textContent = tx(
-    "语音规则独立保存，可设置价格达到、上涨或下跌后的单次／重复播报。页面打开时由浏览器播报；页面关闭后由本机服务端自动接力（需总开关开启）。重复播报的冷却下限为 30 秒。",
-    "Voice rules are independent and support one-time or repeated reached, rise and fall alerts. The browser speaks while the page is open; the local server takes over after it closes (master switch on). Repeated alerts cool down at least 30 seconds.",
+    "语音规则独立保存，可设置价格达到、上涨或下跌后的单次／重复播报。首页保持打开时即由浏览器监听并播报，无需打开本设置面板；关闭页面或电脑重启后停止播报。重复播报的冷却下限为 30 秒。",
+    "Voice rules are independent and support one-time or repeated reached, rise and fall alerts. They monitor and speak while the home page is open; this settings panel does not need to remain open. Speech stops after the page closes or the computer restarts. Repeated alerts cool down at least 30 seconds.",
   );
   const populateVoices = () => {
     if (!supported) return;
@@ -2656,8 +3095,24 @@ setTimeout(() => {
     engine.value = settings.engine;
     edgeVoice.value = settings.edgeVoice;
     interval.value = String(settings.interval);
+    chimeType.value = settings.chimeType;
+    riseChimeType.value = settings.riseChimeType;
+    dropChimeType.value = settings.dropChimeType;
+    liquidationChimeType.value = settings.liquidationChimeType;
+    settings.chimeVolume = Math.max(0, Math.min(100, Number(settings.chimeVolume) || 0));
     chimeVolume.value = String(settings.chimeVolume);
     speechVolume.value = String(settings.speechVolume);
+    const paintRange = (input) => {
+      const minimum = Number(input.min) || 0;
+      const maximum = Number(input.max) || 100;
+      const value = Math.max(minimum, Math.min(maximum, Number(input.value) || 0));
+      input.style.setProperty(
+        "--voice-range-fill",
+        `${((value - minimum) / (maximum - minimum || 1)) * 100}%`,
+      );
+    };
+    paintRange(chimeVolume);
+    paintRange(speechVolume);
     chimeVolumeValue.value = `${settings.chimeVolume}%`;
     chimeVolumeValue.textContent = `${settings.chimeVolume}%`;
     speechVolumeValue.value = `${settings.speechVolume}%`;
@@ -2676,15 +3131,7 @@ setTimeout(() => {
     status.textContent = settings.enabled
       ? `${tx("已开启：", "On: ")}${name}${settings.livePriceEnabled ? ` · ${tx("定时价位播报", "Live price on")}` : ""}`
       : tx("已静音", "Muted");
-    trigger.innerHTML = `<svg viewBox="0 0 64 64" aria-hidden="true"><path d="M8 25h13l18-14v42L21 39H8z"/><path class="voice-wave" d="M46 23c5 5 5 13 0 18M52 16c10 10 10 22 0 32"/>${settings.enabled ? "" : '<path class="voice-mute" d="M8 8l48 48"/>'}</svg>`;
-    trigger.classList.toggle("is-muted", !settings.enabled);
-    trigger.setAttribute(
-      "aria-label",
-      settings.enabled
-        ? tx("打开语音播报设置", "Open voice alert settings")
-        : tx("开启语音播报并打开设置", "Enable voice alerts and open settings"),
-    );
-    trigger.title = trigger.getAttribute("aria-label");
+    setSpeaking(isSpeaking);
   };
   const speakPrice = (force) => {
     const current = state?.ticker?.last,
@@ -2699,8 +3146,21 @@ setTimeout(() => {
       force ||
       now - settings.lastSpokenAt >= Number(settings.interval) * 1000
     ) {
-      if (say(priceText(current))) {
+      const chimeType =
+        !Number.isFinite(lastLiveSpokenPrice) || current === lastLiveSpokenPrice
+          ? settings.chimeType
+          : current > lastLiveSpokenPrice
+            ? settings.riseChimeType
+            : settings.dropChimeType;
+      if (
+        enqueueSpeech(
+          priceText(current),
+          { chimeType },
+          speechRankOfKey("live"),
+        )
+      ) {
         settings.lastSpokenAt = now;
+        lastLiveSpokenPrice = current;
         save();
       }
     }
@@ -2736,15 +3196,49 @@ setTimeout(() => {
     save();
     render();
   };
+  let lastChimePreviewAt = 0,
+    pendingChimePreview = null;
+  const previewChimeVolume = () => {
+    const minimumGap = 550,
+      wait = minimumGap - (Date.now() - lastChimePreviewAt),
+      play = () => {
+        pendingChimePreview = null;
+        lastChimePreviewAt = Date.now();
+        // Three short notes make the current slider volume immediately audible.
+        playChime();
+      };
+    if (wait <= 0) play();
+    else if (!pendingChimePreview) pendingChimePreview = window.setTimeout(play, wait);
+  };
   chimeVolume.oninput = () => {
-    settings.chimeVolume = Number(chimeVolume.value);
+    settings.chimeVolume = Math.max(0, Math.min(100, Number(chimeVolume.value) || 0));
     save();
     render();
+    previewChimeVolume();
   };
   chimeType.onchange = () => {
     settings.chimeType = chimeType.value;
     save();
     render();
+    playChime(settings.chimeType);
+  };
+  riseChimeType.onchange = () => {
+    settings.riseChimeType = riseChimeType.value;
+    save();
+    render();
+    playChime(settings.riseChimeType);
+  };
+  dropChimeType.onchange = () => {
+    settings.dropChimeType = dropChimeType.value;
+    save();
+    render();
+    playChime(settings.dropChimeType);
+  };
+  liquidationChimeType.onchange = () => {
+    settings.liquidationChimeType = liquidationChimeType.value;
+    save();
+    render();
+    playChime(settings.liquidationChimeType);
   };
   speechVolume.oninput = () => {
     settings.speechVolume = Number(speechVolume.value);
@@ -2758,15 +3252,10 @@ setTimeout(() => {
   };
   const showVoiceSettings = (open) => {
     settingsModal.hidden = !open;
+    trigger.setAttribute("aria-expanded", String(open));
     if (open) render();
   };
   trigger.onclick = () => {
-    if (!settings.enabled) {
-      settings.enabled = true;
-      settings.lastSpokenAt = 0;
-      save();
-      render();
-    }
     showVoiceSettings(true);
   };
   settingsModal.querySelector("[data-close-voice-settings]").onclick = () =>
@@ -2829,12 +3318,14 @@ setTimeout(() => {
             "price_move",
             "price_speed",
             "price_tick_move",
+            "theoretical_liquidation_gap",
           ].includes(rule.kind)
             ? rule.kind
             : "price_reached",
           direction: ["down", "both"].includes(rule.direction)
             ? rule.direction
             : "up",
+          positionSide: rule.positionSide === "short" ? "short" : "long",
           anchorPrice: Number(rule.anchorPrice) || null,
           windowSeconds: Math.min(
             60,
@@ -2846,7 +3337,7 @@ setTimeout(() => {
   } catch {}
   const saveVoiceRules = () => {
     localStorage.setItem(voiceRuleStore, JSON.stringify(voiceRules));
-    /* 同步给本机服务端：页面关闭（或标签页被挂起）时由服务端接力播报。 */
+    /* 同步页面设置供状态恢复；服务端不执行关闭页面后的接力播报。 */
     syncVoiceToServer();
   };
   const syncVoiceToServer = () => {
@@ -2868,7 +3359,7 @@ setTimeout(() => {
     }).catch(() => {});
   };
   window.addEventListener("btc:personal-entries-changed", syncVoiceToServer);
-  /* 心跳：告诉服务端“页面还活着，前端负责播报”；停跳 15 秒后服务端接管。 */
+  /* 心跳仅用于页面会话状态；心跳停止后服务端不会接力播报。 */
   setInterval(() => {
     if (settings.enabled)
       fetch("/api/voice/heartbeat", { method: "POST" }).catch(() => {});
@@ -2877,7 +3368,7 @@ setTimeout(() => {
     if (!document.hidden && settings.enabled)
       fetch("/api/voice/heartbeat", { method: "POST" }).catch(() => {});
   });
-  /* 服务端触发的记录（页面关闭期间的播报）拉回来刷新列表状态。 */
+  /* 读取已保存状态以便在当前页面恢复规则显示。 */
   setInterval(() => {
     fetch("/api/voice/state")
       .then((response) => response.json())
@@ -2901,7 +3392,7 @@ setTimeout(() => {
       })
       .catch(() => {});
   }, 10_000);
-  const voiceRuleName = (kind, direction) =>
+  const voiceRuleName = (kind, direction, positionSide = "long") =>
     ({
       price_reached: tx("价格达到", "Price reached"),
       price_above: tx("价格上涨至", "Price rises to"),
@@ -2926,16 +3417,153 @@ setTimeout(() => {
           : direction === "down"
             ? tx("较前一次报价下跌", "Drop since previous quote")
             : tx("较前一次报价上涨", "Rise since previous quote"),
+      theoretical_liquidation_gap:
+        positionSide === "short"
+          ? tx("距做空理论强平价", "Distance from short theoretical liquidation")
+          : tx("距做多理论强平价", "Distance from long theoretical liquidation"),
     })[kind] || tx("价格达到", "Price reached");
   const voiceRuleList = document.createElement("section");
   voiceRuleList.className = "voice-rule-list";
-  settingsBody.append(voiceRuleList);
-  const cooldownText = (value) =>
-    Number(value) === 0
-      ? "不冷却"
-      : Number(value) === 0.5
-        ? "30 秒"
-        : Number(value) + " 分钟";
+  voicePanelGrid.append(voiceRuleList);
+  /* 左／中／右三栏宽度自由拖拽：拖动分隔条调节，宽度本地记忆，双击复位。 */
+  const columnStore = "btc_voice_panel_columns_v1",
+    columnDefaults = { left: 200, mid: 208 },
+    columnMin = { left: 150, mid: 150, right: 210 },
+    columnGap = 8,
+    columnResizer = 8,
+    panelColumns = { ...columnDefaults };
+  try {
+    Object.assign(
+      panelColumns,
+      JSON.parse(localStorage.getItem(columnStore) || "{}"),
+    );
+  } catch {}
+  const saveColumns = () =>
+      localStorage.setItem(columnStore, JSON.stringify(panelColumns)),
+    applyColumns = () => {
+      voicePanelGrid.style.setProperty(
+        "--voice-col-left",
+        `${Math.round(panelColumns.left)}px`,
+      );
+      voicePanelGrid.style.setProperty(
+        "--voice-col-mid",
+        `${Math.round(panelColumns.mid)}px`,
+      );
+    },
+    clampColumns = () => {
+      const total =
+        voicePanelGrid.getBoundingClientRect().width ||
+        voicePanelGrid.parentElement?.getBoundingClientRect().width ||
+        0;
+      const usable =
+        total - columnGap * 4 - columnResizer * 2 - columnMin.right;
+      if (usable < columnMin.left + columnMin.mid) return;
+      panelColumns.left = Math.max(
+        columnMin.left,
+        Math.min(panelColumns.left, usable - columnMin.mid),
+      );
+      panelColumns.mid = Math.max(
+        columnMin.mid,
+        Math.min(panelColumns.mid, usable - panelColumns.left),
+      );
+    },
+    setColumns = (left, mid) => {
+      panelColumns.left = left;
+      panelColumns.mid = mid;
+      clampColumns();
+      applyColumns();
+    };
+  const makeResizer = (key) => {
+    const resizer = document.createElement("div");
+    resizer.className = "voice-grid-resizer";
+    resizer.dataset.resize = key;
+    resizer.setAttribute("role", "separator");
+    resizer.setAttribute("aria-orientation", "vertical");
+    resizer.tabIndex = 0;
+    resizer.title = tx(
+      "拖动调节左右栏宽度，双击恢复默认",
+      "Drag to resize columns, double-click to reset",
+    );
+    return resizer;
+  };
+  /* 注意 :scope > ——「配置语音规则/试听」那块也带 .voice-panel-group 类，
+     但它嵌套在左栏内部；不限直接子元素会匹配到它导致 insertBefore 抛错，
+     整个语音模块初始化中断（规则列表变空白）。 */
+  const engineGroup = voicePanelGrid.querySelector(
+      ":scope > .voice-panel-group:not(.voice-panel-toggles)",
+    ),
+    leftResizer = makeResizer("left"),
+    midResizer = makeResizer("mid");
+  voicePanelGrid.insertBefore(leftResizer, engineGroup || voiceRuleList);
+  voicePanelGrid.insertBefore(midResizer, voiceRuleList);
+  [leftResizer, midResizer].forEach((resizer) => {
+    const isLeft = resizer.dataset.resize === "left";
+    resizer.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      resizer.setPointerCapture?.(event.pointerId);
+      resizer.classList.add("is-dragging");
+      document.body.classList.add("voice-grid-resizing");
+      const startX = event.clientX,
+        startLeft = panelColumns.left,
+        startMid = panelColumns.mid;
+      const onMove = (moveEvent) => {
+          const delta = moveEvent.clientX - startX;
+          if (isLeft) setColumns(startLeft + delta, startMid);
+          else setColumns(startLeft, startMid + delta);
+        },
+        onUp = () => {
+          resizer.releasePointerCapture?.(event.pointerId);
+          resizer.classList.remove("is-dragging");
+          document.body.classList.remove("voice-grid-resizing");
+          resizer.removeEventListener("pointermove", onMove);
+          resizer.removeEventListener("pointerup", onUp);
+          resizer.removeEventListener("pointercancel", onUp);
+          saveColumns();
+        };
+      resizer.addEventListener("pointermove", onMove);
+      resizer.addEventListener("pointerup", onUp);
+      resizer.addEventListener("pointercancel", onUp);
+    });
+    resizer.addEventListener("keydown", (event) => {
+      const step =
+        event.key === "ArrowLeft" ? -12 : event.key === "ArrowRight" ? 12 : 0;
+      if (!step) return;
+      event.preventDefault();
+      if (isLeft) setColumns(panelColumns.left + step, panelColumns.mid);
+      else setColumns(panelColumns.left, panelColumns.mid + step);
+      saveColumns();
+    });
+    resizer.addEventListener("dblclick", () => {
+      setColumns(columnDefaults.left, columnDefaults.mid);
+      saveColumns();
+    });
+  });
+  const resyncColumns = () => {
+    clampColumns();
+    applyColumns();
+  };
+  if ("ResizeObserver" in window)
+    new ResizeObserver(resyncColumns).observe(voicePanelGrid);
+  else window.addEventListener("resize", resyncColumns);
+  resyncColumns();
+  const cooldownText = (value) => {
+    const minutes = Number(value) || 0;
+    if (minutes === 0) return tx("不冷却", "No cooldown");
+    const duration =
+      minutes === 0.5
+        ? `30 ${tx("秒", "sec")}`
+        : `${minutes} ${tx("分钟", "min")}`;
+    return `${tx("冷却", "Cooldown")} ${duration}`;
+  };
+  const voiceRuleSpeechState = (rule) =>
+    rule.lastTriggeredAt
+      ? tx("等待下次播报", "Waiting for next alert")
+      : tx("待触发", "Armed");
+  const voiceRuleSpeechTitle = (rule) =>
+    rule.lastTriggeredAt
+      ? tx("此规则最近已触发播报；重复规则仍会继续监听。", "This rule has spoken recently; repeating rules remain armed.")
+      : tx("此规则正在等待触发。", "This rule is armed and waiting to trigger.");
   const renderVoiceRules = () => {
     const rows = voiceRules
       .map(
@@ -2943,7 +3571,7 @@ setTimeout(() => {
           "<article" +
           (!rule.repeat && rule.lastTriggeredAt ? ' class="is-done"' : "") +
           '><span><b>' +
-          voiceRuleName(rule.kind, rule.direction) +
+          voiceRuleName(rule.kind, rule.direction, rule.positionSide) +
           " " +
           Number(rule.targetPrice).toLocaleString("en-US", {
             maximumFractionDigits: 2,
@@ -2968,7 +3596,7 @@ setTimeout(() => {
                   )
                 : "") +
           (rule.repeat
-            ? "重复播报 · 冷却 " + cooldownText(rule.cooldownMinutes)
+            ? "重复播报 · " + cooldownText(rule.cooldownMinutes)
             : "仅播报一次") +
           (rule.lastTriggeredAt
             ? (rule.repeat
@@ -2980,7 +3608,11 @@ setTimeout(() => {
             : "") +
           '</small></span><em class="' +
           (rule.lastTriggeredAt ? "muted" : "bull") +
-          '">语音</em><button type="button" class="rule-test" data-test-voice-rule="' +
+          '" title="' +
+          voiceRuleSpeechTitle(rule) +
+          '">' +
+          voiceRuleSpeechState(rule) +
+          '</em><button type="button" class="rule-test" data-test-voice-rule="' +
           rule.id +
           '">测试触发</button><button type="button" class="rule-edit" data-edit-voice-rule="' +
           rule.id +
@@ -2994,8 +3626,8 @@ setTimeout(() => {
       tx("语音规则", "Voice rules") +
       "</b><small>" +
       tx(
-        "页面打开时由浏览器播报；页面关闭后由本机服务端接力播报（需语音总开关开启）。",
-        "The browser speaks while the page is open; the local server takes over after it closes (master switch on).",
+        "首页保持打开时即由浏览器播报，无需打开本设置面板；页面关闭或电脑重启后停止播报。",
+        "Speech runs while the home page is open; this settings panel does not need to remain open. It stops after the page closes or the computer restarts.",
       ) +
       "</small></div>" +
       (voiceRules.length
@@ -3042,9 +3674,25 @@ setTimeout(() => {
       "afterend",
       '<section id="voiceEntrySummary" class="voice-entry-summary"><div><b>市价</b><strong>--</strong></div><div class="voice-entry-values"></div></section>',
     );
+  voiceRuleModal
+    .querySelector('[name="kind"]')
+    .insertAdjacentHTML(
+      "beforeend",
+      `<option value="theoretical_liquidation_gap">${tx("距理论强平价警告", "Theoretical liquidation distance")}</option>`,
+    );
+  voiceRuleModal
+    .querySelector('[name="direction"]')
+    .closest("label")
+    .insertAdjacentHTML(
+      "afterend",
+      `<label id="voiceRulePositionSide" hidden>${tx("持仓方向", "Position side")}<select name="positionSide"><option value="long">${tx("做多", "Long")}</option><option value="short">${tx("做空", "Short")}</option></select></label>`,
+    );
   const voiceRuleForm = voiceRuleModal.querySelector("#voiceRuleForm"),
     voiceRuleCooldown = voiceRuleModal.querySelector("#voiceRuleCooldown"),
     voiceRuleDirection = voiceRuleModal.querySelector("#voiceRuleDirection"),
+    voiceRulePositionSide = voiceRuleModal.querySelector(
+      "#voiceRulePositionSide",
+    ),
     voiceRuleWindow = voiceRuleModal.querySelector("#voiceRuleWindow"),
     voiceEntrySummary = voiceRuleModal.querySelector("#voiceEntrySummary"),
     voiceRuleTargetLabel = voiceRuleModal.querySelector(
@@ -3052,6 +3700,35 @@ setTimeout(() => {
     ),
     voiceRuleTargetUnit = voiceRuleModal.querySelector("#voiceRuleTargetUnit"),
     voiceRuleSubmit = voiceRuleModal.querySelector(".alert-submit");
+  const theoreticalLiquidation = (side) => {
+    const entry = (
+      Array.isArray(window.btcPersonalEntries)
+        ? window.btcPersonalEntries
+        : typeof personalEntries !== "undefined"
+          ? personalEntries
+          : []
+    ).find((item) => item?.side === side && Number(item?.price) > 0);
+    if (!entry) return null;
+    const price = Number(entry.price),
+      amount = Number(entry.amount),
+      margin = Number(entry.margin),
+      leverage = Number(entry.leverage),
+      collateral =
+        Number.isFinite(margin) && margin > 0
+          ? margin
+          : Number.isFinite(amount) && amount > 0 && leverage > 0
+            ? amount / leverage
+            : null,
+      effectiveLeverage =
+        Number.isFinite(amount) && amount > 0 && collateral
+          ? amount / collateral
+          : null;
+    if (!Number.isFinite(effectiveLeverage) || effectiveLeverage <= 0)
+      return null;
+    return side === "short"
+      ? price * (1 + 1 / effectiveLeverage - 0.005)
+      : price * (1 - 1 / effectiveLeverage + 0.005);
+  };
   const updateVoiceEntrySummary = () => {
     const current = Number(state?.ticker?.last),
       entries = (
@@ -3074,15 +3751,42 @@ setTimeout(() => {
       ? current.toLocaleString("en-US", { maximumFractionDigits: 2 })
       : "--";
     voiceEntrySummary.querySelector(".voice-entry-values").innerHTML = entries
-      .map(
-        (entry) =>
-          `<span class="${entry.side === "short" ? "short" : "long"}">${entry.side === "short" ? tx("做空买入价", "Short entry price") : tx("做多买入价", "Long entry price")} <b>${Number(entry.price).toLocaleString("en-US", { maximumFractionDigits: 2 })}</b></span>`,
-      )
+      .map((entry) => {
+        const side = entry.side === "short" ? "short" : "long",
+          liquidation = theoreticalLiquidation(side),
+          entryText =
+            side === "short"
+              ? tx("做空买入价", "Short entry price")
+              : tx("做多买入价", "Long entry price"),
+          liqText =
+            side === "short"
+              ? tx("做空理论强平价", "Short theoretical liquidation")
+              : tx("做多理论强平价", "Long theoretical liquidation");
+        return `<span class="${side}">${entryText} <b>${Number(entry.price).toLocaleString("en-US", { maximumFractionDigits: 2 })}</b></span>${Number.isFinite(liquidation) ? `<button type="button" class="voice-theoretical-liquidation ${side}" data-voice-theoretical-liquidation="${side}" title="${tx("带入为爆仓价格规则", "Use as liquidation-price rule")}">${liqText} <b>${liquidation.toLocaleString("en-US", { maximumFractionDigits: 2 })}</b></button>` : ""}`;
+      })
       .join("");
+    voiceEntrySummary
+      .querySelectorAll("[data-voice-theoretical-liquidation]")
+      .forEach((button) => {
+        button.onclick = () => {
+          const side = button.dataset.voiceTheoreticalLiquidation,
+            liquidation = theoreticalLiquidation(side);
+          if (!Number.isFinite(liquidation)) return;
+          voiceRuleForm.elements.kind.value =
+            side === "short" ? "short_liquidation" : "long_liquidation";
+          voiceRuleForm.elements.target.value = liquidation.toFixed(2);
+          syncVoiceRuleForm();
+        };
+      });
   };
   const useVoiceMarketPrice = () => {
     if (
-      ["price_move", "price_speed", "price_tick_move"].includes(
+      [
+        "price_move",
+        "price_speed",
+        "price_tick_move",
+        "theoretical_liquidation_gap",
+      ].includes(
         voiceRuleForm.elements.kind.value,
       )
     )
@@ -3108,14 +3812,18 @@ setTimeout(() => {
       move = kind === "price_move",
       speed = kind === "price_speed",
       tick = kind === "price_tick_move",
+      theoreticalGap = kind === "theoretical_liquidation_gap",
       relative = move || speed || tick;
     if (relative && voiceRuleForm.elements.repeat.value === "once")
       voiceRuleForm.elements.repeat.value = "repeat";
     voiceRuleDirection.hidden = !relative;
+    voiceRulePositionSide.hidden = !theoreticalGap;
     voiceRuleWindow.hidden = !speed;
     voiceRuleCooldown.hidden = voiceRuleForm.elements.repeat.value !== "repeat";
     voiceRuleTargetLabel.textContent = relative
       ? tx("涨跌金额", "Move amount")
+      : theoreticalGap
+        ? tx("距理论强平价的警戒差额", "Warning distance from theoretical liquidation")
       : kind.includes("liquidation")
         ? tx("爆仓价格", "Liquidation price")
         : tx("目标价格", "Target price");
@@ -3124,10 +3832,17 @@ setTimeout(() => {
       ? "500"
       : relative
         ? "100"
+        : theoreticalGap
+          ? "500"
         : kind.includes("liquidation")
           ? "75000"
           : "80000";
-    voiceEntrySummary.querySelector("strong").title = relative
+    voiceEntrySummary.querySelector("strong").title = theoreticalGap
+      ? tx(
+          "系统会实时重算所选持仓的理论强平价；填写距强平价的警戒差额，例如 500。",
+          "The app recalculates the selected position's theoretical liquidation price; enter a warning distance, e.g. 500.",
+        )
+      : relative
       ? speed
         ? tx(
             "此规则比较当前价格与设定秒数前的价格；填写涨跌金额，例如 500。",
@@ -3155,6 +3870,8 @@ setTimeout(() => {
     if (rule) {
       voiceRuleForm.elements.kind.value = rule.kind;
       voiceRuleForm.elements.direction.value = rule.direction || "up";
+      voiceRuleForm.elements.positionSide.value =
+        rule.positionSide === "short" ? "short" : "long";
       voiceRuleForm.elements.target.value = rule.targetPrice;
       voiceRuleForm.elements.windowSeconds.value = rule.windowSeconds || 3;
       voiceRuleForm.elements.repeat.value = rule.repeat ? "repeat" : "once";
@@ -3192,8 +3909,22 @@ setTimeout(() => {
         voiceRuleForm.elements.direction.value,
       )
         ? voiceRuleForm.elements.direction.value
-        : "up";
+        : "up",
+      positionSide =
+        voiceRuleForm.elements.positionSide.value === "short"
+          ? "short"
+          : "long";
     if (!Number.isFinite(targetPrice) || targetPrice <= 0) return;
+    if (
+      kind === "theoretical_liquidation_gap" &&
+      !Number.isFinite(theoreticalLiquidation(positionSide))
+    ) {
+      status.textContent = tx(
+        "请先在“我的持仓”中填写该方向的开仓价、持仓量及保证金或杠杆。",
+        "Set that position's entry price, size, and margin or leverage in My Position first.",
+      );
+      return;
+    }
     const anchorPrice =
       kind === "price_move" ? Number(state?.ticker?.last) : null;
     if (kind === "price_move" && !Number.isFinite(anchorPrice)) return;
@@ -3202,6 +3933,7 @@ setTimeout(() => {
       kind,
       targetPrice,
       direction,
+      positionSide,
       anchorPrice,
       windowSeconds,
       repeat,
@@ -3220,6 +3952,15 @@ setTimeout(() => {
   $("voiceAlertAddRule").onclick = () => showVoiceRuleModal(true);
   const voiceMatched = (rule, from, to, now) => {
     const amount = Number(rule.targetPrice);
+    if (rule.kind === "theoretical_liquidation_gap") {
+      const liquidation = theoreticalLiquidation(
+        rule.positionSide === "short" ? "short" : "long",
+      );
+      if (!Number.isFinite(liquidation)) return false;
+      return rule.positionSide === "short"
+        ? to >= liquidation - amount
+        : to <= liquidation + amount;
+    }
     if (rule.kind === "price_move") {
       const anchor = Number(rule.anchorPrice),
         delta = to - anchor;
@@ -3267,7 +4008,21 @@ setTimeout(() => {
     return up ? to >= rule.targetPrice : to <= rule.targetPrice;
   };
   const voiceDirection = (rule, from, to, now) => {
-    if (rule.direction !== "both") return rule.direction;
+    if (rule.kind === "theoretical_liquidation_gap")
+      return rule.positionSide === "short" ? "up" : "down";
+    if (
+      rule.kind === "price_below" ||
+      rule.kind === "long_liquidation"
+    )
+      return "down";
+    if (
+      rule.kind === "price_above" ||
+      rule.kind === "short_liquidation"
+    )
+      return "up";
+    if (rule.kind === "price_reached") return to >= from ? "up" : "down";
+    if (rule.direction === "up" || rule.direction === "down")
+      return rule.direction;
     if (rule.kind === "price_move")
       return to >= Number(rule.anchorPrice) ? "up" : "down";
     if (rule.kind === "price_speed") {
@@ -3279,6 +4034,15 @@ setTimeout(() => {
     }
     return to >= from ? "up" : "down";
   };
+  const voiceChimeFor = (rule, direction) => {
+    if (
+      rule.kind === "long_liquidation" ||
+      rule.kind === "short_liquidation" ||
+      rule.kind === "theoretical_liquidation_gap"
+    )
+      return settings.liquidationChimeType;
+    return direction === "down" ? settings.dropChimeType : settings.riseChimeType;
+  };
   const voiceRuleMessage = (rule, current, direction) => {
     const target = Number(rule.targetPrice).toLocaleString("en-US", {
         maximumFractionDigits: 2,
@@ -3288,7 +4052,18 @@ setTimeout(() => {
       });
     const comparisonText = personalEntryComparisons(current).join(" ");
     let message;
-    if (rule.kind === "price_tick_move")
+    if (rule.kind === "theoretical_liquidation_gap") {
+      const side = rule.positionSide === "short" ? "short" : "long",
+        liquidation = theoreticalLiquidation(side),
+        gap = Number.isFinite(liquidation)
+          ? Math.abs(current - liquidation).toLocaleString("en-US", {
+              maximumFractionDigits: 2,
+            })
+          : "--";
+      message = uiLang === "zh"
+        ? `${side === "short" ? "做空" : "做多"}理论强平价警告。理论强平价 ${Number.isFinite(liquidation) ? liquidation.toLocaleString("en-US", { maximumFractionDigits: 2 }) : "暂不可用"}。当前价格 ${currentText}，距强平价 ${gap}。`
+        : `${side === "short" ? "Short" : "Long"} theoretical liquidation warning. The theoretical liquidation price is ${Number.isFinite(liquidation) ? liquidation.toLocaleString("en-US", { maximumFractionDigits: 2 }) : "unavailable"}. Current price is ${currentText}, ${gap} from liquidation.`;
+    } else if (rule.kind === "price_tick_move")
       message = uiLang === "zh"
         ? `价格跳动提醒。当前价格，${currentText}。较前一次报价${direction === "down" ? "下跌" : "上涨"} ${target}。`
         : `Price jump alert. Current price is ${currentText}. It moved ${direction === "down" ? "down" : "up"} ${target} from the previous quote.`;
@@ -3306,26 +4081,15 @@ setTimeout(() => {
         : `Price alert. Current price is ${currentText}. ${voiceRuleName(rule.kind)} ${target} triggered.`;
     return comparisonText ? `${message}${comparisonText}` : message;
   };
-  /* 规则真实触发时的可视反馈：状态文字 + 喇叭图标闪烁，避免“触发了但毫无感知”。 */
-  let voiceFlashTimer = null;
+  /* 规则真实触发时更新状态文字；播报按钮由实际播放开始／结束事件同步。 */
   const announceVoiceTrigger = (rule) => {
     const label =
-      voiceRuleName(rule.kind, rule.direction) +
+      voiceRuleName(rule.kind, rule.direction, rule.positionSide) +
       " " +
       Number(rule.targetPrice).toLocaleString("en-US", {
         maximumFractionDigits: 2,
-      });
+    });
     status.textContent = tx(`已播报：${label}`, `Spoke: ${label}`);
-    if (trigger) {
-      trigger.classList.remove("is-speaking");
-      void trigger.offsetWidth;
-      trigger.classList.add("is-speaking");
-    }
-    clearTimeout(voiceFlashTimer);
-    voiceFlashTimer = setTimeout(() => {
-      trigger?.classList.remove("is-speaking");
-      render();
-    }, 6_000);
   };
   const testVoiceRule = (rule) => {
     const current = Number(state?.ticker?.last);
@@ -3333,10 +4097,16 @@ setTimeout(() => {
       status.textContent = tx("实时价格尚未加载", "Live price is not loaded");
       return;
     }
-    const direction = rule.direction === "down" ? "down" : "up",
+    const direction = voiceDirection(
+      rule,
+      current,
+      current,
+      Date.now(),
+    ),
       wasEnabled = settings.enabled;
     settings.enabled = true;
     say(voiceRuleMessage(rule, current, direction), {
+      chimeType: voiceChimeFor(rule, direction),
       onStarted: () => {
         status.textContent = tx("规则测试正在播放", "Rule test playing");
       },
@@ -3363,6 +4133,7 @@ setTimeout(() => {
       voicePrevious = current;
       return;
     }
+    const triggeredBatch = [];
     if (settings.enabled)
       for (const rule of voiceRules) {
         if (!rule.repeat && rule.lastTriggeredAt) continue;
@@ -3388,16 +4159,30 @@ setTimeout(() => {
           if (rule.kind === "price_move" && rule.repeat)
             rule.anchorPrice = current;
           saveVoiceRules();
-          say(voiceRuleMessage(rule, current, direction));
-          announceVoiceTrigger(rule);
-          renderVoiceRules();
+          triggeredBatch.push({ rule, direction });
         }
         rule.satisfied = satisfied;
       }
+    /* 同一秒内多条规则同时命中：按「播报优先级」排序后依次入队播报，
+       而不是互相掐掉（此前数组靠后的规则会直接 cancel 前面的）。 */
+    triggeredBatch
+      .map((item, index) => ({
+        ...item,
+        rank: speechRankOfRule(item.rule) * 1000 + index,
+      }))
+      .sort((a, b) => a.rank - b.rank)
+      .forEach(({ rule, direction, rank }) => {
+        enqueueSpeech(voiceRuleMessage(rule, current, direction), {
+          chimeType: voiceChimeFor(rule, direction),
+        }, rank);
+        announceVoiceTrigger(rule);
+      });
+    if (triggeredBatch.length) renderVoiceRules();
     voicePrevious = current;
   }, 1_000);
   window.addEventListener("btc:voice-language-changed", () => {
     filterEdgeVoices();
+    renderPriority();
     render();
   });
   /* 「添加预警」里勾选“触发时语音播报”的规则在触发时会派发该事件——
@@ -3412,7 +4197,9 @@ setTimeout(() => {
       rule.kind === "price_below" || rule.kind === "long_liquidation"
         ? "down"
         : "up";
-    say(voiceRuleMessage({ ...rule, direction }, current, direction));
+    say(voiceRuleMessage({ ...rule, direction }, current, direction), {
+      chimeType: voiceChimeFor(rule, direction),
+    });
   });
   if (supported) {
     window.speechSynthesis.addEventListener?.("voiceschanged", populateVoices);
@@ -3544,21 +4331,166 @@ const fixedRuleSignal = {
   source: "",
   closedAt: 0,
   loading: false,
+  confirmations: {},
+  presentation: null,
 };
+/* Keep enough closed history to warm up EMA200 before it affects the live
+   signal.  The chart's own range remains a presentation-only setting. */
+const RULE_SIGNAL_MIN_CANDLES = 200;
+const RULE_SIGNAL_HISTORY_CANDLES = 800;
+const RULE_SIGNAL_ENTER_SCORE = 45;
+const RULE_SIGNAL_EXIT_SCORE = 28;
+const RULE_SIGNAL_CONFIRM_INTERVALS = ["15m", "1h"];
+const RULE_SIGNAL_REENTRY_CANDLES = 2;
+function ruleDirectionForScore(score, threshold = RULE_SIGNAL_ENTER_SCORE) {
+  return score >= threshold ? "bull" : score <= -threshold ? "bear" : "flat";
+}
+function ruleSignalLabel(kind) {
+  return kind === "bull" ? tx("做多", "Long") : kind === "bear" ? tx("做空", "Short") : tx("观望", "Wait");
+}
+function stableRuleStorageKey(source, interval) {
+  return `btc_rule_signal_stable_v1:${source}:${interval}`;
+}
+function recentRuleDirections(candles) {
+  return [2, 1, 0].map((offset) =>
+    ruleDirectionForScore(metrics(candles.slice(0, candles.length - offset)).score),
+  );
+}
+function deriveStableRulePresentation() {
+  const candles = fixedRuleSignal.candles;
+  if (candles.length < RULE_SIGNAL_MIN_CANDLES) return null;
+  const metric = metrics(candles),
+    source = fixedRuleSignal.source || state.source || "okx",
+    storageKey = stableRuleStorageKey(source, fixedRuleSignal.interval),
+    current = ruleDirectionForScore(metric.score),
+    recent = recentRuleDirections(candles),
+    sustained =
+      current !== "flat" &&
+      recent.filter((kind) => kind === current).length >= 2;
+  let saved = {};
+  try {
+    saved = JSON.parse(localStorage.getItem(storageKey) || "{}");
+  } catch {}
+  let held = saved.direction || "flat";
+  if (held !== "bull" && held !== "bear") held = "flat";
+  const invalidatedClosedAt = Number(saved.invalidatedClosedAt) || 0,
+    reentryCandles = invalidatedClosedAt
+      ? candles.filter((candle) => candle.time > invalidatedClosedAt).length
+      : RULE_SIGNAL_REENTRY_CANDLES,
+    revalidating =
+      invalidatedClosedAt > 0 && reentryCandles < RULE_SIGNAL_REENTRY_CANDLES;
+  if (revalidating) held = "flat";
+  if (held === "flat" && sustained) held = current;
+  else if (held !== "flat" && sustained && current !== held) held = current;
+  else if (held !== "flat" && Math.abs(metric.score) <= RULE_SIGNAL_EXIT_SCORE) held = "flat";
+  if (revalidating) held = "flat";
+  try {
+    localStorage.setItem(
+      storageKey,
+      JSON.stringify({
+        direction: held,
+        closedAt: fixedRuleSignal.closedAt,
+        invalidatedClosedAt: revalidating ? invalidatedClosedAt : null,
+      }),
+    );
+  } catch {}
+  const confirmations = RULE_SIGNAL_CONFIRM_INTERVALS.map((interval) => {
+      const rows = interval === fixedRuleSignal.interval ? candles : fixedRuleSignal.confirmations[interval]?.candles;
+      return rows?.length >= RULE_SIGNAL_MIN_CANDLES
+        ? { interval, direction: ruleDirectionForScore(metrics(rows).score, 45) }
+        : { interval, direction: "pending" };
+    }),
+    agreeing = confirmations.filter((item) => item.direction === held).length,
+    opposing = confirmations.some(
+      (item) =>
+        item.direction !== "pending" &&
+        item.direction !== "flat" &&
+        item.direction !== held,
+    ),
+    ready = confirmations.every((item) => item.direction !== "pending"),
+    confirmed =
+      held !== "flat" &&
+      !opposing &&
+      (agreeing >= 1 || (sustained && Math.abs(metric.score) >= RULE_SIGNAL_ENTER_SCORE)),
+    trendObserved = !confirmed && current !== "flat";
+  return {
+    rawScore: metric.score,
+    held,
+    confirmed,
+    ready,
+    confirmations,
+    revalidating,
+    reentryCandles,
+    candidate: current,
+    trendObserved,
+    label: revalidating
+      ? tx("重新评估中", "Re-evaluating")
+      : confirmed
+        ? agreeing >= 1
+          ? ruleSignalLabel(held)
+          : `${ruleSignalLabel(held)}${tx("趋势", " trend")}`
+        : trendObserved
+          ? `${current === "bull" ? tx("偏多趋势", "Bullish trend") : tx("偏空趋势", "Bearish trend")}${tx(" · 待收盘", " · close pending")}`
+          : tx("观望 · 等待确认", "Wait · confirmation pending"),
+    cls: revalidating ? "flat" : confirmed ? held : trendObserved ? current : "flat",
+  };
+}
+function invalidateFixedRuleSignal() {
+  if (!fixedRuleSignal.closedAt) return false;
+  const source = fixedRuleSignal.source || state.source || "okx",
+    storageKey = stableRuleStorageKey(source, fixedRuleSignal.interval);
+  let saved = {};
+  try {
+    saved = JSON.parse(localStorage.getItem(storageKey) || "{}");
+  } catch {}
+  if (Number(saved.invalidatedClosedAt) === fixedRuleSignal.closedAt) return false;
+  try {
+    localStorage.setItem(
+      storageKey,
+      JSON.stringify({
+        ...saved,
+        direction: "flat",
+        invalidatedClosedAt: fixedRuleSignal.closedAt,
+      }),
+    );
+  } catch {}
+  fixedRuleSignal.presentation = deriveStableRulePresentation();
+  return true;
+}
+async function loadRuleSignalConfirmations(source) {
+  const requested = RULE_SIGNAL_CONFIRM_INTERVALS.filter((interval) => interval !== fixedRuleSignal.interval);
+  const results = await Promise.all(
+    requested.map(async (interval) => {
+      try {
+        const query = new URLSearchParams({ source, interval, limit: String(RULE_SIGNAL_HISTORY_CANDLES + 1) });
+        const response = await fetch("/api/market?" + query), data = await response.json();
+        if (!response.ok) return null;
+        const candles = data.candles.slice(0, -1).slice(-RULE_SIGNAL_HISTORY_CANDLES);
+        return candles.length >= RULE_SIGNAL_MIN_CANDLES ? [interval, { candles, closedAt: candles.at(-1)?.time }] : null;
+      } catch {
+        return null;
+      }
+    }),
+  );
+  results.filter(Boolean).forEach(([interval, value]) => (fixedRuleSignal.confirmations[interval] = value));
+}
+function fixedRuleHistoryCount() {
+  return fixedRuleSignal.candles.length || RULE_SIGNAL_HISTORY_CANDLES;
+}
 function fixedRuleBasisText() {
   const source =
       { okx: "OKX", coinbase: "Coinbase", binance: "Binance", gate: "Gate" }[
         fixedRuleSignal.source || state.source
       ] || "--",
-    label =
+    intervalLabel =
       {
-        "5m": "5分钟",
-        "15m": "15分钟",
-        "30m": "30分钟",
-        "1h": "1小时",
-        "3h": "3小时",
+        "5m": tx("5分钟", "5 min"),
+        "15m": tx("15分钟", "15 min"),
+        "30m": tx("30分钟", "30 min"),
+        "1h": tx("1小时", "1 hour"),
+        "3h": tx("3小时", "3 hours"),
       }[fixedRuleSignal.interval] || fixedRuleSignal.interval;
-  return `基准：${source} · ${label} · 最近 200 根已收盘 K 线`;
+  return `${tx("基准", "Basis")}：${source} · ${intervalLabel} · ${tx("最近", "latest")} ${fixedRuleHistoryCount()} ${tx("根已收盘 K 线", "closed candles")}`;
 }
 function renderFixedIndicatorDetails(m) {
   const indicators = $("indicators");
@@ -3599,6 +4531,7 @@ function renderFixedIndicatorDetails(m) {
     )
     .join("");
   const interval = fixedRuleSignal.interval,
+    historyCount = fixedRuleHistoryCount(),
     minutes =
       { "5m": 5, "15m": 15, "30m": 30, "1h": 60, "3h": 180 }[interval] || 15,
     period = (n) => {
@@ -3619,8 +4552,8 @@ function renderFixedIndicatorDetails(m) {
         "EMA50 tracks the latest 50 basis candles and is smoother than EMA20. Above is bullish; below is bearish.",
       ],
       EMA200: [
-        `EMA200 看最近 200 根 ${interval} K 线（约 ${period(200)}），用于长趋势背景。数据不足时显示 -- 和中性。`,
-        "EMA200 uses the latest 200 basis candles for long-trend context. Missing data is shown as neutral.",
+        `EMA200 使用最近 ${historyCount} 根 ${interval} K 线预热，并以最后 200 根（约 ${period(200)}）作为长趋势窗口。数据不足时显示 -- 和中性。`,
+        `EMA200 is warmed up with the latest ${historyCount} basis candles and uses the final 200 candles for long-trend context. Missing data is shown as neutral.`,
       ],
       "RSI(14)": [
         `衡量最近 14 根 ${interval} K 线的动量。高于 55 标记看多，低于 45 标记看空，45–55 为中性。`,
@@ -3641,20 +4574,54 @@ function renderFixedIndicatorDetails(m) {
   });
 }
 function renderFixedRuleSignal() {
-  if (fixedRuleSignal.candles.length < 200) return;
+  if (fixedRuleSignal.candles.length < RULE_SIGNAL_MIN_CANDLES) return;
   const m = metrics(fixedRuleSignal.candles),
-    [label, cls] = classification(m.score),
+    presentation =
+      fixedRuleSignal.presentation || deriveStableRulePresentation(),
+    label = presentation?.label || classification(m.score)[0],
+    cls = presentation?.cls || classification(m.score)[1],
     signal = $("signal"),
     reason = $("signalReason");
+  // Keep the distinction visible: a short-term trend may be observed before
+  // it is safe to promote it to an executable, multi-timeframe signal.
+  const observedDirection =
+    !presentation?.revalidating && !presentation?.confirmed
+      ? ruleDirectionForScore(m.score)
+      : "flat";
+  const showingTrendObservation = observedDirection !== "flat";
+  const visibleLabel = showingTrendObservation
+    ? `${observedDirection === "bull" ? tx("偏多趋势", "Bullish trend") : tx("偏空趋势", "Bearish trend")}${tx(" · 待收盘", " · close pending")}`
+    : label;
+  const visibleCls = showingTrendObservation ? observedDirection : cls;
+  if (!fixedRuleSignal.presentation) fixedRuleSignal.presentation = presentation;
   if (signal) {
-    signal.textContent = `${label} ${m.score > 0 ? "+" : ""}${m.score.toFixed(2)}`;
-    signal.className = `signal ${cls}`;
+    signal.textContent = presentation?.confirmed
+      ? `${label} ${m.score > 0 ? "+" : ""}${m.score.toFixed(2)}`
+      : visibleLabel;
+    signal.className = `signal ${visibleCls}`;
+  }
+  /* 基准周期徽章贴在卡片标题「当前规则信号」旁；标题文本会被语言切换覆写，
+     所以徽章作为标题的兄弟节点插入，避免被 textContent 清掉。 */
+  const ruleHeading = signal?.closest("article")?.querySelector("h2");
+  if (ruleHeading) {
+    let chip = ruleHeading.parentElement.querySelector(".signal-basis-chip");
+    if (!chip) {
+      chip = document.createElement("i");
+      chip.className = "signal-basis-chip";
+      ruleHeading.after(chip);
+    }
+    chip.textContent = fixedRuleSignal.interval;
+    chip.dataset.tone = visibleCls;
+    chip.title = tx(
+      `当前规则信号基于 ${fixedRuleSignal.interval} 已收盘 K 线计算`,
+      `Rule signal is computed from closed ${txInterval(fixedRuleSignal.interval)} candles`,
+    );
   }
   /* Keep the signal card's accent aligned with the actual rule direction.
      The attribute is presentation-only; it never affects the score or rule. */
   const signalCard = $("ruleSignalCard");
-  if (signalCard) signalCard.dataset.signalTone = cls;
-  document.documentElement.dataset.ruleSignalTone = cls;
+  if (signalCard) signalCard.dataset.signalTone = visibleCls;
+  document.documentElement.dataset.ruleSignalTone = visibleCls;
   if (reason)
     reason.innerHTML = `<span class="signal-summary"><b class="signal-indicator ${m.close >= m.e20 ? "bull" : "bear"}">EMA20 ${money(m.e20)}</b><i>·</i><b class="signal-indicator ${m.close >= m.e50 ? "bull" : "bear"}">EMA50 ${money(m.e50)}</b><i>·</i><b class="signal-indicator ${m.rsi >= 50 ? "bull" : "bear"}">RSI(14) ${m.rsi.toFixed(2)}</b><i>·</i><b class="signal-indicator ${m.macd >= 0 ? "bull" : "bear"}">MACD ${m.macd.toFixed(2)}</b></span>`;
   renderFixedIndicatorDetails(m);
@@ -3669,8 +4636,14 @@ function renderFixedRuleSignal() {
     basis.className = "fixed-rule-basis";
     reason.after(basis);
   }
-  if (basis)
-    basis.textContent = `${fixedRuleBasisText()} · 最近收盘 ${pointTime(fixedRuleSignal.closedAt)}`;
+  if (basis) {
+    const confirmation = presentation
+      ? presentation.confirmations
+          .map((item) => `${item.interval} ${item.direction === "pending" ? tx("加载中", "loading") : ruleSignalLabel(item.direction)}`)
+          .join(" · ")
+      : "";
+    basis.textContent = `${fixedRuleBasisText()} · ${tx("最近收盘", "Last close")} ${pointTime(fixedRuleSignal.closedAt)}${confirmation ? ` · ${tx("周期校验", "Timeframes")}: ${confirmation}` : ""}`;
+  }
 }
 async function loadFixedRuleSignal(force = false) {
   if (fixedRuleSignal.loading) return;
@@ -3680,17 +4653,18 @@ async function loadFixedRuleSignal(force = false) {
       query = new URLSearchParams({
         source,
         interval: fixedRuleSignal.interval,
-        limit: "201",
+        limit: String(RULE_SIGNAL_HISTORY_CANDLES + 1),
       }),
       response = await fetch("/api/market?" + query),
       data = await response.json();
     if (!response.ok) throw data;
-    const candles = data.candles.slice(0, -1).slice(-200),
+    const candles = data.candles.slice(0, -1).slice(-RULE_SIGNAL_HISTORY_CANDLES),
       closedAt = candles.at(-1)?.time,
       key = `${data.source}:${fixedRuleSignal.interval}:${closedAt}`;
     if (
-      candles.length === 200 &&
+      candles.length >= RULE_SIGNAL_MIN_CANDLES &&
       (force ||
+        candles.length !== fixedRuleSignal.candles.length ||
         key !==
           `${fixedRuleSignal.source}:${fixedRuleSignal.interval}:${fixedRuleSignal.closedAt}`)
     ) {
@@ -3698,7 +4672,12 @@ async function loadFixedRuleSignal(force = false) {
       fixedRuleSignal.source = data.source;
       fixedRuleSignal.closedAt = closedAt;
     }
+    fixedRuleSignal.presentation = deriveStableRulePresentation();
     renderFixedRuleSignal();
+    void loadRuleSignalConfirmations(data.source || source).then(() => {
+      fixedRuleSignal.presentation = deriveStableRulePresentation();
+      renderFixedRuleSignal();
+    });
   } catch {
   } finally {
     fixedRuleSignal.loading = false;
@@ -3711,18 +4690,24 @@ async function loadFixedRuleSignal(force = false) {
   const control = document.createElement("label");
   control.id = "fixedRuleControl";
   control.className = "fixed-rule-control";
-  control.innerHTML = `<span>信号基准</span><select aria-label="信号基准周期"><option value="5m">5分钟</option><option value="15m">15分钟</option><option value="30m">30分钟</option><option value="1h">1小时</option><option value="3h">3小时</option></select>`;
+  control.innerHTML = `<span>${tx("信号基准", "Signal basis")}</span><select aria-label="${tx("信号基准周期", "Signal basis interval")}"><option value="5m">${tx("5分钟", "5 min")}</option><option value="15m">${tx("15分钟", "15 min")}</option><option value="30m">${tx("30分钟", "30 min")}</option><option value="1h">${tx("1小时", "1 hour")}</option><option value="3h">${tx("3小时", "3 hours")}</option></select>`;
   const select = control.querySelector("select");
   select.value = fixedRuleSignal.interval;
   select.onchange = () => {
     fixedRuleSignal.interval = select.value;
     fixedRuleSignal.candles = [];
     fixedRuleSignal.closedAt = 0;
+    fixedRuleSignal.confirmations = {};
+    fixedRuleSignal.presentation = null;
     localStorage.setItem("btc_rule_signal_interval", select.value);
     loadFixedRuleSignal(true);
   };
   heading.after(control);
-  $("source")?.addEventListener("change", () => loadFixedRuleSignal(true));
+  $("source")?.addEventListener("change", () => {
+    fixedRuleSignal.confirmations = {};
+    fixedRuleSignal.presentation = null;
+    loadFixedRuleSignal(true);
+  });
   loadFixedRuleSignal(true);
   setInterval(() => loadFixedRuleSignal(), 15_000);
 })();
@@ -3785,14 +4770,48 @@ function drawCandlestickChart() {
   const nextW = Math.round(w * dpr), nextH = Math.round(h * dpr);
   if (cv.width !== nextW) cv.width = nextW;
   if (cv.height !== nextH) cv.height = nextH;
-  const c = cv.getContext("2d"),
-    P = { l: 52, r: 74, t: 15, b: 30 },
+  const     c = cv.getContext("2d"),
+    P = { l: 52, r: 74, t: 15, b: 8 },
     cw = w - P.l - P.r,
-    ch = h - P.t - P.b;
+    ch = h - P.t - P.b,
+    priceHeight = ch;
   const closes = d.map((v) => v.close),
     ma20 = ema(closes, 20),
     ma50 = ema(closes, 50),
     ma200 = ema(closes, 200);
+  /* 布林带：SMA20 中轨，±2σ 上下轨。 */
+  const bollPeriod = 20,
+    bollK = 2,
+    basisArr = sma(closes, bollPeriod),
+    upperArr = [],
+    lowerArr = [];
+  for (let bi = 0; bi < closes.length; bi++) {
+    const s = Math.max(0, bi - bollPeriod + 1),
+      slice = closes.slice(s, bi + 1),
+      mean = slice.reduce((a, v) => a + v, 0) / slice.length,
+      variance = slice.reduce((a, v) => a + (v - mean) ** 2, 0) / slice.length,
+      sd = Math.sqrt(variance);
+    upperArr.push(mean + bollK * sd);
+    lowerArr.push(mean - bollK * sd);
+  }
+  /* 日内 VWAP：按每根 K 线所属 UTC 日累计的典型价加权均价，跨日重置。 */
+  const sessionVwapArr = [],
+    vwapDayMs = 86_400_000;
+  let vwapDay = -1,
+    cumPV = 0,
+    cumVol = 0;
+  for (const c of d) {
+    const day = Math.floor(c.time / vwapDayMs) * vwapDayMs;
+    if (day !== vwapDay) {
+      vwapDay = day;
+      cumPV = 0;
+      cumVol = 0;
+    }
+    const typical = (c.high + c.low + c.close) / 3;
+    cumPV += typical * c.volume;
+    cumVol += c.volume;
+    sessionVwapArr.push(cumVol ? cumPV / cumVol : NaN);
+  }
   const entryLevels = (window.btcPersonalEntries || [])
     .filter(
       (entry) =>
@@ -3803,7 +4822,7 @@ function drawCandlestickChart() {
       side: entry.side === "short" ? "short" : "long",
     }));
   const values = d.flatMap((v) => [v.low, v.high]);
-  [ma20, ma50, ma200].forEach((a) =>
+  [ma20, ma50, ma200, upperArr, lowerArr].forEach((a) =>
     a.forEach((v) => {
       if (Number.isFinite(v)) values.push(v);
     }),
@@ -3831,7 +4850,7 @@ function drawCandlestickChart() {
   lo -= margin;
   hi += margin;
   const x = (i) => P.l + (i / Math.max(1, d.length - 1)) * cw,
-    y = (v) => P.t + ch - ((v - lo) / (hi - lo)) * ch;
+    y = (v) => P.t + priceHeight - ((v - lo) / (hi - lo)) * priceHeight;
   c.setTransform(dpr, 0, 0, dpr, 0, 0);
   c.clearRect(0, 0, w, h);
   c.font = "11px system-ui";
@@ -3842,7 +4861,7 @@ function drawCandlestickChart() {
   // Right-align Y-axis labels inside the right padding so long price strings (e.g. 80019.01) don't bleed into the chart area.
   c.textAlign = "right";
   for (let g = 0; g < 5; g++) {
-    const yy = P.t + (g * ch) / 4;
+    const yy = P.t + (g * priceHeight) / 4;
     c.beginPath();
     c.moveTo(P.l, yy);
     c.lineTo(P.l + cw, yy);
@@ -3851,8 +4870,49 @@ function drawCandlestickChart() {
   }
   c.textAlign = "start";
   const candleWidth = Math.max(2, Math.min(14, (cw / d.length) * 0.64)),
-    lines = state.chartLines || { ma20: true, ma50: true, ma200: true },
-    series = state.chartSeries || { candles: true, close: false };
+    lines = state.chartLines || { ma20: true, ma50: true, ma200: true, boll: true, vwap: true },
+    series = state.chartSeries || { candles: true, close: false, volume: true, rsi: true };
+  /* 成交量已合并到下方副图（RSI 副图的下半部分），主图只画价格。 */
+  /* 布林带：上轨—下轨之间填充淡色，再画三条边线（中轨为虚线 SMA20）。 */
+  if (lines.boll !== false) {
+    c.save();
+    c.beginPath();
+    let started = false;
+    for (let i = 0; i < d.length; i++) {
+      if (!Number.isFinite(upperArr[i]) || !Number.isFinite(lowerArr[i])) continue;
+      const xx = x(i);
+      if (!started) {
+        c.moveTo(xx, y(upperArr[i]));
+        started = true;
+      } else c.lineTo(xx, y(upperArr[i]));
+    }
+    for (let i = d.length - 1; i >= 0; i--) {
+      if (!Number.isFinite(upperArr[i]) || !Number.isFinite(lowerArr[i])) continue;
+      c.lineTo(x(i), y(lowerArr[i]));
+    }
+    c.closePath();
+    c.fillStyle = "rgba(150,180,220,.07)";
+    c.fill();
+    const bandLine = (arr, color) => {
+      c.beginPath();
+      traceSmoothChartLine(c, arr, x, y);
+      c.lineJoin = "round";
+      c.lineCap = "round";
+      c.strokeStyle = color;
+      c.lineWidth = 1;
+      c.stroke();
+    };
+    bandLine(upperArr, "rgba(124,154,196,.6)");
+    bandLine(lowerArr, "rgba(124,154,196,.6)");
+    c.beginPath();
+    traceSmoothChartLine(c, basisArr, x, y);
+    c.setLineDash([4, 3]);
+    c.strokeStyle = "rgba(178,198,228,.55)";
+    c.lineWidth = 1;
+    c.stroke();
+    c.setLineDash([]);
+    c.restore();
+  }
   if (series.candles)
     d.forEach((v, i) => {
       const xx = x(i),
@@ -3890,24 +4950,24 @@ function drawCandlestickChart() {
           hammer ? "H" : "S",
           xx,
           hammer
-            ? Math.min(P.t + ch - 3, y(v.low) + 14)
+            ? Math.min(P.t + priceHeight - 3, y(v.low) + 14)
             : Math.max(P.t + 10, y(v.high) - 7),
         );
         c.restore();
       }
     });
-  /* Close-price trace uses the same teal as the “价格” legend. */
+  /* 价格线：青色细线 + 收窄的深色描边，深浅主题都清晰且不压蜡烛。 */
   if (series.close) {
     c.save();
     c.beginPath();
     traceSmoothChartLine(c, closes, x, y);
     c.lineJoin = "round";
     c.lineCap = "round";
-    c.strokeStyle = "rgba(10,22,42,.72)";
-    c.lineWidth = 4.4;
+    c.strokeStyle = "rgba(10,22,42,.55)";
+    c.lineWidth = 3;
     c.stroke();
-    c.strokeStyle = "#00d4aa";
-    c.lineWidth = 2.25;
+    c.strokeStyle = "#00c8e0";
+    c.lineWidth = 1.3;
     c.stroke();
     c.restore();
   }
@@ -3924,6 +4984,20 @@ function drawCandlestickChart() {
   line(ma20, "#4b9fff", lines.ma20);
   line(ma50, "#d69b2d", lines.ma50);
   line(ma200, "#a970ff", lines.ma200);
+  /* 日内 VWAP：按每根 K 线所属 UTC 日累计的动态线，作为多空分水岭。 */
+  if (lines.vwap !== false) {
+    c.save();
+    c.beginPath();
+    traceSmoothChartLine(c, sessionVwapArr, x, y);
+    c.lineJoin = "round";
+    c.lineCap = "round";
+    c.strokeStyle = "#ff5cd0";
+    c.lineWidth = 1.25;
+    c.setLineDash([6, 4]);
+    c.stroke();
+    c.setLineDash([]);
+    c.restore();
+  }
   entryLevelsWithPlacement.forEach((entry, index) => {
     const color = entry.side === "short" ? "#ff5b7b" : "#19d3b0",
       edgeOffset = Math.floor(index / 2) * 20,
@@ -3931,7 +5005,7 @@ function drawCandlestickChart() {
         entry.placement === "top"
           ? P.t + 9 + edgeOffset
           : entry.placement === "bottom"
-            ? P.t + ch - 9 - edgeOffset
+            ? P.t + priceHeight - 9 - edgeOffset
             : y(entry.price),
       label = `${entry.side === "short" ? tx("做空买入价", "Short entry") : tx("做多买入价", "Long entry")} ${money(entry.price)}${entry.placement === "top" ? " ↑" : entry.placement === "bottom" ? " ↓" : ""}`;
     c.save();
@@ -3948,10 +5022,10 @@ function drawCandlestickChart() {
     const width = Math.min(c.measureText(label).width + 12, cw - 10),
       labelY =
         entry.placement === "top"
-          ? Math.min(P.t + ch - 20, yy + 5)
+          ? Math.min(P.t + priceHeight - 20, yy + 5)
           : entry.placement === "bottom"
             ? Math.max(P.t + 3, yy - 20)
-            : Math.max(P.t + 3, Math.min(P.t + ch - 20, yy - (index ? 0 : 18)));
+            : Math.max(P.t + 3, Math.min(P.t + priceHeight - 20, yy - (index ? 0 : 18)));
     c.fillStyle =
       entry.side === "short" ? "rgba(255,91,123,.18)" : "rgba(25,211,176,.18)";
     c.fillRect(P.l + 5, labelY, width, 17);
@@ -3992,46 +5066,72 @@ function drawCandlestickChart() {
     c.stroke();
     c.restore();
   }
-  for (let g = 0; g < 5; g++) {
-    const i = Math.round((g * (d.length - 1)) / 4);
-    c.fillStyle = "#75849a";
-    c.textAlign = g === 0 ? "left" : g === 4 ? "right" : "center";
-    c.fillText(
-      time(d[i].time),
-      g === 0 ? P.l : g === 4 ? P.l + cw : x(i),
-      h - 8,
-    );
-  }
   if (chartSelection) {
     const a = Math.min(chartSelection.start, chartSelection.end),
       b = Math.max(chartSelection.start, chartSelection.end);
     c.fillStyle = "rgba(75,159,255,.13)";
-    c.fillRect(x(a), P.t, x(b) - x(a), ch);
+    c.fillRect(x(a), P.t, x(b) - x(a), priceHeight);
     c.strokeStyle = "rgba(135,190,255,.9)";
     c.setLineDash([4, 4]);
-    c.strokeRect(x(a), P.t, x(b) - x(a), ch);
+    c.strokeRect(x(a), P.t, x(b) - x(a), priceHeight);
     c.setLineDash([]);
   }
   if (hoverPoint) {
     const xx = Math.max(P.l, Math.min(P.l + cw, hoverPoint.x)),
-      yy = Math.max(P.t, Math.min(P.t + ch, hoverPoint.y));
+      yy = Math.max(P.t, Math.min(P.t + priceHeight, hoverPoint.y));
     c.save();
     c.strokeStyle = "rgba(222,237,255,.42)";
     c.setLineDash([3, 4]);
     c.beginPath();
     c.moveTo(xx, P.t);
-    c.lineTo(xx, P.t + ch);
-    c.moveTo(P.l, yy);
-    c.lineTo(P.l + cw, yy);
+    c.lineTo(xx, P.t + priceHeight);
+    // 焦点在 RSI 子图时只画竖线贯穿主图，不画水平线与圆点。
+    if (!hoverPoint.sub) {
+      c.moveTo(P.l, yy);
+      c.lineTo(P.l + cw, yy);
+    }
     c.stroke();
     c.setLineDash([]);
-    c.fillStyle = "#fff";
-    c.beginPath();
-    c.arc(xx, yy, 3.5, 0, Math.PI * 2);
-    c.fill();
+    if (!hoverPoint.sub) {
+      c.fillStyle = "#fff";
+      c.beginPath();
+      c.arc(xx, yy, 3.5, 0, Math.PI * 2);
+      c.fill();
+    }
+    c.restore();
+  }
+  /* 主图右上角状态角标：布林 %b 超买、跌破日内 VWAP 转弱。 */
+  const lastClose = closes.at(-1),
+    lb = lowerArr.at(-1),
+    ub = upperArr.at(-1),
+    bbPct = Number.isFinite(lb) && Number.isFinite(ub) ? (lastClose - lb) / ((ub - lb) || 1) : NaN,
+    vwapLast = sessionVwapArr.at(-1),
+    badges = [];
+  if (Number.isFinite(bbPct) && bbPct >= 0.83)
+    badges.push([`超买 BOLL ${Math.round(bbPct * 100)}%`, "#ffb454"]);
+  if (Number.isFinite(vwapLast) && lastClose < vwapLast)
+    badges.push(["跌破 VWAP · 转弱", "#ff6b81"]);
+  if (badges.length) {
+    c.save();
+    const lightTheme = document.documentElement.getAttribute("data-theme") === "light";
+    c.font = "700 11px ui-sans-serif,system-ui";
+    c.textAlign = "right";
+    let by = P.t + 14;
+    for (const [txt, col] of badges) {
+      const tw = c.measureText(txt).width + 14;
+      c.fillStyle = lightTheme ? "rgba(255,255,255,.82)" : "rgba(20,28,40,.78)";
+      c.fillRect(P.l + cw - tw, by - 12, tw, 17);
+      c.strokeStyle = col;
+      c.lineWidth = 1;
+      c.strokeRect(P.l + cw - tw, by - 12, tw, 17);
+      c.fillStyle = lightTheme ? "#7a4a00" : col;
+      c.fillText(txt, P.l + cw - 7, by);
+      by += 21;
+    }
     c.restore();
   }
   renderRangeExtremaPoints();
+  drawRsiChart();
 }
 const syncHoverPoint = (event) => {
   const cv = $("chart"),
@@ -4041,11 +5141,13 @@ const syncHoverPoint = (event) => {
   const P = { l: 52, r: 74, t: 15, b: 30 },
     cw = rect.width - P.l - P.r,
     ch = rect.height - P.t - P.b,
+    priceHeight = ch - Math.max(42, Math.round(ch * 0.24)) - 8,
     rawX = event.clientX - rect.left,
     rawY = event.clientY - rect.top;
   hoverPoint = {
     x: Math.max(P.l, Math.min(P.l + cw, rawX)),
-    y: Math.max(P.t, Math.min(P.t + ch, rawY)),
+    y: Math.max(P.t, Math.min(P.t + priceHeight, rawY)),
+    sub: false,
   };
   hoverIndex = Math.max(
     0,
@@ -4060,6 +5162,232 @@ $("chart")?.addEventListener("pointermove", syncHoverPoint);
 $("chart")?.addEventListener("mouseleave", () => {
   hoverPoint = null;
 });
+
+/* RSI 子图聚焦状态：null=默认叠显；"volume"=成交量柱凸显；"rsi"=RSI 凸显、柱压暗后推。 */
+let rsiPaneFocus = null;
+
+function drawRsiChart() {
+  const cv = $("chartRsi");
+  if (!cv) return;
+  const series = state.chartSeries || { rsi: true, volume: true };
+  const rect = cv.getBoundingClientRect();
+  const d = visibleCandles();
+  if (d.length < 2) return;
+  const dpr = devicePixelRatio || 1,
+    w = rect.width,
+    h = rect.height;
+  const nextW = Math.round(w * dpr), nextH = Math.round(h * dpr);
+  if (cv.width !== nextW) cv.width = nextW;
+  if (cv.height !== nextH) cv.height = nextH;
+  const c = cv.getContext("2d");
+  const P = { l: 52, r: 74, t: 8, b: 8 },
+    cw = w - P.l - P.r,
+    ch = h - P.t - P.b;
+  c.setTransform(dpr, 0, 0, dpr, 0, 0);
+  c.clearRect(0, 0, w, h);
+  const showRsi = series.rsi !== false;
+  const showVolume = series.volume !== false;
+  /* 同区域叠显：成交量柱铺满整个子图高度垫底，RSI 曲线叠加在上层。
+     聚焦状态（点击切换）：volume=柱凸显；rsi=RSI 凸显、柱压暗后推。 */
+  const volumeFocus = showVolume && (rsiPaneFocus === "volume" || !showRsi);
+  const rsiFocused = showRsi && (rsiPaneFocus === "rsi" || !showVolume);
+  const x = (i) => P.l + (i / Math.max(1, d.length - 1)) * cw;
+  const y = (v) => P.t + (1 - v / 100) * ch;
+  /* 超买(>70)/超卖(<30) 浅色背景区 + 参考线（垫在柱与线之下）。 */
+  if (showRsi) {
+    c.fillStyle = "rgba(239,77,120,.08)";
+    c.fillRect(P.l, y(70), cw, y(100) - y(70));
+    c.fillStyle = "rgba(40,199,111,.08)";
+    c.fillRect(P.l, y(0), cw, y(30) - y(0));
+    c.strokeStyle = "rgba(144,169,199,.2)";
+    c.lineWidth = 1;
+    c.setLineDash([3, 3]);
+    for (const lv of [30, 50, 70]) {
+      const yy = y(lv);
+      c.beginPath();
+      c.moveTo(P.l, yy);
+      c.lineTo(P.l + cw, yy);
+      c.stroke();
+    }
+    c.setLineDash([]);
+    c.strokeStyle = "rgba(255,180,84,.45)";
+    c.setLineDash([2, 3]);
+    c.beginPath();
+    c.moveTo(P.l, y(67));
+    c.lineTo(P.l + cw, y(67));
+    c.stroke();
+    c.setLineDash([]);
+  }
+  /* 成交量柱：铺满整个子图高度（同区域叠显），红绿按 K 线涨跌着色。 */
+  if (showVolume) {
+    const maxVolume = Math.max(1, ...d.map((v) => Number(v.volume) || 0));
+    const candleWidth = Math.max(2, Math.min(14, (cw / d.length) * 0.64));
+    const volAlpha = rsiFocused ? 0.1 : volumeFocus ? 0.8 : 0.34;
+    c.save();
+    d.forEach((v, i) => {
+      const height = ((Number(v.volume) || 0) / maxVolume) * ch * 0.94;
+      if (height < 1) return;
+      c.fillStyle = v.close >= v.open ? "#28c76f" : "#ef4d78";
+      c.globalAlpha = volAlpha;
+      c.fillRect(
+        Math.round(x(i) - candleWidth / 2),
+        P.t + ch - height,
+        Math.max(1, candleWidth),
+        height,
+      );
+    });
+    if (!rsiFocused && Number.isInteger(hoverIndex) && d[hoverIndex]) {
+      const selected = d[hoverIndex],
+        height = ((Number(selected.volume) || 0) / maxVolume) * ch * 0.94;
+      if (height >= 1) {
+        const barWidth = Math.max(2, candleWidth + 2);
+        const barX = Math.round(x(hoverIndex) - barWidth / 2);
+        const barY = P.t + ch - height;
+        c.fillStyle = selected.close >= selected.open ? "#28c76f" : "#ef4d78";
+        c.globalAlpha = 0.95;
+        c.fillRect(barX, barY, barWidth, height);
+        c.globalAlpha = 1;
+        c.strokeStyle = "rgba(222,237,255,.78)";
+        c.lineWidth = 1;
+        c.strokeRect(barX + 0.5, barY + 0.5, barWidth - 1, Math.max(1, height - 1));
+      }
+    }
+    c.globalAlpha = 1;
+    c.restore();
+  }
+  if (!showRsi) return;
+  /* RSI 曲线（叠在成交量柱上层；聚焦时加粗发光，柱聚焦时略退后）。 */
+  const closes = d.map((v) => v.close),
+    rsiArr = rsi(closes, 14),
+    /* RSI 用中性白（亮色主题用石板灰）：与红绿成交量柱、各指标线色差都最大。 */
+    rsiColor =
+      document.documentElement.getAttribute("data-theme") === "light"
+        ? "#64748b"
+        : "#f4f8ff";
+  c.save();
+  if (rsiFocused) {
+    c.shadowColor = rsiColor;
+    c.shadowBlur = 9;
+    c.lineWidth = 2.1;
+  } else if (volumeFocus) {
+    c.globalAlpha = 0.75;
+    c.lineWidth = 1.1;
+  } else {
+    c.lineWidth = 1.3;
+  }
+  c.beginPath();
+  traceSmoothChartLine(c, rsiArr, x, y);
+  c.lineJoin = "round";
+  c.lineCap = "round";
+  c.strokeStyle = rsiColor;
+  c.stroke();
+  c.restore();
+  /* 标题与最新值。 */
+  c.fillStyle = "#75849a";
+  c.font = "11px system-ui";
+  c.textAlign = "left";
+  c.fillText(tx("RSI(14)", "RSI(14)"), P.l, P.t + 10);
+  /* 聚焦状态提示（紧跟标题）。 */
+  if (rsiPaneFocus === "volume" && showVolume) {
+    c.font = "10px system-ui";
+    c.fillStyle = "#28c76f";
+    c.fillText(tx("· 成交量聚焦", "· Volume focus"), P.l + 52, P.t + 10);
+  } else if (rsiPaneFocus === "rsi" && showRsi) {
+    c.font = "10px system-ui";
+    c.fillStyle = rsiColor;
+    c.fillText(tx("· RSI 聚焦", "· RSI focus"), P.l + 52, P.t + 10);
+  }
+  const last = rsiArr.at(-1);
+  if (Number.isFinite(last)) {
+    c.textAlign = "right";
+    c.font = "700 11px system-ui";
+    c.fillStyle = last >= 70 ? "#ef4d78" : last >= 67 ? "#ffb454" : last <= 30 ? "#28c76f" : rsiColor;
+    c.fillText(last.toFixed(2), P.l + cw, P.t + 10);
+    if (last >= 67) {
+      c.font = "10px system-ui";
+      c.fillStyle = last >= 70 ? "rgba(239,77,120,.9)" : "rgba(255,180,84,.9)";
+      c.fillText(last >= 70 ? tx("超买", "OB") : tx("即将超买", "Near OB"), P.l + cw, P.t + 22);
+    }
+  }
+  /* 左轴刻度。 */
+  c.fillStyle = "#75849a";
+  c.font = "10px system-ui";
+  c.textAlign = "left";
+  c.fillText("70", P.l + 2, y(70) - 2);
+  c.fillText("30", P.l + 2, y(30) + 9);
+  /* 悬浮十字虚线（竖线）：与主图贯穿联动，随鼠标左右移动实时更新。 */
+  if (hoverPoint) {
+    const xx = Math.max(P.l, Math.min(P.l + cw, hoverPoint.x));
+    c.save();
+    c.strokeStyle = "rgba(222,237,255,.42)";
+    c.setLineDash([3, 4]);
+    c.beginPath();
+    c.moveTo(xx, P.t);
+    c.lineTo(xx, P.t + ch);
+    c.stroke();
+    c.setLineDash([]);
+    c.restore();
+  }
+}
+
+/* RSI 子图交互：点击柱状图区域→柱凸显；点击 RSI 线附近（±14px）→RSI 凸显、柱压暗后推；
+   再次点击同一目标或点击子图外还原。悬停时单根柱高亮（沿用主图 hoverIndex）。 */
+(() => {
+  const cv = $("chartRsi");
+  if (!cv) return;
+  const P = { l: 52, r: 74, t: 8, b: 8 };
+  const pick = (event) => {
+    const rect = cv.getBoundingClientRect(),
+      d = visibleCandles();
+    if (!rect || d.length < 2) return null;
+    const cw = rect.width - P.l - P.r,
+      ch = rect.height - P.t - P.b,
+      px = event.clientX - rect.left,
+      py = event.clientY - rect.top;
+    if (px < P.l || px > P.l + cw || py < P.t || py > P.t + ch) return null;
+    const idx = Math.max(
+      0,
+      Math.min(d.length - 1, Math.round(((px - P.l) / cw) * (d.length - 1))),
+    );
+    if ((state.chartSeries || {}).rsi !== false) {
+      const val = rsi(d.map((v) => v.close), 14)[idx];
+      if (Number.isFinite(val)) {
+        const yy = P.t + (1 - val / 100) * ch;
+        if (Math.abs(py - yy) <= 14) return "rsi";
+      }
+    }
+    return "volume";
+  };
+  cv.addEventListener("click", (event) => {
+    const target = pick(event);
+    rsiPaneFocus = target && rsiPaneFocus !== target ? target : null;
+    scheduleChartRender();
+  });
+  cv.addEventListener("mousemove", (event) => {
+    const rect = cv.getBoundingClientRect(),
+      d = visibleCandles();
+    if (!rect || d.length < 2) return;
+    const cw = rect.width - P.l - P.r,
+      rawX = event.clientX - rect.left;
+    // 同步悬浮十字线（sub=true：主图只画竖线贯穿，不画水平线与圆点）。
+    hoverPoint = {
+      x: Math.max(P.l, Math.min(P.l + cw, rawX)),
+      y: event.clientY - rect.top,
+      sub: true,
+    };
+    hoverIndex = Math.max(
+      0,
+      Math.min(d.length - 1, Math.round(((hoverPoint.x - P.l) / cw) * (d.length - 1))),
+    );
+    cv.style.cursor = pick(event) ? "pointer" : "default";
+    scheduleChartRender();
+  });
+  cv.addEventListener("mouseleave", () => {
+    hoverIndex = null;
+    hoverPoint = null;
+    scheduleChartRender();
+  });
+})();
 
 if (state.candles.length) drawCandlestickChart();
 
@@ -4484,8 +5812,8 @@ function renderTradingConfirmation(m) {
   ].join("");
   const tips = {
     trend: [
-      `基于最近 200 根已收盘 ${fixedRuleSignal.interval} K 线的 EMA20、EMA50、EMA200 排列。只用于趋势过滤，不等于立即开仓。`,
-      "EMA alignment over the latest 200 closed basis candles. It filters trend; it is not an entry by itself.",
+      `基于最近 ${fixedRuleHistoryCount()} 根已收盘 ${fixedRuleSignal.interval} K 线预热后的 EMA20、EMA50、EMA200 排列。只用于趋势过滤，不等于立即开仓。`,
+      `EMA20, EMA50, and EMA200 alignment after warming up with the latest ${fixedRuleHistoryCount()} closed basis candles. It filters trend; it is not an entry by itself.`,
     ],
     volume: [
       `当前已收盘 K 线成交量与之前 20 根已收盘 K 线平均成交量的比值。≥1.2× 视为放量确认，<0.8× 视为量能偏弱。`,
@@ -4726,10 +6054,7 @@ setTimeout(() => {
   let hasRun = false,
     running = false;
   const copy = () => {
-    toggle.childNodes[0]?.remove();
-    toggle.prepend(
-      document.createTextNode(`⇆ ${tx("连通性测试", "Connectivity")} `),
-    );
+    toggle.textContent = tx("连通性测试", "Connectivity");
     $("connectivityTitle").textContent = tx("数据连通性", "Data connectivity");
     $("connectivityScope").textContent = tx(
       "浏览器 → 本站，与服务器 → 数据上游分开统计",
@@ -4974,6 +6299,7 @@ setTimeout(() => {
     toggle.classList.remove("testing");
     toggle.classList.toggle("has-error", !all);
     toggle.dataset.result = `${passed}/${results.length}`;
+    copy();
     running = false;
     hasRun = true;
   };
@@ -5155,12 +6481,13 @@ renderRangeExtremaPoints = function () {
   min -= pad;
   max += pad;
   const rect = cv.getBoundingClientRect(),
-    P = { l: 18, r: 74, t: 15, b: 30 },
+    P = { l: 52, r: 74, t: 15, b: 30 },
     cw = rect.width - P.l - P.r,
     ch = rect.height - P.t - P.b,
+    priceHeight = ch - Math.max(42, Math.round(ch * 0.24)) - 8,
     x = (i) => P.l + (i / (d.length - 1)) * cw,
     y = (v) => P.t + ch - ((v - min) / (max - min)) * ch,
-    label = state.range || state.interval,
+    label = txInterval(state.range || state.interval),
     point = (el, i, value, kind) => {
       el.style.left = `${Math.max(8, Math.min(rect.width - 160, x(i)))}px`;
       el.style.top = `${Math.max(6, Math.min(rect.height - 28, y(value) + (kind === "high" ? -25 : 8)))}px`;
@@ -5177,7 +6504,7 @@ renderRangeExtremaPoints = function () {
   const version = document.createElement("button");
   version.type = "button";
   version.id = "appVersion";
-  version.textContent = "ℹ v2.4.0";
+  version.textContent = "v2.4.1";
   version.title = "查看更新日志";
   version.setAttribute("aria-expanded", "false");
   const sourceLabel = controls.querySelector("label");
@@ -5196,7 +6523,8 @@ renderRangeExtremaPoints = function () {
   const v22Changelog = log.innerHTML;
   log.innerHTML = `<b>v2.3.0 更新日志</b><dl><dt>秒级 K 线</dt><dd>继续使用 OKX 数据源，基于实时成交在本地聚合 5 秒、10 秒与 30 秒 K 线；秒级视图会随行情近实时更新。</dd><dt>图表与周期控制</dt><dd>K 线周期与查看范围完全解耦，切换其中一项不会改写另一项；修正鼠标十字线与光标位置对齐。远离市场区间的个人买入价改为图表顶部／底部标注，避免压缩走势。</dd><dt>OKX 行情栏</dt><dd>移除币安来源，仅保留 OKX；实时行情置于顶部时间栏右侧并标注“来源：OKX”。</dd><dt>语音播报</dt><dd>新增语音总开关、快捷喇叭入口、提示音样式与独立音量；支持中英文播报与多种中文／美式英文 Edge 神经音色。</dd><dt>语音规则</dt><dd>新增价格到达、累计涨跌、短时急涨急跌、与前一次报价变动、做多／做空爆仓价等规则；支持上涨、下跌或双向、单次／重复、冷却时间及重新编辑。</dd><dt>持仓语境</dt><dd>播报实时价时会显示并结合已设置的多空买入价计算涨跌；未设置持仓则不显示。</dd></dl><hr>${v22Changelog}`;
   const v23Changelog = log.innerHTML;
-  log.innerHTML = `<b>v2.4.0 更新日志</b><dl><dt>语音接力播报</dt><dd>语音设置、规则、音色与持仓参考同步持久化到本机服务端；页面每 5 秒发送心跳，关闭或挂起超过 60 秒后由服务端按相同规则继续播报，期间触发记录在重新打开页面时回拉刷新。</dd><dt>信号有效区间</dt><dd>规则信号卡新增 ATR 作废／兑现参考带与现价位置刻度：价格在带内信号保持有效，越过作废边界后信号灰显并提示失效；取代原先静态的 ATR 止盈止损读数。</dd><dt>溢价指数</dt><dd>新增 OKX 永续相对现货的溢价指数（每 30 秒刷新），作为杠杆拥挤过滤进入微观结构与追单理由：明显正溢价提示多头成本偏高、负溢价提示空头拥挤。</dd><dt>美股实时状态</dt><dd>顶部时间栏新增北京时间与纽约时间及纽交所开闭市状态；美股盘中自动展示 SPY、QQQ 实时价格与涨跌，数据源不可用时整行隐藏而不渲染空行情。</dd><dt>长期图表修复</dt><dd>OKX 历史 K 线超过单页上限（300 根）时改为按页回溯拼接，1 年／6 个月等长周期不再被静默截短，图表覆盖范围与页面声明一致。</dd><dt>宏观日历增强</dt><dd>事件进入发布窗口（前后 15 分钟）时自动高频刷新；FOMC、CPI 与非农在公布后 24 小时内保持可见，非农自动回填 BLS 官方实际值。</dd><dt>盘口价差</dt><dd>订单簿快照新增买卖价差（bps）度量并纳入微观结构参考。</dd><dt>稳定性与缓存</dt><dd>未处理异常／Promise 拒绝只记录日志，不再拖垮整个行情服务；每个请求带统一兜底错误返回；Server 酱推送统一 8 秒超时避免挂起投递循环；空闲数据库连接异常受控监听；带版本号的静态资源启用一年强缓存，其余按需刷新。</dd><dt>前端架构</dt><dd>面板归属集中登记到统一注册中心（BTCPanels）；决策层、固定规则信号与指标明细改由有序增强器队列扩展，不再覆写旧渲染函数或跨模块挪动 DOM；研究型回测与联动卡不再依赖固定 DOM 锚点，改为数据就绪后动态挂载；样式按 tokens／base／layout／components／responsive／foundation 分模块渐进拆分。</dd></dl><hr>${v23Changelog}`;
+  const v24Changelog = `<b>v2.4.0 更新日志</b><dl><dt>语音接力播报</dt><dd>语音设置、规则、音色与持仓参考同步持久化到本机服务端；页面每 5 秒发送心跳，关闭或挂起超过 60 秒后由服务端按相同规则继续播报，期间触发记录在重新打开页面时回拉刷新。</dd><dt>信号有效区间</dt><dd>规则信号卡新增 ATR 作废／兑现参考带与现价位置刻度：价格在带内信号保持有效，越过作废边界后信号灰显并提示失效；取代原先静态的 ATR 止盈止损读数。</dd><dt>溢价指数</dt><dd>新增 OKX 永续相对现货的溢价指数（每 30 秒刷新），作为杠杆拥挤过滤进入微观结构与追单理由：明显正溢价提示多头成本偏高、负溢价提示空头拥挤。</dd><dt>美股实时状态</dt><dd>顶部时间栏新增北京时间与纽约时间及纽交所开闭市状态；美股盘中自动展示 SPY、QQQ 实时价格与涨跌，数据源不可用时整行隐藏而不渲染空行情。</dd><dt>长期图表修复</dt><dd>OKX 历史 K 线超过单页上限（300 根）时改为按页回溯拼接，1 年／6 个月等长周期不再被静默截短，图表覆盖范围与页面声明一致。</dd><dt>宏观日历增强</dt><dd>事件进入发布窗口（前后 15 分钟）时自动高频刷新；FOMC、CPI 与非农在公布后 24 小时内保持可见，非农自动回填 BLS 官方实际值。</dd><dt>盘口价差</dt><dd>订单簿快照新增买卖价差（bps）度量并纳入微观结构参考。</dd><dt>稳定性与缓存</dt><dd>未处理异常／Promise 拒绝只记录日志，不再拖垮整个行情服务；每个请求带统一兜底错误返回；Server 酱推送统一 8 秒超时避免挂起投递循环；空闲数据库连接异常受控监听；带版本号的静态资源启用一年强缓存，其余按需刷新。</dd><dt>前端架构</dt><dd>面板归属集中登记到统一注册中心（BTCPanels）；决策层、固定规则信号与指标明细改由有序增强器队列扩展，不再覆写旧渲染函数或跨模块挪动 DOM；研究型回测与联动卡不再依赖固定 DOM 锚点，改为数据就绪后动态挂载；样式按 tokens／base／layout／components／responsive／foundation 分模块渐进拆分。</dd></dl><hr>${v23Changelog}`;
+  log.innerHTML = `<b>v2.4.1 更新日志</b><dl><dt>RSI × 成交量叠显</dt><dd>RSI 曲线与成交量柱改为同区域叠显：成交量柱垫底、RSI 线叠上层；点击柱状图凸显量、点 RSI 线压暗量，悬浮竖虚线贯穿主图与子图。</dd><dt>我的持仓编辑升级</dt><dd>编辑表单扩为四字段（持仓量／开仓均价／保证金／杠杆），手动杠杆优先、留空自动推导；新增保存／取消／清除三按钮与双击编辑；自动计算杠杆、未实现盈亏、收益率、保证金回报与理论强平价；两持仓槽支持拖拽互换位置。</dd><dt>图表线条配色统一</dt><dd>图例色块与线条颜色对齐：布林带保持灰、VWAP 改品红、RSI 改中性白，消除与红绿柱撞色。</dd><dt>语音播报体验</dt><dd>「播报中」标签移到按钮右侧；语音规则三栏可拖拽调宽；原生勾选改为 iOS 风格拨钮；播报优先级支持拖拽排序，标签与「播报条件」文案对齐。</dd><dt>综合信号状态说明</dt><dd>「当前规则信号」标题新增帮助按钮，展开 5 种信号状态（做多绿／做空红）的完整说明与速查口诀：带数字＝已确认最强；带「待收盘」＝观察期；带「趋势」无数字＝弱确认。</dd><dt>更新日志折叠</dt><dd>所有旧版本（含 v2.0.0）默认收起，打开日志首先看到当前版本完整变更。</dd><dt>连通性测试修复</dt><dd>顶部连通性按钮的分数不再重复显示（原 JS 文本与 CSS 伪元素各显示一次）。</dd><dt>后端数据链路</dt><dd>持仓档案同步支持持仓量／保证金／杠杆；OKX 改用 history-candles 端点并分页回溯，1 年／6 个月等长周期 K 线不再静默截短；3 小时 K 线聚合拉足量 1 小时数据以预热 EMA200；新增服务端规则评分精确复算；服务端语音接力默认关闭，播报改由浏览器接管。</dd></dl><hr>${v24Changelog}`;
   // 旧版本默认收起，确保用户打开日志时首先看到当前版本的完整变更。
   // Older releases are collapsed by default so opening the log focuses on the current release.
   const collapseLegacyRelease = () => {
@@ -5213,6 +6541,8 @@ renderRangeExtremaPoints = function () {
     divider.replaceWith(details);
     heading.remove();
   };
+  collapseLegacyRelease();
+  collapseLegacyRelease();
   collapseLegacyRelease();
   collapseLegacyRelease();
   collapseLegacyRelease();
@@ -5243,6 +6573,24 @@ renderRangeExtremaPoints = function () {
 })();
 
 /* Chart display controls: persist an intentional, uncluttered line setup. */
+function updateTopLegend() {
+  const legend = $("chartLegend"),
+    series = state.chartSeries || {},
+    lines = state.chartLines || {};
+  if (!legend) return;
+  legend.querySelectorAll("[data-legend-series]").forEach((el) => {
+    const key = el.dataset.legendSeries;
+    el.classList.toggle("legend-off", !series[key]);
+  });
+  legend.querySelectorAll("[data-legend-line]").forEach((el) => {
+    const key = el.dataset.legendLine;
+    el.classList.toggle("legend-off", lines[key] === false);
+  });
+  legend.querySelectorAll("[data-legend-sub]").forEach((el) => {
+    const key = el.dataset.legendSub;
+    el.classList.toggle("legend-off", !series[key]);
+  });
+}
 (() => {
   const toolbar = $("chart")?.closest(".card")?.querySelector(".toolbar"),
     chartBox = $("chart")?.closest(".chart-box");
@@ -5251,18 +6599,21 @@ renderRangeExtremaPoints = function () {
   state.chartSeries = {
     candles: saved.candles ?? saved.mode !== "line",
     close: saved.close ?? saved.mode === "line",
+    volume: saved.volume ?? true,
+    rsi: saved.rsi ?? true,
   };
   state.chartLines = {
     ma20: saved.ma20 ?? true,
     ma50: saved.ma50 ?? true,
     ma200: saved.ma200 ?? true,
+    boll: saved.boll ?? true,
+    vwap: saved.vwap ?? true,
   };
-  const legend = document.createElement("div");
-  legend.id = "chartPatternLegend";
-  legend.className = "chart-pattern-legend";
-  legend.innerHTML =
-    "<span><b>H</b> 锤子线：长下影线，表示低位承接形态</span><span><b>S</b> 流星线：长上影线，表示高位抛压形态</span>";
-  chartBox.after(legend);
+  const patternLegend = document.createElement("div");
+  patternLegend.id = "chartPatternLegend";
+  patternLegend.className = "chart-pattern-legend";
+  patternLegend.innerHTML =
+    `<span><b>H</b> ${tx("锤子线：长下影线，表示低位承接形态", "Hammer: long lower wick, a bottom-acceptance pattern")}</span><span><b>S</b> ${tx("流星线：长上影线，表示高位抛压形态", "Shooting star: long upper wick, a top-rejection pattern")}</span>`;
   const panel = document.createElement("div");
   panel.id = "chartDisplayControls";
   panel.className = "chart-display-controls";
@@ -5273,30 +6624,40 @@ renderRangeExtremaPoints = function () {
         b.classList.toggle("active", state.chartSeries[b.dataset.series]),
       );
     panel
+      .querySelectorAll("[data-sub]")
+      .forEach((b) =>
+        b.classList.toggle("off", !state.chartSeries[b.dataset.sub]),
+      );
+    panel
       .querySelectorAll("[data-line]")
       .forEach((b) =>
         b.classList.toggle("off", !state.chartLines[b.dataset.line]),
       );
-    legend.hidden = !state.chartSeries.candles;
+    patternLegend.hidden = !state.chartSeries.candles;
     localStorage.setItem(
       "btc_chart_display",
       JSON.stringify({ ...state.chartSeries, ...state.chartLines }),
     );
-    const activeSeries = [];
+    const activeItems = [];
     if (state.chartSeries.candles)
-      activeSeries.push(tx("K线图", "Candlestick"));
+      activeItems.push(tx("K线图", "Candlestick"));
     if (state.chartSeries.close)
-      activeSeries.push(tx("收盘线", "Close line"));
+      activeItems.push(tx("价格线", "Price line"));
     panel.querySelector("[data-current-chart]").textContent =
-      activeSeries.join(" + ") || tx("已隐藏", "Hidden");
+      activeItems.join(" + ") || tx("已隐藏", "Hidden");
+    updateTopLegend();
     drawCandlestickChart();
   };
-  panel.innerHTML = `<div class="control-popover chart-picker"><button class="control-trigger" type="button" aria-haspopup="true" aria-expanded="false"><span class="control-label">${tx("图表", "Chart")}</span><b data-current-chart></b><i aria-hidden="true">▾</i></button><div class="control-popover-panel chart-display-options"><div class="chart-series-options"><button type="button" data-series="candles">${tx("K线图", "Candlestick")}</button><button type="button" data-series="close">${tx("收盘价折线", "Close line")}</button></div><div class="chart-line-toggles"><button type="button" data-line="ma20">MA20</button><button type="button" data-line="ma50">MA50</button><button type="button" data-line="ma200">MA200</button></div></div></div>`;
+  panel.innerHTML = `<div class="control-popover chart-picker"><button class="control-trigger" type="button" aria-haspopup="true" aria-expanded="false"><span class="control-label">${tx("图表", "Chart")}</span><b data-current-chart></b><i aria-hidden="true">▾</i></button><div class="control-popover-panel chart-display-options"><div class="chart-series-options"><button type="button" data-series="candles">${tx("K线图", "Candlestick")}</button><button type="button" data-series="close">${tx("价格线", "Price line")}</button></div><div class="chart-line-toggles"><button type="button" data-line="ma20">MA20</button><button type="button" data-line="ma50">MA50</button><button type="button" data-line="ma200">MA200</button><button type="button" data-line="boll">${tx("布林带", "Bollinger")}</button><button type="button" data-line="vwap">VWAP</button></div></div></div>`;
   const popover = panel.querySelector(".control-popover"),
     trigger = panel.querySelector(".control-trigger");
   trigger.addEventListener("click", () => {
     const open = popover.classList.toggle("is-open");
     trigger.setAttribute("aria-expanded", String(open));
+  });
+  popover.addEventListener("mouseleave", () => {
+    popover.classList.remove("is-open");
+    trigger.setAttribute("aria-expanded", "false");
   });
   panel.addEventListener("click", (event) => {
     const series = event.target.dataset.series,
@@ -5307,6 +6668,19 @@ renderRangeExtremaPoints = function () {
   });
   toolbar.append(panel);
   sync();
+  /* 顶部固定图例条：把形态说明与颜色图例全部收拢到 toolbar 与 chart-box 之间，
+     空间不足时自动换行，避免在图表内部四角堆叠。 */
+  const strip = document.createElement("div");
+  strip.id = "chartLegendStrip";
+  strip.className = "chart-legend-strip";
+  // 清理旧版底部图例行，避免与新版顶部图例条重复。
+  const oldRow = $("chartLegendRow");
+  if (oldRow) oldRow.remove();
+  // 若页面已存在旧版 chartLegend，直接迁移到 strip 中复用。
+  const existingLegend = $("chartLegend");
+  if (existingLegend) strip.append(existingLegend);
+  strip.append(patternLegend);
+  toolbar.after(strip);
 })();
 /* 当前所选来源始终为永续合约，应明确标出，避免被误认为现货。
    The selected source is always a perpetual contract; say so explicitly so
@@ -5429,8 +6803,15 @@ const applyLanguageFully = applyLanguage;
 applyLanguage = function () {
   applyLanguageFully();
   const zh = uiLang === "zh",
+    /* 只替换标题自身文本，保留内部挂载的 help-dot 说明按钮，
+       否则启动 1.2s 的语言回填会把「当前规则信号」旁的「!」清掉。 */
     text = (el, cn, en) => {
-      if (el) el.textContent = zh ? cn : en;
+      if (!el) return;
+      const target = zh ? cn : en;
+      if (el.querySelector(".help-dot")) {
+        if (el.firstChild) el.firstChild.textContent = target;
+        else el.textContent = target;
+      } else el.textContent = target;
     },
     label = (form, name, cn, en) => {
       const node = form?.elements[name]?.closest("label");
@@ -5499,11 +6880,13 @@ applyLanguage = function () {
   const legend = $("chartLegend");
   if (legend) {
     const names = zh
-      ? ["价格", "MA20", "MA50", "MA200"]
-      : ["Price", "MA20", "MA50", "MA200"];
+      ? ["K线图", "价格", "MA20", "MA50", "MA200", "布林带", "VWAP", "成交量", "RSI(14)"]
+      : ["Candlestick", "Price", "MA20", "MA50", "MA200", "Bollinger", "VWAP", "Volume", "RSI(14)"];
     legend
-      .querySelectorAll("span")
-      .forEach((node, i) => (node.textContent = names[i]));
+      .querySelectorAll(":scope > span")
+      .forEach((node, i) => {
+        if (names[i]) node.textContent = names[i];
+      });
   }
   const lev = document.querySelector(".leverage-card");
   text(
@@ -5883,9 +7266,11 @@ renderRangeExtremaPoints = function () {
   const hiI = d.reduce((best, v, i) => (v.close > d[best].close ? i : best), 0),
     loI = d.reduce((best, v, i) => (v.close < d[best].close ? i : best), 0),
     rect = cv.getBoundingClientRect(),
-    P = { l: 18, r: 74, t: 15, b: 30 },
+    P = { l: 52, r: 74, t: 15, b: 30 },
     cw = rect.width - P.l - P.r,
     ch = rect.height - P.t - P.b,
+    volumeHeight = Math.min(118, Math.max(96, Math.round(ch * 0.21))),
+    priceHeight = ch - volumeHeight - 30,
     closes = d.map((v) => v.close),
     all = [...closes];
   [ema(closes, 20), ema(closes, 50), ema(closes, 200)].forEach((a) =>
@@ -5899,12 +7284,12 @@ renderRangeExtremaPoints = function () {
   loValue -= margin;
   hiValue += margin;
   const x = (i) => P.l + (i / (d.length - 1)) * cw,
-    y = (v) => P.t + ch - ((v - loValue) / (hiValue - loValue)) * ch,
-    label = state.range || state.interval,
+    y = (v) => P.t + priceHeight - ((v - loValue) / (hiValue - loValue)) * priceHeight,
+    label = txInterval(state.range || state.interval),
     place = (el, i, kind) => {
       const value = d[i].close;
       el.style.left = `${Math.max(8, Math.min(rect.width - 214, x(i)))}px`;
-      el.style.top = `${Math.max(6, Math.min(rect.height - 28, y(value) + (kind === "high" ? -28 : 9)))}px`;
+      el.style.top = `${Math.max(6, Math.min(P.t + priceHeight - 20, y(value) + (kind === "high" ? -20 : 6)))}px`;
       el.textContent = `${label}${kind === "high" ? tx("最高选中价", " highest selected price") : tx("最低选中价", " lowest selected price")} ${money(value)} · ${pointTime(d[i].time)}`;
     };
   place(high, hiI, "high");
@@ -6182,19 +7567,19 @@ microPrediction = function (m) {
 const buttonsRebuild = buttons;
 let buttonsSignature = "";
 const viewRanges = {
-  // A range is a complete view preset, rather than an unbounded request to
-  // render the currently selected candle size.  Keeping roughly 100–365 bars
-  // makes each option both legible and fetchable from every supported source.
-  "15分": { minutes: 15, interval: "1m" },
-  "1时": { minutes: 60, interval: "1m" },
-  "6时": { minutes: 360, interval: "1m" },
-  "12时": { minutes: 720, interval: "5m" },
-  "1D": { minutes: 1440, interval: "5m" },
-  "1W": { minutes: 10080, interval: "1h" },
-  "1M": { minutes: 43200, interval: "4h" },
-  "6M": { minutes: 262800, interval: "1d" },
-  "1Y": { minutes: 525600, interval: "1d" },
+  "1时": { minutes: 60 },
+  "3时": { minutes: 180 },
+  "6时": { minutes: 360 },
+  "12时": { minutes: 720 },
+  "1D": { minutes: 1440 },
+  "1W": { minutes: 10080 },
+  "1M": { minutes: 43200 },
+  "6M": { minutes: 262800 },
+  "1Y": { minutes: 525600 },
 };
+// The local market gateway pages OKX history up to this bound. It is large
+// enough for the 12-hour and 1-day minute windows without an unbounded fetch.
+const MAX_VISIBLE_CANDLES = 1800;
 const intervalMinutes = {
   "5s": 5 / 60,
   "10s": 10 / 60,
@@ -6208,25 +7593,70 @@ const intervalMinutes = {
   "4h": 240,
   "1d": 1440,
 };
+function closeChartControlPopover(popover) {
+  popover.classList.remove("is-open");
+  popover
+    .querySelector(".control-trigger")
+    ?.setAttribute("aria-expanded", "false");
+  if (popover.classList.contains("range-picker"))
+    popover.querySelector(".control-popover-panel")?.remove();
+}
+const dismissChartPopoverOnPointerExit = (event) => {
+  document
+    .querySelectorAll("#mainChartCard .toolbar .control-popover.is-open")
+    .forEach((popover) => {
+      if (!popover.contains(event.target)) closeChartControlPopover(popover);
+    });
+};
+document.addEventListener("pointermove", dismissChartPopoverOnPointerExit, true);
+document.addEventListener("pointerover", dismissChartPopoverOnPointerExit, true);
+document.addEventListener("pointerover", (event) => {
+  const popover = event.target.closest?.(
+    "#mainChartCard .toolbar .control-popover.is-open",
+  );
+  if (popover && !popover.contains(event.relatedTarget))
+    closeChartControlPopover(popover);
+}, true);
+document.addEventListener("pointerdown", (event) => {
+  if (event.target.closest("#mainChartCard .toolbar .control-popover")) return;
+  document
+    .querySelectorAll("#mainChartCard .toolbar .control-popover.is-open")
+    .forEach(closeChartControlPopover);
+});
+window.addEventListener("blur", () =>
+  document
+    .querySelectorAll("#mainChartCard .toolbar .control-popover.is-open")
+    .forEach(closeChartControlPopover),
+);
+if (state.range && !state.rangeRequiredPoints) {
+  const initialRange = viewRanges[state.range];
+  state.rangeRequiredPoints = initialRange
+    ? Math.max(
+        2,
+        Math.ceil(
+          initialRange.minutes / (intervalMinutes[state.interval] || 1),
+        ),
+      )
+    : 0;
+}
 function applyVisibleRange(label) {
   const preset = viewRanges[label],
     minutes = preset?.minutes,
-    interval = preset?.interval || state.interval,
-    points = Math.min(
-      500,
-      Math.max(
-        2,
-        Math.ceil(minutes / (intervalMinutes[interval] || 1)) + 1,
-      ),
-    );
-  // Do not silently cap a one-minute chart and still call it a one-month
-  // view.  Selecting a display range deliberately selects its compatible
-  // aggregation interval first.
-  state.interval = interval;
+    requiredPoints = Math.max(
+      2,
+      Math.ceil(minutes / (intervalMinutes[state.interval] || 1)),
+    ),
+    points = Math.min(MAX_VISIBLE_CANDLES, requiredPoints);
+  // Range is a viewing window only.  Never rewrite the independently selected
+  // candle aggregation just to make a long preset fit an arbitrary bar cap.
   state.range = label;
+  state.rangeRequiredPoints = requiredPoints;
   state.viewPoints = points;
   state.limit = Math.max(300, points);
+  localStorage.setItem("btc_visible_range", label);
 }
+const savedVisibleRange = localStorage.getItem("btc_visible_range");
+if (viewRanges[savedVisibleRange]) applyVisibleRange(savedVisibleRange);
 buttons = function () {
   const key = `${uiLang}:${state.interval}:${state.limit}:${state.range || ""}:${state.viewPoints || ""}`,
     intervalBox = $("intervals"),
@@ -6234,7 +7664,7 @@ buttons = function () {
     viewText = (label) =>
       uiLang === "zh"
         ? label
-        : { "15分": "15m", "1时": "1h", "6时": "6h", "12时": "12h" }[label] ||
+        : { "15分": "15m", "1时": "1h", "3时": "3h", "6时": "6h", "12时": "12h" }[label] ||
           label;
   if (key === buttonsSignature) return;
   buttonsSignature = key;
@@ -6255,16 +7685,15 @@ buttons = function () {
     intervalPopover?.querySelector(".control-trigger")?.addEventListener("click", () =>
       intervalPopover.classList.toggle("is-open"),
     );
+    intervalPopover?.addEventListener("mouseleave", () =>
+      intervalPopover.classList.remove("is-open"),
+    );
     intervalBox.querySelectorAll("[data-candle]").forEach(
       (b) =>
         (b.onclick = () => {
           state.interval = b.dataset.candle;
-          // A direct interval selection is a custom view.  Clear the range
-          // preset instead of falsely retaining (for example) “1M” while
-          // showing only the latest few hours of one-minute data.
-          state.range = null;
-          state.limit = 300;
-          state.viewPoints = null;
+          if (state.range) applyVisibleRange(state.range);
+          else state.limit = Math.max(300, state.limit || 300);
           buttonsSignature = "";
           intervalPopover?.classList.remove("is-open");
           loadCurrent();
@@ -6280,26 +7709,68 @@ buttons = function () {
   if (rangeBox.dataset.lang !== uiLang) {
     rangeBox.dataset.lang = uiLang;
     rangeBox.innerHTML =
-      `<div class="control-popover range-picker"><button class="control-trigger" type="button" aria-haspopup="true"><span class="control-label">${tx("查看范围", "Visible range")}</span><b data-current-range></b><i aria-hidden="true">▾</i></button><div class="control-popover-panel range-options">` +
-      Object.keys(viewRanges)
-        .map(
-          (label) => `<button data-view="${label}">${viewText(label)}</button>`,
-        )
-        .join("") +
-      "</div></div>";
+      `<div class="control-popover range-picker"><button class="control-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="rangePopoverOptions"><span class="control-label">${tx("查看范围", "Visible range")}</span><b data-current-range></b><i aria-hidden="true">▾</i></button></div>`;
     const rangePopover = rangeBox.querySelector(".control-popover");
-    rangePopover?.querySelector(".control-trigger")?.addEventListener("click", () =>
-      rangePopover.classList.toggle("is-open"),
-    );
-    rangeBox.querySelectorAll("[data-view]").forEach(
-      (b) =>
-        (b.onclick = () => {
-          applyVisibleRange(b.dataset.view);
-          buttonsSignature = "";
-          rangePopover?.classList.remove("is-open");
-          loadCurrent();
-        }),
-    );
+    const rangeTrigger = rangePopover.querySelector(".control-trigger");
+    const closeRangePopover = () => closeChartControlPopover(rangePopover);
+    const openRangePopover = () => {
+      if (rangePopover.classList.contains("is-open")) return closeRangePopover();
+      const list = document.createElement("div");
+      list.id = "rangePopoverOptions";
+      list.className = "control-popover-panel range-options";
+      list.setAttribute("role", "listbox");
+      list.setAttribute("aria-label", tx("查看范围", "Visible range"));
+      list.innerHTML = Object.keys(viewRanges)
+        .map(
+          (label) =>
+            `<button type="button" data-view="${label}" role="option" aria-selected="${state.range === label}">${viewText(label)}</button>`,
+        )
+        .join("");
+      rangePopover.append(list);
+      list.querySelectorAll("[data-view]").forEach((chip) =>
+        chip.classList.toggle("active", state.range === chip.dataset.view),
+      );
+      rangePopover.classList.add("is-open");
+      rangeTrigger.setAttribute("aria-expanded", "true");
+      requestAnimationFrame(() => list.classList.add("is-visible"));
+    };
+    rangeTrigger.addEventListener("click", openRangePopover);
+    rangePopover.addEventListener("mouseleave", closeRangePopover);
+    rangePopover.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeRangePopover();
+        rangeTrigger.focus();
+        return;
+      }
+      if (!/^Arrow(Left|Right|Up|Down)$/.test(event.key)) return;
+      const chips = [...rangePopover.querySelectorAll("[data-view]")];
+      if (!chips.length) return;
+      event.preventDefault();
+      const step = /Right|Down/.test(event.key) ? 1 : -1;
+      const current = chips.indexOf(document.activeElement);
+      chips[(current + step + chips.length) % chips.length].focus();
+    });
+    rangeBox.addEventListener("click", (event) => {
+      const chip = event.target.closest("[data-view]");
+      if (!chip) return;
+      const label = chip.dataset.view;
+      applyVisibleRange(label);
+      rangeTrigger.querySelector("[data-current-range]").textContent = viewText(label);
+      rangePopover.querySelectorAll("[data-view]").forEach((item) => {
+        const selected = item.dataset.view === label;
+        item.classList.toggle("active", selected);
+        item.setAttribute("aria-selected", String(selected));
+      });
+      // Start the request from the newly selected state immediately. Delaying
+      // it until the popover animation completed allowed an earlier request
+      // to win and leave the caption describing the previous range.
+      buttonsSignature = "";
+      void loadCurrent();
+      window.setTimeout(() => {
+        closeRangePopover();
+      }, 200);
+    });
   }
   const currentInterval = intervals.find(([value]) => value === state.interval);
   intervalBox.querySelector("[data-current-interval]").textContent = uiLang === "zh"
@@ -6437,14 +7908,28 @@ loadExchangeStrip = async function () {
 loadExchangeStrip();
 
 (() => {
-  const box = $("chart")?.closest(".card")?.querySelector(".toolbar");
-  if (box && !$("chartLegend")) {
-    const legend = document.createElement("div");
+  const chartBox = $("chart")?.closest(".chart-box");
+  if (!chartBox) return;
+  const html =
+    `<span class="candle-series" data-legend-series="candles">${tx("K线图", "Candlestick")}</span>` +
+    `<span class="price-line" data-legend-series="close">${tx("价格", "Price")}</span>` +
+    '<span class="ma20-line" data-legend-line="ma20">MA20</span>' +
+    '<span class="ma50-line" data-legend-line="ma50">MA50</span>' +
+    '<span class="ma200-line" data-legend-line="ma200">MA200</span>' +
+    `<span class="boll-line" data-legend-line="boll">${tx("布林带", "Bollinger")}</span>` +
+    '<span class="vwap-line" data-legend-line="vwap">VWAP</span>' +
+    `<span class="volume-line" data-legend-series="volume">${tx("成交量", "Volume")}</span>` +
+    '<span class="rsi-line" data-legend-sub="rsi">RSI(14)</span>';
+  let legend = $("chartLegend");
+  if (!legend) {
+    legend = document.createElement("div");
     legend.id = "chartLegend";
-    legend.innerHTML =
-      '<span class="price-line">价格</span><span class="ma20-line">MA20</span><span class="ma50-line">MA50</span><span class="ma200-line">MA200</span>';
-    box.append(legend);
   }
+  legend.innerHTML = html;
+  const strip = $("chartLegendStrip");
+  if (strip) strip.append(legend);
+  else chartBox.after(legend);
+  updateTopLegend();
 })();
 document.querySelectorAll(".exchange-row>b").forEach((el) => el.remove());
 const loadExchangeWithoutName = loadExchangeStrip;
@@ -6624,7 +8109,7 @@ function renderRangeExtremaPoints() {
     pad = (hi - lo || 1) * 0.075,
     y = (v) => P.t + ch - ((v - (lo - pad)) / (hi - lo + pad * 2)) * ch,
     x = (i) => P.l + (i / (d.length - 1)) * cw,
-    label = state.range || state.interval;
+    label = txInterval(state.range || state.interval);
   const point = (el, i, value, kind) => {
     el.style.left = `${Math.max(8, Math.min(rect.width - 160, x(i)))}px`;
     el.style.top = `${Math.max(6, Math.min(rect.height - 28, y(value) + (kind === "high" ? -25 : 8)))}px`;
@@ -6801,9 +8286,28 @@ function renderSignalValidity() {
       : state.candles;
   if (!box || candles.length < 30) return;
   const m = metrics(candles),
+    presentation =
+      fixedRuleSignal.presentation || deriveStableRulePresentation(),
     long = m.score >= 0,
     reference = m.close,
     current = state.ticker?.last || state.candles.at(-1)?.close || reference;
+  if (presentation && !presentation.confirmed) {
+    const revalidating = Boolean(presentation.revalidating),
+      remaining = revalidating
+        ? Math.max(0, RULE_SIGNAL_REENTRY_CANDLES - presentation.reentryCandles)
+        : 0,
+      candidate =
+        presentation.candidate === "flat"
+          ? tx("暂无明确方向", "No directional candidate")
+          : `${tx("候选", "Candidate ")}${ruleSignalLabel(presentation.candidate)}`;
+    box.className = "signal-validity is-revalidating";
+    box.dataset.rangeKey = `${revalidating ? "revalidating" : "awaiting"}|${fixedRuleSignal.closedAt}|${presentation.reentryCandles || 0}`;
+    box.innerHTML = `<div class="signal-validity-head"><b>${revalidating ? tx("信号重新评估", "Signal re-evaluation") : tx("方向确认中", "Direction confirmation")}</b><span>${revalidating ? tx("旧信号已失效", "Prior signal invalid") : tx("尚无活跃信号", "No active signal")}</span></div><div class="signal-reentry-state"><b>${candidate}</b><span>${revalidating ? tx(`等待 ${remaining} 根 ${fixedRuleSignal.interval} 已收盘 K 线确认`, `Awaiting ${remaining} closed ${fixedRuleSignal.interval} candles`) : tx("等待连续收盘与多周期同向确认", "Awaiting consecutive closes and multi-timeframe agreement")}</span></div><div class="signal-validity-foot"><small>${revalidating ? tx("价格越过旧作废边界后，旧方向不再使用；完成收盘与多周期确认后将自动生成新的有效区间。", "The prior direction is retired after its invalidation boundary is crossed. A fresh range is created automatically after closed-candle and multi-timeframe confirmation.") : tx("当前没有可执行方向；确认完成后才会生成新的有效区间与作废边界。", "There is no actionable direction yet. A new validity range and invalidation boundary appear only after confirmation.")}</small></div>`;
+    [$("signal"), $("signalReason"), $("signalProjection")].forEach((el) =>
+      el?.classList.remove("signal-invalid"),
+    );
+    return;
+  }
   // The interval is anchored to the last completed signal candle.  It must not
   // move with the live quote, otherwise a signal could never become invalid.
   const invalid = reference + (long ? -1 : 1) * m.atr * 1.5,
@@ -6841,6 +8345,11 @@ function renderSignalValidity() {
         "价格已越过作废边界，当前规则信号已灰显。",
         "Price crossed the invalidation boundary; the rule signal is dimmed.",
       );
+  if (!valid && invalidateFixedRuleSignal()) {
+    renderFixedRuleSignal();
+    renderSignalValidity();
+    return;
+  }
   if (box.dataset.rangeKey === rangeKey) {
     const marker = box.querySelector(".signal-validity-now"),
       price = box.querySelector(".signal-validity-now-price"),
@@ -7007,16 +8516,9 @@ async function loadHorizonForecasts() {
 addDecisionRenderEnhancer("horizon-forecasts", () => {
   renderHorizonForecasts();
   loadHorizonForecasts();
-  addHelp(
-    $("intervals")?.querySelector(".control-label"),
-    "K 线周期决定每根 K 线代表多长时间，例如 15 分钟 K 线每根聚合 15 分钟价格。",
-    "Candle interval sets the duration represented by each candle; a 15m candle aggregates 15 minutes of price.",
-  );
-  addHelp(
-    $("ranges")?.querySelector(".control-label"),
-    "查看范围决定图表加载和显示多长的历史，例如 1D 显示一天。它不同于每根 K 线的周期。",
-    "Visible range sets how much history is loaded and shown, such as 1D. It differs from the duration of each candle.",
-  );
+  document
+    .querySelectorAll("#intervals .help-dot, #ranges .help-dot")
+    .forEach((dot) => dot.remove());
 });
 $("chart")
   ?.closest(".chart-box")
@@ -7032,7 +8534,7 @@ $("chart")?.addEventListener("mousemove", () => {
     live = state.ticker?.last;
   if (!tip || !v || !Number.isFinite(live)) return;
   const delta = v.close - live;
-  tip.innerHTML = `<b>${pointTime(v.time)}</b><strong class="chart-point-price">${tx("选中价", "Selected price")} ${money(v.close)}</strong><span class="chart-live-price">${tx("实时价", "Live price")} ${money(live)} <i class="${delta >= 0 ? "bull" : "bear"}">${tx("差价", "Δ")} ${delta >= 0 ? "+" : "−"}${money(Math.abs(delta))}</i></span><span>${tx("开", "Open")} ${money(v.open)}　${tx("高", "High")} ${money(v.high)}</span><span>${tx("低", "Low")} ${money(v.low)}　${tx("收", "Close")} ${money(v.close)}</span>`;
+  tip.innerHTML = `<b>${pointTime(v.time)}</b><strong class="chart-point-price">${tx("选中价", "Selected price")} ${money(v.close)}</strong><span class="chart-live-price">${tx("实时价", "Live price")} ${money(live)} <i class="${delta >= 0 ? "bull" : "bear"}">${tx("差价", "Δ")} ${delta >= 0 ? "+" : "−"}${money(Math.abs(delta))}</i></span><span>${tx("开", "Open")} ${money(v.open)}　${tx("高", "High")} ${money(v.high)}</span><span>${tx("低", "Low")} ${money(v.low)}　${tx("收", "Close")} ${money(v.close)}</span><span class="${v.close >= v.open ? "bull" : "bear"}">${tx("成交量", "Volume")} ${Number(v.volume).toLocaleString("en-US", { maximumFractionDigits: 2 })}</span>`;
 });
 $("loadResonance").onclick = () => resonance(false);
 resetResonanceTimer();
@@ -7096,7 +8598,8 @@ resonance = async function (auto = false) {
 $("loadResonance").onclick = () => resonance(false);
 const loadCurrentWithHeader = loadCurrent;
 loadCurrent = async function () {
-  await loadCurrentWithHeader();
+  const refreshed = await loadCurrentWithHeader();
+  if (refreshed === false) return false;
   const subtitle = document.querySelector("header p"),
     stream = state.lastGood?.transport === "websocket",
     latency = requestLatency || "--",
@@ -7106,6 +8609,7 @@ loadCurrent = async function () {
       : "--";
   if (subtitle)
     subtitle.innerHTML = `<span class="live-pulse"></span>${stream ? tx("实时连接 · OKX WebSocket", "Live connection · OKX WebSocket") : tx("实时连接 · REST 降级", "Live connection · REST fallback")} · ${stream ? tx("数据年龄", "data age") + " " : ""}<b class="latency${highLatency ? " latency-high" : ""}">${stream ? streamAge : latency + " ms"}</b>`;
+  return refreshed;
 };
 const microPredictionWithTerms = microPrediction;
 microPrediction = function (m) {
@@ -7598,8 +9102,8 @@ function renderExpandedIndicatorDetails(m) {
     crowdedShort = Number.isFinite(funding) && funding <= -0.0005,
     extremeBasis = Number.isFinite(basis) && Math.abs(basis) >= 0.12,
     rows = [];
-  const tag = (kind, bullish = "看多", bearish = "看空") =>
-      kind === "bull" ? bullish : kind === "bear" ? bearish : "中性",
+  const tag = (kind, bullish = tx("看多", "Bullish"), bearish = tx("看空", "Bearish")) =>
+      kind === "bull" ? bullish : kind === "bear" ? bearish : tx("中性", "Neutral"),
     add = (key, label, value, kind, tip) =>
       rows.push({ key, label, value, kind, tip });
   add(
@@ -7635,10 +9139,10 @@ function renderExpandedIndicatorDetails(m) {
   const bollKind = m.boll > 55 ? "bull" : m.boll < 45 ? "bear" : "flat";
   add(
     "boll",
-    "布林位置",
+    tx("布林位置", "Bollinger position"),
     `${m.boll.toFixed(2)}%`,
     bollKind,
-    "布林位置表示价格在近期波动区间的哪里：靠上偏强、靠下偏弱，但不代表一定反转。",
+    tx("布林位置表示价格在近期波动区间的哪里：靠上偏强、靠下偏弱，但不代表一定反转。", "Bollinger position shows where price sits within the recent range: high is stronger, low is weaker, but it does not imply a reversal."),
   );
   add(
     "atr",
@@ -7650,18 +9154,18 @@ function renderExpandedIndicatorDetails(m) {
   if (Number.isFinite(volumeRatio))
     add(
       "volume",
-      "成交量确认",
+      tx("成交量确认", "Volume confirmation"),
       `${volumeRatio.toFixed(2)}×`,
       volumeRatio >= 1.2 ? "bull" : volumeRatio < 0.8 ? "bear" : "flat",
-      "这根已收盘 K 线的成交量相对前 20 根均量。大于 1.2 倍叫放量确认，低于 0.8 倍说明参与度较弱。",
+      tx("这根已收盘 K 线的成交量相对前 20 根均量。大于 1.2 倍叫放量确认，低于 0.8 倍说明参与度较弱。", "This closed candle's volume versus the prior 20-candle average. Above 1.2× is confirmation; below 0.8× shows weak participation."),
     );
   if (Number.isFinite(vwap))
     add(
       "vwap",
-      "日内 VWAP",
+      tx("日内 VWAP", "Session VWAP"),
       money(vwap),
       vwapBull ? "bull" : vwapBear ? "bear" : "flat",
-      "VWAP 是当天按成交量加权的平均成交价。价格在它上方偏强、下方偏弱，仍需要趋势和成交量配合。",
+      tx("VWAP 是当天按成交量加权的平均成交价。价格在它上方偏强、下方偏弱，仍需要趋势和成交量配合。", "VWAP is the volume-weighted average price for the session. Above it is stronger, below is weaker, but trend and volume still must agree."),
     );
   if (Number.isFinite(funding))
     add(
@@ -7708,37 +9212,37 @@ function renderExpandedIndicatorDetails(m) {
   rows.forEach((row) => {
     row.tip = `${liveMeaning[row.key] || `当前读数为 ${row.value}，系统标记为${tag(row.kind)}。`} ${row.tip}`;
   });
-  let decision = "观望",
+  let decision = tx("观望", "Wait"),
     decisionKind = "flat",
-    reason = "趋势、成交量与日内位置还没有同时确认";
+    reason = tx("趋势、成交量与日内位置还没有同时确认", "Trend, volume and intraday position are not yet confirmed together");
   if (trendBull && vwapBull && volumeRatio >= 1) {
-    decision = "研究偏多";
+    decision = tx("研究偏多", "Research bullish");
     decisionKind = "bull";
-    reason = "均线趋势向上，价格在日内 VWAP 上方，且成交量没有走弱";
+    reason = tx("均线趋势向上，价格在日内 VWAP 上方，且成交量没有走弱", "Moving averages slope up, price is above session VWAP, and volume is not weakening");
   } else if (trendBear && vwapBear && volumeRatio >= 1) {
-    decision = "研究偏空";
+    decision = tx("研究偏空", "Research bearish");
     decisionKind = "bear";
-    reason = "均线趋势向下，价格在日内 VWAP 下方，且成交量没有走弱";
+    reason = tx("均线趋势向下，价格在日内 VWAP 下方，且成交量没有走弱", "Moving averages slope down, price is below session VWAP, and volume is not weakening");
   } else if ((trendBull || trendBear) && volumeRatio < 1)
-    reason = "趋势存在，但成交量不足，信号可信度较低";
+    reason = tx("趋势存在，但成交量不足，信号可信度较低", "A trend exists but volume is insufficient, so signal confidence is low");
   else if (trendBull || trendBear)
-    reason = "趋势存在，但价格与日内 VWAP 没有同向确认";
+    reason = tx("趋势存在，但价格与日内 VWAP 没有同向确认", "A trend exists but price and session VWAP do not confirm the same direction");
   if (
     (decisionKind === "bull" && crowdedLong) ||
     (decisionKind === "bear" && crowdedShort)
   ) {
-    decision = "观望";
+    decision = tx("观望", "Wait");
     decisionKind = "flat";
-    reason += `；${crowdedLong ? "多头" : "空头"}资金费率偏拥挤`;
+    reason += tx(`；${crowdedLong ? "多头" : "空头"}资金费率偏拥挤`, `; ${crowdedLong ? "long" : "short"} funding is crowded`);
   }
-  if (extremeBasis) reason += `；永续${basis > 0 ? "溢价" : "贴水"}偏大`;
+  if (extremeBasis) reason += tx(`；永续${basis > 0 ? "溢价" : "贴水"}偏大`, `; perpetual ${basis > 0 ? "premium" : "discount"} is elevated`);
   host.classList.add("trade-confirmation-metrics", "indicator-adaptive-grid");
   host.style.setProperty(
     "--indicator-font-scale",
     rows.length > 10 ? ".84" : rows.length > 8 ? ".92" : "1",
   );
-  const rowHtml = (row) =>
-      `<div class="metric trade-confirmation-row compact-indicator" data-fixed-basis="true" data-indicator-key="${row.key}"><span>${row.label}</span><b>${row.value}</b><i class="badge ${row.kind}">${tag(row.kind, row.key === "volume" ? "确认" : row.key === "vwap" ? "偏多" : "看多", row.key === "volume" ? "偏弱" : row.key === "vwap" ? "偏空" : "看空")}</i></div>`,
+    const rowHtml = (row) =>
+      `<div class="metric trade-confirmation-row compact-indicator" data-fixed-basis="true" data-indicator-key="${row.key}"><span>${row.label}</span><b>${row.value}</b><i class="badge ${row.kind}">${tag(row.kind, row.key === "volume" ? tx("确认", "Confirm") : row.key === "vwap" ? tx("偏多", "Bullish") : tx("看多", "Bullish"), row.key === "volume" ? tx("偏弱", "Weak") : row.key === "vwap" ? tx("偏空", "Bearish") : tx("看空", "Bearish"))}</i></div>`,
     directionalRows = rows.filter((row) => row.kind !== "flat"),
     neutralRows = rows.filter((row) => row.kind === "flat"),
     neutralSection = neutralRows.length
@@ -7747,7 +9251,7 @@ function renderExpandedIndicatorDetails(m) {
   host.innerHTML =
     directionalRows.map(rowHtml).join("") +
     neutralSection +
-    `<div class="trade-decision ${decisionKind}"><span>研究结论</span><b>${decision}</b><p>${reason}。${context ? ` 数据源：${String(context.source).toUpperCase()}。` : ""}仅供研究，不构成交易建议。</p></div>`;
+    `<div class="trade-decision ${decisionKind}"><span>${tx("研究结论", "Research view")}</span><b>${decision}</b><p>${reason}。${context ? ` ${tx("数据源", "Source")}：${String(context.source).toUpperCase()}。` : ""}${tx("仅供研究，不构成交易建议。", " For research only, not investment advice.")}</p></div>`;
   host.querySelector(".indicator-neutral-toggle")?.addEventListener("click", () => {
     neutralIndicatorsExpanded = !neutralIndicatorsExpanded;
     renderExpandedIndicatorDetails(m);
@@ -7826,8 +9330,8 @@ const entrySideStorageKey = (index) => `btc_personal_entry_side_v1_${index}`;
 const validEntry = (value) =>
   Number.isFinite(value) && value > 0 ? value : null;
 let personalEntries = [
-  { price: null, side: "long" },
-  { price: null, side: "short" },
+  { price: null, amount: null, margin: null, leverage: null, side: "long" },
+  { price: null, amount: null, margin: null, leverage: null, side: "short" },
 ];
 let personalEntriesFollowAccount = false;
 const hasPersonalEntriesV3 =
@@ -7837,6 +9341,10 @@ try {
   if (Array.isArray(saved) && saved.length === 2)
     personalEntries = saved.map((entry, index) => ({
       price: validEntry(Number(entry?.price)),
+      amount: validEntry(Number(entry?.amount)),
+      // Migrate the previous leverage-only input into the new margin field.
+      margin: validEntry(Number(entry?.margin)) || (validEntry(Number(entry?.amount)) && Number(entry?.leverage) > 0 ? Number(entry.amount) / Number(entry.leverage) : null),
+      leverage: validEntry(Number(entry?.leverage)) || (validEntry(Number(entry?.amount)) && validEntry(Number(entry?.margin)) ? Number(entry.amount) / Number(entry.margin) : null),
       side: entry?.side === "short" ? "short" : index === 1 ? "short" : "long",
     }));
 } catch {}
@@ -7848,14 +9356,17 @@ if (!hasPersonalEntriesV3) {
       localStorage.getItem("btc_personal_entry_prices_v2") || "{}",
     );
     personalEntries = [
-      { price: validEntry(Number(prior.long)), side: "long" },
-      { price: validEntry(Number(prior.short)), side: "short" },
+      { price: validEntry(Number(prior.long)), amount: null, margin: null, leverage: null, side: "long" },
+      { price: validEntry(Number(prior.short)), amount: null, margin: null, leverage: null, side: "short" },
     ];
   } catch {}
   const legacy = validEntry(Number(localStorage.getItem(entryPriceStorageKey)));
   if (legacy)
     personalEntries[0] = {
       price: legacy,
+      amount: null,
+      margin: null,
+      leverage: null,
       side:
         localStorage.getItem("btc_personal_entry_side") === "short"
           ? "short"
@@ -7916,40 +9427,94 @@ function ensurePersonalEntryCard() {
   else hero.append(card);
   return card;
 }
-function personalSidePicker(index, side) {
-  return `<span class="personal-entry-heading">${tx("我的买入价", "My entry price")}<i class="personal-side-picker"><button type="button" data-entry-side="long" data-entry-index="${index}" class="${side === "long" ? "active" : ""}">${tx("做多", "Long")}</button><button type="button" data-entry-side="short" data-entry-index="${index}" class="${side === "short" ? "active" : ""}">${tx("做空", "Short")}</button></i></span>`;
+function personalSidePicker(index, side, configuredLeverage) {
+  const leverage = configuredLeverage
+    ? `<b class="personal-entry-leverage">${Math.round(configuredLeverage)}X</b>`
+    : "";
+  return `<span class="personal-entry-heading">${tx("我的持仓", "My position")}<i class="personal-side-picker"><button type="button" data-entry-side="long" data-entry-index="${index}" class="${side === "long" ? "active" : ""}">${tx("做多", "Long")}</button><button type="button" data-entry-side="short" data-entry-index="${index}" class="${side === "short" ? "active" : ""}">${tx("做空", "Short")}</button></i>${leverage}</span>`;
 }
 function personalEntrySlot(index, live) {
   const entry = personalEntries[index],
     price = entry.price,
-    side = entry.side;
-  if (personalEntryEditingIndex === index)
-    return `<article class="personal-entry-slot ${side} editing">${personalSidePicker(index, side)}<input class="personal-entry-input" data-entry-input="${index}" aria-label="${tx("我的买入价", "My entry price")}" type="number" inputmode="decimal" min="0" step="0.01" placeholder="${tx("输入买入价", "Enter buy-in price")}" value="${price ? price.toFixed(2) : ""}"><small>${tx("按 Enter 保存；留空可清除", "Press Enter to save; leave blank to clear")}</small></article>`;
+    side = entry.side,
+    configuredLeverage = validEntry(Number(entry.leverage));
+  if (personalEntryEditingIndex === index) {
+    const fmt = (v, digits = 2) => (v ? Number(v).toFixed(digits) : "");
+    return `<article class="personal-entry-slot ${side} editing">${personalSidePicker(index, side)}<div class="personal-entry-form"><label><small>${tx("持仓量 (USDT)", "Size (USDT)")}</small><input class="personal-entry-input" data-entry-amount="${index}" aria-label="${tx("持仓量", "Position size")}" type="number" inputmode="decimal" min="0" step="0.01" placeholder="0.00" value="${fmt(entry.amount)}"></label><label><small>${tx("开仓均价 (USDT)", "Entry price (USDT)")}</small><input class="personal-entry-input" data-entry-price="${index}" aria-label="${tx("我的买入价", "My entry price")}" type="number" inputmode="decimal" min="0" step="0.01" placeholder="0.00" value="${fmt(price)}"></label><label><small>${tx("保证金 (USDT)", "Margin (USDT)")}</small><input class="personal-entry-input" data-entry-margin="${index}" aria-label="${tx("保证金", "Margin")}" type="number" inputmode="decimal" min="0" step="0.01" placeholder="0.00" value="${fmt(entry.margin)}"></label><label><small>${tx("杠杆 (倍)", "Leverage (x)")}</small><input class="personal-entry-input" data-entry-leverage="${index}" aria-label="${tx("杠杆倍数", "Leverage")}" type="number" inputmode="decimal" min="0" step="1" placeholder="${tx("自动", "Auto")}" value="${fmt(entry.leverage, 0)}"></label></div><div class="personal-entry-actions"><button type="button" class="personal-entry-btn primary" data-entry-save="${index}">${tx("保存", "Save")}</button><button type="button" class="personal-entry-btn" data-entry-cancel="${index}">${tx("取消", "Cancel")}</button><button type="button" class="personal-entry-btn danger" data-entry-clear="${index}">${tx("清除", "Clear")}</button></div><small>${tx("Enter 保存 · Esc 取消；杠杆留空 = 持仓量÷保证金；清除 = 清空本笔持仓", "Enter to save · Esc to cancel; blank leverage = size÷margin; Clear removes the position")}</small></article>`;
+  }
   if (!price)
-    return `<article class="personal-entry-slot ${side} empty">${personalSidePicker(index, side)}<button type="button" class="personal-entry-value" data-entry-value="${index}" title="${tx("双击数字输入买入价", "Double-click the number to enter your buy-in price")}">--</button><small>${tx("双击数字即可输入买入价", "Double-click the number to enter your buy-in price")}</small></article>`;
+    return `<article class="personal-entry-slot ${side} empty" draggable="true" data-entry-drag-index="${index}">${personalSidePicker(index, side, configuredLeverage)}<button type="button" class="personal-entry-value" data-entry-value="${index}">--</button><small>${tx("双击输入杠杆、持仓量、保证金和开仓均价", "Double-click to enter leverage, size, margin and entry price")}<br>${tx("拖拽可以交换仓位位置", "Drag to swap position slots")}</small></article>`;
   const rawDelta = Number.isFinite(live) ? live - price : 0,
     delta = side === "short" ? -rawDelta : rawDelta,
     percentage = (delta / price) * 100,
-    profit = delta >= 0;
-  return `<article class="personal-entry-slot ${side} ${profit ? "profit" : "loss"}">${personalSidePicker(index, side)}<div class="personal-entry-price-row"><button type="button" class="personal-entry-value" data-entry-value="${index}" title="${tx("双击数字修改买入价", "Double-click the number to edit your buy-in price")}">${money(price)}</button><i class="personal-entry-status">${profit ? tx("盈利中", "In profit") : tx("亏损中", "At a loss")}</i></div><b>${profit ? "+" : "−"}${money(Math.abs(delta))} <em>${profit ? "+" : "−"}${Math.abs(percentage).toFixed(2)}%</em></b><small>${tx("按仓位方向计算 · 双击数字修改", "Calculated by position side · double-click number to edit")}</small></article>`;
+    profit = delta >= 0,
+    amount = validEntry(Number(entry.amount)),
+    margin = validEntry(Number(entry.margin)),
+    inferredMargin = amount && configuredLeverage ? amount / configuredLeverage : null,
+    collateral = margin || inferredMargin,
+    leverage = amount && collateral ? amount / collateral : null,
+    pnl = amount ? amount * (percentage / 100) : null,
+    roe = collateral && pnl !== null ? (pnl / collateral) * 100 : null,
+    mmr = 0.005,
+    liquidation = leverage
+      ? side === "short"
+        ? price * (1 + 1 / leverage - mmr)
+        : price * (1 - 1 / leverage + mmr)
+      : null,
+    signed = (value) => `${value >= 0 ? "+" : "−"}${money(Math.abs(value))}`,
+    signedPct = (value) => `${value >= 0 ? "+" : "−"}${Math.abs(value).toFixed(2)}%`;
+  const actualPnl = amount ? pnl : delta,
+    nearLiquidation =
+      liquidation && Number.isFinite(live) && Math.abs(live - liquidation) <= 200,
+    liquidationSummary = liquidation
+      ? `<span class="personal-entry-liquidation${nearLiquidation ? " is-near-liquidation" : ""}">${tx("理论强平价", "Theoretical liquidation")} ${money(liquidation)}${nearLiquidation ? `<small role="alert">${tx("您的仓位即将被强平。", "Your position is close to liquidation.")}</small>` : ""}</span>`
+      : "";
+  const pnlSummary = `<b class="personal-entry-pnl">${signed(delta)} <em>${signedPct(percentage)}</em></b>${liquidationSummary}<span class="personal-entry-return">${tx("实时价差", "Live price difference")}${amount && roe !== null ? ` · ${tx("保证金回报", "Margin return")} ${signedPct(roe)}` : amount ? ` · ${tx("填写杠杆或保证金后计算回报与强平价", "Add leverage or margin for return and liquidation")}` : ` · ${tx("填写仓位金额后显示实际盈亏。", "Add position size to show actual PnL.")}`}</span>`;
+  return `<article class="personal-entry-slot ${side} ${profit ? "profit" : "loss"}" draggable="true" data-entry-drag-index="${index}">${personalSidePicker(index, side, configuredLeverage)}<div class="personal-entry-price-row"><button type="button" class="personal-entry-value" data-entry-value="${index}" title="${tx("双击编辑持仓", "Double-click to edit position")}">${money(price)}</button><i class="personal-entry-status">${profit ? tx("盈利中", "In profit") : tx("亏损中", "At a loss")}</i><b class="personal-entry-status-pnl">${signed(actualPnl)}</b></div><div class="personal-entry-pnl-layout"><div>${pnlSummary}</div></div><small>${amount ? `${tx("持仓", "Size")} ${money(amount)} USDT${configuredLeverage ? ` · ${tx("开仓杠杆", "Entry leverage")} ${configuredLeverage.toFixed(2)}×` : ""}${margin ? ` · ${tx("当前保证金", "Current margin")} ${money(margin)}` : ""}${leverage ? ` · ${tx("有效杠杆", "Effective leverage")} ${leverage.toFixed(2)}×` : ""} · ${tx("市价实时更新", "Live market price")}` : tx("双击价格补充杠杆、持仓量与保证金", "Double-click price to add leverage, size and margin")}</small></article>`;
 }
 function beginPersonalEntryEdit(index) {
   if (personalEntryEditingIndex !== null) return;
   personalEntryEditingIndex = index;
   renderPersonalEntryCard(true);
-  const input = document.querySelector(`[data-entry-input="${index}"]`);
-  input?.focus();
-  input?.select();
+  const form = document.querySelector(".personal-entry-slot.editing"),
+    amountInput = form?.querySelector(`[data-entry-amount="${index}"]`),
+    marginInput = form?.querySelector(`[data-entry-margin="${index}"]`),
+    leverageInput = form?.querySelector(`[data-entry-leverage="${index}"]`),
+    priceInput = form?.querySelector(`[data-entry-price="${index}"]`);
+  priceInput?.focus();
+  priceInput?.select();
+  const readField = (input) => validEntry(Number(input?.value));
   const finish = (save) => {
     if (personalEntryEditingIndex !== index) return;
     if (save) {
-      personalEntries[index].price = validEntry(Number(input?.value));
+      const amount = readField(amountInput),
+        margin = readField(marginInput),
+        manualLeverage = readField(leverageInput),
+        price = readField(priceInput);
+      if (!amount && !margin && !manualLeverage && !price) {
+        // 四项全空：整笔持仓清除（保留多空方向）。
+        personalEntries[index] = {
+          price: null,
+          amount: null,
+          margin: null,
+          leverage: null,
+          side: personalEntries[index].side,
+        };
+      } else {
+        personalEntries[index].price = price;
+        personalEntries[index].amount = amount;
+        personalEntries[index].margin = margin;
+        // 杠杆优先用手动填写的倍数（徽章/开仓杠杆）；留空时按 持仓量÷保证金 推导。
+        personalEntries[index].leverage =
+          manualLeverage ||
+          (amount && margin ? amount / margin : null);
+      }
       savePersonalEntries();
     }
     personalEntryEditingIndex = null;
     renderPersonalEntryCard();
   };
-  input?.addEventListener("keydown", (event) => {
+  form?.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       event.preventDefault();
       finish(true);
@@ -7959,7 +9524,27 @@ function beginPersonalEntryEdit(index) {
       finish(false);
     }
   });
-  input?.addEventListener("blur", () => finish(true));
+  // 保存 / 取消 / 清除 按钮：清除 = 清空四项后立即保存（清掉本笔持仓，保留方向）。
+  form
+    ?.querySelector(`[data-entry-save="${index}"]`)
+    ?.addEventListener("click", () => finish(true));
+  form
+    ?.querySelector(`[data-entry-cancel="${index}"]`)
+    ?.addEventListener("click", () => finish(false));
+  form
+    ?.querySelector(`[data-entry-clear="${index}"]`)
+    ?.addEventListener("click", () => {
+      amountInput && (amountInput.value = "");
+      marginInput && (marginInput.value = "");
+      leverageInput && (leverageInput.value = "");
+      priceInput && (priceInput.value = "");
+      finish(true);
+    });
+  // 焦点在三个输入框之间移动不算结束；只有焦点离开整个表单才保存。
+  form?.addEventListener("focusout", (event) => {
+    if (form.contains(event.relatedTarget)) return;
+    finish(true);
+  });
 }
 function setPersonalEntrySide(index, side) {
   // 点击立刻写入独立键和整组数据；后续每秒重绘仅从这份状态取值。
@@ -7968,21 +9553,8 @@ function setPersonalEntrySide(index, side) {
   savePersonalEntries();
 }
 function renderPersonalEntryLegend() {
-  const legend = $("chartLegend");
-  if (!legend) return;
-  legend.querySelectorAll("[data-entry-legend]").forEach((el) => el.remove());
-  personalEntries
-    .filter((entry) => validEntry(Number(entry.price)))
-    .forEach((entry) => {
-      const item = document.createElement("span");
-      item.dataset.entryLegend = "true";
-      item.className = `personal-entry-${entry.side}`;
-      item.textContent =
-        entry.side === "short"
-          ? tx("做空买入价", "Short entry")
-          : tx("做多买入价", "Long entry");
-      legend.append(item);
-    });
+  // 顶部图例已精简为只保留 K线图+价格，个人买入价图例不再追加。
+  return;
 }
 function renderPersonalEntryCard(force = false) {
   const card = ensurePersonalEntryCard(),
@@ -8011,6 +9583,48 @@ function renderPersonalEntryCard(force = false) {
       setPersonalEntrySide(index, button.dataset.entrySide);
       renderPersonalEntryCard();
     });
+    /* 拖拽互换两个持仓槽的位置。 */
+    let dragSourceIndex = null;
+    card.addEventListener("dragstart", (event) => {
+      const slot = event.target.closest("[data-entry-drag-index]");
+      if (!slot) return;
+      dragSourceIndex = Number(slot.dataset.entryDragIndex);
+      slot.classList.add("is-dragging");
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", String(dragSourceIndex));
+    });
+    card.addEventListener("dragend", (event) => {
+      const slot = event.target.closest("[data-entry-drag-index]");
+      slot?.classList.remove("is-dragging");
+      card.querySelectorAll(".personal-entry-slot").forEach((s) => s.classList.remove("drag-over"));
+      dragSourceIndex = null;
+    });
+    card.addEventListener("dragover", (event) => {
+      const slot = event.target.closest("[data-entry-drag-index]");
+      if (!slot || dragSourceIndex === null) return;
+      const targetIndex = Number(slot.dataset.entryDragIndex);
+      if (targetIndex === dragSourceIndex) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      slot.classList.add("drag-over");
+    });
+    card.addEventListener("dragleave", (event) => {
+      const slot = event.target.closest("[data-entry-drag-index]");
+      slot?.classList.remove("drag-over");
+    });
+    card.addEventListener("drop", (event) => {
+      event.preventDefault();
+      const slot = event.target.closest("[data-entry-drag-index]");
+      if (!slot || dragSourceIndex === null) return;
+      const targetIndex = Number(slot.dataset.entryDragIndex);
+      if (targetIndex === dragSourceIndex) return;
+      /* 交换 personalEntries 数组中两个位置的数据。 */
+      const tmp = personalEntries[dragSourceIndex];
+      personalEntries[dragSourceIndex] = personalEntries[targetIndex];
+      personalEntries[targetIndex] = tmp;
+      savePersonalEntries();
+      renderPersonalEntryCard();
+    });
   }
   renderPersonalEntryLegend();
   if (state.candles.length) draw();
@@ -8030,6 +9644,9 @@ window.addEventListener("btc:account-state", async (event) => {
     if (Array.isArray(cloudEntries) && cloudEntries.length === 2) {
       personalEntries = cloudEntries.map((entry, index) => ({
         price: validEntry(Number(entry?.price)),
+        amount: validEntry(Number(entry?.amount)),
+        margin: validEntry(Number(entry?.margin)) || (validEntry(Number(entry?.amount)) && Number(entry?.leverage) > 0 ? Number(entry.amount) / Number(entry.leverage) : null),
+        leverage: validEntry(Number(entry?.leverage)) || (validEntry(Number(entry?.amount)) && validEntry(Number(entry?.margin)) ? Number(entry.amount) / Number(entry.margin) : null),
         side:
           entry?.side === "short" ? "short" : index === 1 ? "short" : "long",
       }));
@@ -8052,6 +9669,7 @@ window.addEventListener("btc:account-state", async (event) => {
    not a paid macro-data feed or a direction call. */
 let fedCalendarLoading = false;
 let macroCalendarData = null;
+let macroCalendarError = null;
 function macroCountdown(at) {
   const seconds = Math.max(0, Math.round((at - Date.now()) / 1000));
   const days = Math.floor(seconds / 86_400),
@@ -8092,6 +9710,7 @@ function refreshMacroUpdateAges() {
 }
 function renderFedMonitor(data) {
   macroCalendarData = data || null;
+  macroCalendarError = data ? null : macroCalendarError;
   renderFearGreedGauge();
   let card = $("fedMonitorCard"),
     correlation = document.querySelector(".correlation-card");
@@ -8122,7 +9741,7 @@ function renderFedMonitor(data) {
   const eventCards = [
     ...events.map(
       (event) =>
-        `<article class="fed-event ${event === nearest && near ? "near" : ""}"><span>${event.name}</span><b>${new Intl.DateTimeFormat(uiLang === "zh" ? "zh-CN" : "en-US", { month: "2-digit", day: "2-digit", year: "numeric", timeZone: "Asia/Shanghai" }).format(event.at)}</b><strong>${tx("距事件 ", "In ")}${macroCountdown(event.at)}</strong><small>${event.source}${event.fallback ? tx(" · 发布节奏回退", " · cadence fallback") : ""}</small><small class="macro-update-age" data-macro-updated-at="${calendarUpdatedAt || ""}">${macroUpdatedAgo(calendarUpdatedAt)}</small></article>`,
+        `<article class="fed-event ${event === nearest && near ? "near" : ""}"><span>${tname(MACRO_EVENT_NAMES, event.key)}</span><b>${new Intl.DateTimeFormat(uiLang === "zh" ? "zh-CN" : "en-US", { month: "2-digit", day: "2-digit", year: "numeric", timeZone: "Asia/Shanghai" }).format(event.at)}</b><strong>${tx("距事件 ", "In ")}${macroCountdown(event.at)}</strong><small>${event.source}${event.fallback ? tx(" · 发布节奏回退", " · cadence fallback") : ""}</small><small class="macro-update-age" data-macro-updated-at="${calendarUpdatedAt || ""}">${macroUpdatedAgo(calendarUpdatedAt)}</small></article>`,
     ),
     ...missing.map(
       (name) =>
@@ -8158,13 +9777,13 @@ function renderFedMonitor(data) {
             : "bear"
           : "flat",
         age = macroUpdatedAgo(signalsUpdatedAt, !signal.available);
-      return `<article class="fed-market-signal ${signal.available ? "" : "unavailable"}"><span>${tx(signal.name, signal.name)}</span>${signal.available ? `<b class="${kind}">${changeText}</b><strong>${value(signal)}</strong><small>${signal.source} · ${tx(signal.cadence || "快照", signal.cadence || "Snapshot")}</small>` : `<b class="flat">--</b><strong>${tx("暂不可用", "Unavailable")}</strong><small>${tx(signal.detail || "公开数据暂不可用", signal.detail || "Public data unavailable")}</small>`}<small class="macro-update-age" data-macro-updated-at="${signalsUpdatedAt || ""}"${signal.available ? "" : ' data-macro-checking="true"'}>${age}</small></article>`;
+      return `<article class="fed-market-signal ${signal.available ? "" : "unavailable"}"><span>${tname(ENV_SIGNAL_NAMES, signal.key)}</span>${signal.available ? `<b class="${kind}">${changeText}</b><strong>${value(signal)}</strong><small>${signal.source} · ${txMap(SIGNAL_CADENCE, signal.cadence, tx("快照", "Snapshot"))}</small>` : `<b class="flat">--</b><strong>${tx("暂不可用", "Unavailable")}</strong><small>${txMap(SIGNAL_DETAIL, signal.detail, tx("公开数据暂不可用", "Public data unavailable"))}</small>`}<small class="macro-update-age" data-macro-updated-at="${signalsUpdatedAt || ""}"${signal.available ? "" : ' data-macro-checking="true"'}>${age}</small></article>`;
     })
     .join("");
   const marketPanel = signalCards
     ? `<section class="fed-market-panel"><div><h3>${tx("综合指标", "Market context")}</h3><span>${tx("公开数据 · 每 10 分钟检查", "Public data · checked every 10 min")}</span></div><div class="fed-market-grid">${signalCards}</div></section>`
     : "";
-  card.innerHTML = `<div class="fed-monitor-head"><div><h2>${tx("BTC × 美联储监控", "BTC × Federal Reserve monitor")}</h2><p>${tx("公开日历与跨市场环境数据；事件前后行情波动可能放大，不构成方向预测。", "Public event-calendar and cross-market context. Volatility can rise around releases; this is not a directional forecast.")}</p></div><span>${tx("每 10 分钟检查", "Checked every 10 min")}</span></div>${marketPanel}<div class="fed-event-grid">${eventCards || `<article class="fed-event unavailable"><span>${tx("公开日历暂不可用", "Public calendar unavailable")}</span><small>${tx("下次 10 分钟检查会自动重试。", "The next ten-minute check will retry automatically.")}</small></article>`}</div><footer>${nearest ? tx(`最近事件：${nearest.name}，请在发布前后降低杠杆和仓位集中度。`, `Nearest event: ${nearest.name}. Consider reducing leverage and concentration around the release.`) : tx("使用 Federal Reserve 与 BLS 的公开发布日历。", "Uses public Federal Reserve and BLS release calendars.")} <em>${data?.cached ? tx("缓存", "Cached") : tx("刚更新", "Updated")}</em></footer>`;
+  card.innerHTML = `<div class="fed-monitor-head"><div><h2>${tx("BTC × 美联储监控", "BTC × Federal Reserve monitor")}</h2><p>${tx("公开日历与跨市场环境数据；事件前后行情波动可能放大，不构成方向预测。", "Public event-calendar and cross-market context. Volatility can rise around releases; this is not a directional forecast.")}</p></div><span>${tx("每 10 分钟检查", "Checked every 10 min")}</span></div>${marketPanel}<div class="fed-event-grid">${eventCards || `<article class="fed-event unavailable"><span>${tx("公开日历暂不可用", "Public calendar unavailable")}</span><small>${tx("下次 10 分钟检查会自动重试。", "The next ten-minute check will retry automatically.")}</small></article>`}</div><footer>${nearest ? tx(`最近事件：${tname(MACRO_EVENT_NAMES, nearest.key)}，请在发布前后降低杠杆和仓位集中度。`, `Nearest event: ${tname(MACRO_EVENT_NAMES, nearest.key)}. Consider reducing leverage and concentration around the release.`) : tx("使用 Federal Reserve 与 BLS 的公开发布日历。", "Uses public Federal Reserve and BLS release calendars.")} <em>${data?.cached ? tx("缓存", "Cached") : tx("刚更新", "Updated")}</em></footer>`;
   refreshMacroUpdateAges();
   addHelp(
     card.querySelector(".fed-monitor-head h2"),
@@ -8177,23 +9796,39 @@ function renderFedMonitor(data) {
     "Combines public traditional-market and crypto snapshots for macro context. Update cadences differ, so it is not a single-time trading signal.",
   );
   const signalTips = {
-    gold: "黄金通常被视为避险资产，和 BTC 的短线关系并不稳定；这里仅观察其日内风险偏好变化。",
-    dxy: "美元指数走强时，风险资产可能承压；相关性会随市场阶段变化。",
-    "btc-dominance":
+    gold: [
+      "黄金通常被视为避险资产，和 BTC 的短线关系并不稳定；这里仅观察其日内风险偏好变化。",
+      "Gold is usually a safe-haven asset, but its short-term relationship with BTC is unstable; we only observe intraday risk-sentiment shifts here.",
+    ],
+    dxy: [
+      "美元指数走强时，风险资产可能承压；相关性会随市场阶段变化。",
+      "When the US Dollar Index strengthens, risk assets can come under pressure; the correlation shifts with the market regime.",
+    ],
+    "btc-dominance": [
       "BTC 总市值占全加密市场的比例。占比上升常代表资金更偏向 BTC，但不能单独判断涨跌。",
-    "crypto-total-cap":
+      "BTC's share of total crypto market cap. A rising share often means capital favors BTC, but it alone does not decide direction.",
+    ],
+    "crypto-total-cap": [
       "全网加密总市值反映整体风险偏好与资产规模，使用 24 小时快照而非实时买卖信号。",
-    "crypto-volume":
+      "Total crypto market cap reflects overall risk appetite and asset size; it uses a 24h snapshot, not a real-time buy/sell signal.",
+    ],
+    "crypto-volume": [
       "全网 24 小时成交额反映市场参与度；放量不代表必然上涨或下跌。",
-    "exchange-btc-reserve":
+      "Total 24h volume reflects market participation; higher volume does not imply a guaranteed move up or down.",
+    ],
+    "exchange-btc-reserve": [
       "交易所 BTC 钱包余额需要可验证链上数据源；本面板不会用个人账户余额替代。",
+      "Exchange BTC wallet balances need a verifiable on-chain source; this panel never substitutes an individual account balance.",
+    ],
   };
+  const defaultTip = [
+    "这是公开市场环境数据，用于辅助研究，不应单独作为开仓或平仓依据。",
+    "This is public market-context data for research and should not be used as a stand-alone entry or exit signal.",
+  ];
   (data?.marketSignals || []).forEach((signal, index) =>
     addHelp(
       card.querySelectorAll(".fed-market-signal>span")[index],
-      signalTips[signal.key] ||
-        "这是公开市场环境数据，用于辅助研究，不应单独作为开仓或平仓依据。",
-      "This is public market-context data for research and should not be used as a stand-alone entry or exit signal.",
+      ...(signalTips[signal.key] || defaultTip),
     ),
   );
 }
@@ -8201,11 +9836,13 @@ async function loadFedMonitor() {
   if (fedCalendarLoading) return;
   fedCalendarLoading = true;
   try {
-    const response = await fetch("/api/fed-calendar"),
+    const response = await apiFetch("/api/fed-calendar", 10_000),
       data = await response.json();
     if (!response.ok) throw new Error(data.detail || data.error);
+    macroCalendarError = null;
     renderFedMonitor(data);
-  } catch {
+  } catch (error) {
+    macroCalendarError = error;
     renderFedMonitor(null);
   } finally {
     fedCalendarLoading = false;
@@ -8294,9 +9931,25 @@ function renderFearGreedGauge() {
   );
   const future = macroEvents.find((event) => event.at >= now);
   const macroEvent = released || future;
+  const macroEventTime = (event) =>
+    new Intl.DateTimeFormat(uiLang === "zh" ? "zh-CN" : "en-US", {
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      timeZone: "Asia/Shanghai",
+    }).format(event.at);
+  const macroEventList = macroEvents
+    .filter((event) => event !== macroEvent && event.at >= now - 24 * 3_600_000)
+    .slice(0, 3)
+    .map(
+      (event) =>
+        `<li><span>${tname(MACRO_EVENT_NAMES, event.key)}</span><time>${macroEventTime(event)}</time></li>`,
+    )
+    .join("");
   const macroTile = macroEvent
-    ? `<section class="fear-greed-compact-tile macro-event-tile ${released ? "released" : "upcoming"}"><span>${released ? tx("已公布事件", "Released event") : tx("未来事件", "Upcoming event")}</span><b class="${released ? "bull" : "flat"}">${macroEvent.name}</b><strong>${released ? safeText(macroEvent.actual?.value || tx("数据确认中", "Verifying data")) : `${new Intl.DateTimeFormat(uiLang === "zh" ? "zh-CN" : "en-US", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", timeZone: "Asia/Shanghai" }).format(macroEvent.at)} · ${tx("距事件 ", "In ")}${macroCountdown(macroEvent.at)}`}</strong><small>${released ? safeText(macroEvent.actual?.source || "") : tx("事件窗口内降低杠杆与仓位集中度", "Reduce leverage and concentration around the release")}</small></section>`
-    : `<section class="fear-greed-compact-tile macro-event-tile"><span>${tx("未来事件", "Upcoming event")}</span><b>${tx("日历加载中", "Loading calendar")}</b><small>${tx("公开日历更新后自动显示", "Appears when the public calendar updates")}</small></section>`;
+    ? `<section class="fear-greed-compact-tile macro-event-tile ${released ? "released" : "upcoming"}"><span>${tx("近期宏观日历", "Upcoming macro calendar")}</span><b class="${released ? "bull" : "flat"}">${tname(MACRO_EVENT_NAMES, macroEvent.key)}</b><strong>${released ? safeText(macroEvent.actual?.value || tx("数据确认中", "Verifying data")) : `${macroEventTime(macroEvent)} · ${tx("距事件 ", "In ")}${macroCountdown(macroEvent.at)}`}</strong><ul class="macro-event-list">${macroEventList}</ul><small>${released ? safeText(macroEvent.actual?.source || "") : tx("事件窗口内降低杠杆与仓位集中度", "Reduce leverage and concentration around the release")}</small></section>`
+    : `<section class="fear-greed-compact-tile macro-event-tile ${macroCalendarError ? "is-error" : ""}"><span>${tx("近期宏观日历", "Upcoming macro calendar")}</span><b>${macroCalendarError ? tx("日历暂不可用", "Calendar unavailable") : tx("日历加载中", "Loading calendar")}</b><small>${macroCalendarError ? tx("CPI、FOMC 与非农将在 1 分钟后自动重试。", "CPI, FOMC and payrolls retry automatically in one minute.") : tx("正在获取 CPI、FOMC 利率决议与非农就业日历。", "Fetching CPI, FOMC-rate-decision and payroll calendars.")}</small>${macroCalendarError ? `<button type="button" class="macro-calendar-retry">${tx("重试", "Retry")}</button>` : ""}</section>`;
   if (!Number.isFinite(sentiment?.value)) {
     card.className = "card fear-greed-gauge-card fear-greed-compact flat";
     const unavailable = fearGreedError;
@@ -8304,6 +9957,9 @@ function renderFearGreedGauge() {
     card
       .querySelector(".fear-greed-retry")
       ?.addEventListener("click", () => loadFearGreedSentiment(true));
+    card
+      .querySelector(".macro-calendar-retry")
+      ?.addEventListener("click", () => loadFedMonitor());
     addHelp(
       card.querySelector(".fear-greed-head h2"),
       tx(
@@ -8321,6 +9977,9 @@ function renderFearGreedGauge() {
     );
   card.className = `card fear-greed-gauge-card fear-greed-compact ${view.kind}`;
   card.innerHTML = `<div class="fear-greed-head"><h2>${tx("宏观与情绪", "Macro & sentiment")}</h2><span>${tx("慢速背景", "Slow context")}</span></div><div class="fear-greed-compact-grid"><section class="fear-greed-compact-tile"><span class="fear-greed-label">${tx("恐惧贪婪", "Fear & Greed")}</span><b class="${view.kind}">${value} · ${view.label}</b><small>${tx("不单独交易", "Not a standalone signal")}</small></section>${macroTile}</div>`;
+  card
+    .querySelector(".macro-calendar-retry")
+    ?.addEventListener("click", () => loadFedMonitor());
   addHelp(
     card.querySelector(".fear-greed-head h2"),
     "恐惧与贪婪指数是日频市场情绪读数，范围 0–100。极端读数更适合提醒不要追单；它不单独预测短线涨跌。",
@@ -8341,7 +10000,7 @@ async function loadFearGreedSentiment(force = false) {
   }
   fearGreedLoading = true;
   try {
-    const response = await fetch(`/api/sentiment${force ? "?refresh=1" : ""}`),
+    const response = await apiFetch(`/api/sentiment${force ? "?refresh=1" : ""}`, 10_000),
       data = await response.json();
     if (!response.ok) throw new Error(data.detail || data.error);
     fearGreedSentiment = data;
@@ -8772,31 +10431,69 @@ const refreshIntervalMs = 1_000;
 const loadCurrentWithDataDensity = loadCurrent;
 let initialResonanceCalculated = false;
 loadCurrent = async function () {
-  await loadCurrentWithDataDensity();
-  if (!state.candles.length) return;
-  const minutes =
+  const refreshed = await loadCurrentWithDataDensity();
+  if (refreshed === false || !state.candles.length) return;
+  const intervalMs =
       {
-        "1m": 1,
-        "5m": 5,
-        "15m": 15,
-        "30m": 30,
-        "1h": 60,
-        "2h": 120,
-        "3h": 180,
-        "4h": 240,
-        "1d": 1440,
-      }[state.interval] || 15,
+        "5s": 5_000,
+        "10s": 10_000,
+        "30s": 30_000,
+        "1m": 60_000,
+        "5m": 300_000,
+        "15m": 900_000,
+        "30m": 1_800_000,
+        "1h": 3_600_000,
+        "2h": 7_200_000,
+        "3h": 10_800_000,
+        "4h": 14_400_000,
+        "1d": 86_400_000,
+      }[state.interval] || 60_000,
+    seconds = intervalMs / 1_000,
     density =
-      minutes >= 60
-        ? `${(minutes / 60).toFixed(minutes % 60 ? 1 : 0)} ${tx("小时/根", "hours/candle")}`
-        : `${minutes} ${tx("分钟/根", "min/candle")}`,
-    perHour = (60 / minutes).toFixed((60 / minutes) % 1 ? 1 : 0),
+      seconds < 60
+        ? `${seconds} ${tx("秒/根", "sec/candle")}`
+        : seconds < 3_600
+          ? `${seconds / 60} ${tx("分钟/根", "min/candle")}`
+          : `${seconds / 3_600} ${tx("小时/根", "hours/candle")}`,
+    perHour = 3_600 / seconds,
     coverage = $("coverage"),
     displayed = visibleCandles();
-  if (coverage)
+  const insufficient =
+      state.range &&
+      state.rangeRequiredPoints &&
+      state.candles.length < state.rangeRequiredPoints,
+    chartError = $("chartError");
+  const actualCoverageMs = displayed.length > 1
+      ? displayed.at(-1).time - displayed[0].time + intervalMs
+      : 0,
+    windowText = (ms) => {
+      const totalMinutes = Math.max(0, Math.round(ms / 60_000));
+      if (totalMinutes < 60) return `${totalMinutes} ${tx("分", "m")}`;
+      if (totalMinutes < 1_440)
+        return `${Math.floor(totalMinutes / 60)} ${tx("时", "h")}${totalMinutes % 60 ? `${totalMinutes % 60} ${tx("分", "m")}` : ""}`;
+      return `${(totalMinutes / 1_440).toFixed(totalMinutes % 1_440 ? 1 : 0)} ${tx("天", "d")}`;
+    };
+  if (coverage) {
+    const availableNote = insufficient
+      ? state.marketMeta?.synthetic
+        ? tx(
+            ` · 秒级 K 线记录 ${displayed.length}/${state.rangeRequiredPoints} 根，时间跨度 ${windowText(actualCoverageMs)}；从本地服务启动后开始积累`,
+            ` · Second candles recorded: ${displayed.length}/${state.rangeRequiredPoints} across ${windowText(actualCoverageMs)}; they accumulate while this local service runs`,
+          )
+        : tx(
+            ` · 当前范围需 ${state.rangeRequiredPoints} 根，已显示可用的 ${windowText(actualCoverageMs)}（${displayed.length} 根）`,
+            ` · This range needs ${state.rangeRequiredPoints} candles; showing the available ${windowText(actualCoverageMs)} (${displayed.length})`,
+          )
+      : "";
     coverage.textContent = displayed.length
-      ? `${tx("图表覆盖", "Chart coverage")}：${time(displayed[0].time)} ${tx("至", "to")} ${time(displayed.at(-1).time)} · ${displayed.length} ${tx("根", "candles")} · ${tx("数据粒度", "Granularity")} ${density}（${perHour} ${tx("根/小时", "candles/hour")}） · ${tx("仅此范围参与回测", "only this range is used in backtest")}`
+      ? `${tx("查看范围", "Visible range")} ${txInterval(state.range || "--")} · ${tx("图表覆盖", "Chart coverage")}：${time(displayed[0].time)} ${tx("至", "to")} ${time(displayed.at(-1).time)} · ${displayed.length} ${tx("根", "candles")} · ${tx("数据粒度", "Granularity")} ${density}（${perHour.toLocaleString("en-US", { maximumFractionDigits: 2 })} ${tx("根/小时", "candles/hour")}）${availableNote} · ${tx("仅此范围参与回测", "only this range is used in backtest")}`
       : "--";
+  }
+  if (chartError) {
+    // A partial historical window is still useful. Keep rendering it instead
+    // of covering the canvas (which made long-range choices look like flicker).
+    chartError.hidden = true;
+  }
   if (!initialResonanceCalculated) {
     initialResonanceCalculated = true;
     void resonance(false);
@@ -8828,14 +10525,14 @@ function estimatedSignalDuration(m) {
   );
   const print = (minutes) =>
     minutes < 60
-      ? `${minutes} 分钟`
+      ? `${minutes} ${tx("分钟", "min")}`
       : minutes % 60 === 0
-        ? `${minutes / 60} 小时`
-        : `${(minutes / 60).toFixed(1)} 小时`;
+        ? `${minutes / 60} ${tx("小时", "h")}`
+        : `${(minutes / 60).toFixed(1)} ${tx("小时", "h")}`;
   const urgency =
     minMinutes >= 45 ? "comfort" : minMinutes >= 20 ? "caution" : "urgent";
   return {
-    label: `约 ${print(minMinutes)}–${print(maxMinutes)}`,
+    label: `${tx("约", "about")} ${print(minMinutes)}–${print(maxMinutes)}`,
     urgency,
     atrPercent,
   };
@@ -8895,11 +10592,11 @@ addFixedRuleSignalEnhancer("signal-gauge", () => {
   )
     return;
   const m = metrics(fixedRuleSignal.candles),
-    [direction] = classification(m.score),
+    direction = m.score >= 0 ? tx("做多", "Long") : tx("做空", "Short"),
     gauge = document.createElement("div"),
     strength = Math.min(100, Math.abs(m.score));
   gauge.className = "signal-gauge";
-  gauge.innerHTML = `<div class="gauge-top"><b>做空 −100.00</b><span>当前：${direction} ${m.score > 0 ? "+" : ""}${m.score.toFixed(2)}</span><b>做多 +100.00</b></div><div class="gauge-track"><i style="left:${Math.max(0, Math.min(100, (m.score + 100) / 2))}%"></i></div><div class="gauge-strength"><em style="width:${strength}%"></em><span>信号强度：${strength.toFixed(2)}</span></div>`;
+  gauge.innerHTML = `<div class="gauge-top"><b>${tx("做空", "Short")} −100.00</b><span>${tx("当前", "Now")}：${direction} ${m.score > 0 ? "+" : ""}${m.score.toFixed(2)}</span><b>${tx("做多", "Long")} +100.00</b></div><div class="gauge-track"><i style="left:${Math.max(0, Math.min(100, (m.score + 100) / 2))}%"></i></div><div class="gauge-strength"><em style="width:${strength}%"></em><span>${tx("信号强度", "Signal strength")}：${strength.toFixed(2)}</span></div>`;
   reason.querySelector(".signal-summary")?.after(gauge);
 });
 if (fixedRuleSignal.candles.length) renderFixedRuleSignal();
@@ -8923,16 +10620,16 @@ let periodHistory = {},
   periodHistoryLoading = false,
   periodHistorySource = "";
 const periodReturnDefinitions = [
-  [tx("较 1 分钟前收盘价", "vs close 1m ago"), "intraday", 1],
-  [tx("较 5 分钟前收盘价", "vs close 5m ago"), "intraday", 5],
   [tx("较 15 分钟前收盘价", "vs close 15m ago"), "intraday", 15],
   [tx("较 1 小时前收盘价", "vs close 1h ago"), "intraday", 60],
-  [tx("较 4 小时前收盘价", "vs close 4h ago"), "intraday", 240],
+  [tx("较 8 小时前收盘价", "vs close 8h ago"), "day", 480],
   [tx("较 1 日前收盘价", "vs close 1d ago"), "day", 1440],
-  [tx("较 2 日前收盘价", "vs close 2d ago"), "day", 2880],
+  [tx("较 3 日前收盘价", "vs close 3d ago"), "day", 4320],
   [tx("较 1 周前收盘价", "vs close 1w ago"), "week", 10080],
   [tx("较 1 月前收盘价", "vs close 1mo ago"), "halfYear", 43200],
+  [tx("较 3 月前收盘价", "vs close 3mo ago"), "halfYear", 129600],
   [tx("较半年前收盘价", "vs close 6mo ago"), "halfYear", 259200],
+  [tx("较 1 年前收盘价", "vs close 1y ago"), "halfYear", 525600],
 ];
 function periodCloseBefore(candles, minutes) {
   if (!Array.isArray(candles) || !candles.length) return NaN;
@@ -8948,18 +10645,18 @@ function renderExtendedPeriodReturns() {
   const labels =
     uiLang === "zh"
       ? [
-          "近1分",
-          "近5分",
           "近15分",
-          "近1时",
-          "近4时",
-          "近一日",
-          "近两日",
-          "近一周",
+          "近1小时",
+          "近8小时",
+          "近1日",
+          "近3日",
+          "近1周",
           "近1月",
+          "近3月",
           "近6月",
+          "近1年",
         ]
-      : ["1m", "5m", "15m", "1h", "4h", "1d", "2d", "1w", "1mo", "6mo"];
+      : ["15m", "1h", "8h", "1d", "3d", "1w", "1mo", "3mo", "6mo", "1y"];
   const returns = periodReturnDefinitions.map(
       ([label, bucket, minutes], index) => {
         const close = periodCloseBefore(periodHistory[bucket], minutes),
@@ -9001,10 +10698,11 @@ async function loadExtendedPeriodHistories() {
   try {
     const groups = await Promise.all(
       [
+        /* 15m 桶取 400 根（≈100 小时）覆盖近3日；日 K 桶取 400 根（≈13 个月）覆盖近1年。 */
         ["intraday", "1m", 300],
-        ["day", "15m", 300],
+        ["day", "15m", 400],
         ["week", "1h", 300],
-        ["halfYear", "1d", 300],
+        ["halfYear", "1d", 400],
       ].map(async ([key, interval, limit]) => {
         const response = await apiFetch(
             `/api/market?${new URLSearchParams({ source, interval, limit })}`,
@@ -9223,7 +10921,7 @@ function renderResearchOutlook(data) {
         quality = Math.round(Number(window.matchQuality || 0) * 100),
         range = window.priceRange || {},
         label = researchProbabilityLabel(prob);
-      return `<article class="research-window ${label.kind}"><span>${safeText(window.label)} · ${tx({ bull: "牛市", bear: "熊市", range: "震荡" }[window.regime] || "未知", { bull: "Bull", bear: "Bear", range: "Range" }[window.regime] || "Unknown")}</span><b>${label.title}</b><strong class="${label.side}">${label.detail}</strong><em>${tx("预期变动", "Expected move")} ${move >= 0 ? "+" : "−"}${money(Math.abs(move))} (${ret >= 0 ? "+" : "−"}${Math.abs(ret).toFixed(2)}%)</em><small>${tx("价格区间 P10/P50/P90", "Price range P10/P50/P90")}：${money(range.p10)} / ${money(range.p50)} / ${money(range.p90)}</small><small>${tx("匹配质量", "Match quality")} ${quality}% · n=${window.samples}/${window.candidateCount}</small></article>`;
+      return `<article class="research-window ${label.kind}"><span>${safeText(txWinLabel(window.label))} · ${tx({ bull: "牛市", bear: "熊市", range: "震荡" }[window.regime] || "未知", { bull: "Bull", bear: "Bear", range: "Range" }[window.regime] || "Unknown")}</span><b>${label.title}</b><strong class="${label.side}">${label.detail}</strong><em>${tx("预期变动", "Expected move")} ${move >= 0 ? "+" : "−"}${money(Math.abs(move))} (${ret >= 0 ? "+" : "−"}${Math.abs(ret).toFixed(2)}%)</em><small>${tx("价格区间 P10/P50/P90", "Price range P10/P50/P90")}：${money(range.p10)} / ${money(range.p50)} / ${money(range.p90)}</small><small>${tx("匹配质量", "Match quality")} ${quality}% · n=${window.samples}/${window.candidateCount}</small></article>`;
     })
     .join("");
   const news = data.news || {},
@@ -9259,7 +10957,7 @@ function renderResearchOutlook(data) {
           economic = live?.economic
             ? `${tx("成本后", "After cost")} ${live.economic.trades} ${tx("笔", "trades")} · ${tx("净收益", "Net")} ${pct(live.economic.netReturn * 100)} · ${tx("最大回撤", "Max DD")} ${pct(live.economic.maxDrawdown * 100)}`
             : null;
-        return `<article><b>${safeText(window.label)}</b><span>${quality}</span><span>${live ? `${tx("实时", "Live")} ${tx("命中", "Hit")} ${(live.hitRate * 100).toFixed(1)}% · Brier ${live.brier.toFixed(3)} · BSS ${Number.isFinite(live.brierSkill) ? `${(live.brierSkill * 100).toFixed(1)}%` : "--"} · ECE ${Number.isFinite(live.ece) ? `${(live.ece * 100).toFixed(1)}%` : "--"} · n=${live.settled}` : `${tx("实时命中待积累", "Live outcomes pending")} · ${tx("待结算", "Pending")} ${pending}`}</span>${economic ? `<span>${economic}</span>` : ""}</article>`;
+        return `<article><b>${safeText(txWinLabel(window.label))}</b><span>${quality}</span><span>${live ? `${tx("实时", "Live")} ${tx("命中", "Hit")} ${(live.hitRate * 100).toFixed(1)}% · Brier ${live.brier.toFixed(3)} · BSS ${Number.isFinite(live.brierSkill) ? `${(live.brierSkill * 100).toFixed(1)}%` : "--"} · ECE ${Number.isFinite(live.ece) ? `${(live.ece * 100).toFixed(1)}%` : "--"} · n=${live.settled}` : `${tx("实时命中待积累", "Live outcomes pending")} · ${tx("待结算", "Pending")} ${pending}`}</span>${economic ? `<span>${economic}</span>` : ""}</article>`;
       })
       .join("");
   const scorecardPanel = `<section class="research-scorecard"><h3>${tx("模型记分卡", "Model scorecard")}</h3><p>${tx("三重屏障标签 · 时间顺序 60/20/20 切分并 embargo · 逻辑回归与本地树模型基线动态加权 · Platt 仅在独立校准窗拟合。BSS 相对朴素上涨率基准；成本化指标只使用已结算预测。", "Triple-barrier labels · chronological 60/20/20 split with embargo · dynamically blended logistic and local tree baseline · Platt fits only on the independent calibration window. BSS is relative to a naive base-rate forecast; cost metrics use settled predictions only.")}</p><div>${scoreRows}</div></section>`;
@@ -9295,7 +10993,7 @@ function renderResearchOutlook(data) {
     overallCandidate = comparison?.overall?.candidate || {},
     verdict = comparison?.verdict,
     abPanel = comparison
-      ? `<section class="research-ab-evaluation ${safeText(verdict?.tone || "yellow")}"><h3>${tx("A/B 自动评估 · 当前对象：BTC 多因子研究预测模型", "A/B automatic evaluation · current scope: BTC multi-factor research model")}</h3><div class="research-ab-verdict"><b>${safeText(verdict?.label || tx("继续影子评估", "Continue shadow scoring"))}</b><span>${safeText(verdict?.reason || "")}</span></div><div class="research-ab-summary"><span>${tx("已配对结算", "Paired outcomes")} <b>${comparison.paired || 0}</b></span><span>${tx("总体 Brier", "Overall Brier")} <b>${metric(overallBase.brier)} → ${metric(overallCandidate.brier)}</b></span><span>${tx("总体 Log Loss", "Overall Log Loss")} <b>${metric(overallBase.logLoss)} → ${metric(overallCandidate.logLoss)}</b></span><span>${tx("成本后净收益", "Net after cost")} <b>${pct((overallBase.economic?.netReturn || 0) * 100)} → ${pct((overallCandidate.economic?.netReturn || 0) * 100)}</b></span></div><div class="research-ab-grid">${comparisonRows}</div><small>${tx("门槛：每周期 30 个配对样本；Brier 与 Log Loss 均至少优于 3%，BSS≥0，ECE 不恶化超过 5%，成本后净收益不低于现役，且已验证市场状态不显著退化。绿色仅表示建议人工复核，绝不自动切换。", "Gate: 30 paired outcomes per horizon; Brier and Log Loss each improve by 3%, BSS≥0, ECE no worse by over 5%, net after cost no lower, and no material degradation in validated regimes. Green means manual review only; it never auto-switches.")}</small></section>`
+      ? `<section class="research-ab-evaluation ${safeText(verdict?.tone || "yellow")}"><h3>${tx("A/B 自动评估 · 当前对象：BTC 多因子研究预测模型", "A/B automatic evaluation · current scope: BTC multi-factor research model")}</h3><div class="research-ab-verdict"><b>${safeText(txVerdictLabel(verdict?.label) || tx("继续影子评估", "Continue shadow scoring"))}</b><span>${safeText(txVerdictReason(verdict?.reason) || "")}</span></div><div class="research-ab-summary"><span>${tx("已配对结算", "Paired outcomes")} <b>${comparison.paired || 0}</b></span><span>${tx("总体 Brier", "Overall Brier")} <b>${metric(overallBase.brier)} → ${metric(overallCandidate.brier)}</b></span><span>${tx("总体 Log Loss", "Overall Log Loss")} <b>${metric(overallBase.logLoss)} → ${metric(overallCandidate.logLoss)}</b></span><span>${tx("成本后净收益", "Net after cost")} <b>${pct((overallBase.economic?.netReturn || 0) * 100)} → ${pct((overallCandidate.economic?.netReturn || 0) * 100)}</b></span></div><div class="research-ab-grid">${comparisonRows}</div><small>${tx("门槛：每周期 30 个配对样本；Brier 与 Log Loss 均至少优于 3%，BSS≥0，ECE 不恶化超过 5%，成本后净收益不低于现役，且已验证市场状态不显著退化。绿色仅表示建议人工复核，绝不自动切换。", "Gate: 30 paired outcomes per horizon; Brier and Log Loss each improve by 3%, BSS≥0, ECE no worse by over 5%, net after cost no lower, and no material degradation in validated regimes. Green means manual review only; it never auto-switches.")}</small></section>`
       : `<section class="research-ab-evaluation yellow"><h3>${tx("A/B 自动评估 · 当前对象：BTC 多因子研究预测模型", "A/B automatic evaluation · current scope: BTC multi-factor research model")}</h3><div class="research-ab-verdict"><b>${tx("等待候选版本", "Waiting for a candidate")}</b><span>${tx("先在 BTC 多因子研究预测卡片创建候选模型，系统才会开始同桶影子结算与自动对照。", "Create a candidate in the BTC multi-factor research card to begin paired shadow settlement and automatic comparison.")}</span></div></section>`,
     governance = `<section class="research-governance"><h3>${tx("特征与训练治理", "Feature & training governance")}</h3><div><span>${tx("OFI 快照", "OFI snapshots")} <b>${featureStatus.ofiSnapshots || 0}</b><small>${featureStatus.readyForTraining ? tx("达到最低历史门槛", "history threshold met") : tx("采集中，未进入训练", "collecting; excluded from training")}</small></span><span>DXY <b>${macro ? macro.value.toFixed(3) : "--"}</b><small>${tx("仅作环境展示，待时序对齐验证", "context only; awaiting aligned validation")}</small></span><span>${tx("新闻", "News")} <b>${tx("事件分类 + 时间衰减", "event + decay")}</b><small>${tx("无预期数据时不计算“意外度”", "no surprise factor without consensus data")}</small></span></div><div class="research-training-status"><b>${runSummary}</b><small>${safeText(shadow.reason || tx("训练候选模型后会并行记录结果，达到门槛后仍需人工决定是否切换。", "Candidate outcomes are recorded in parallel; reaching the threshold still requires a manual switch decision."))}</small></div></section>`;
   const abCenterHeader = `<div class="ab-center-head"><h2>${tx("A/B 实验中心", "A/B experiment center")}</h2><p>${tx("A 版为网页上方冻结的现役版本；B 版仅在后台同桶记录、到期后用同一真实价格结算。绿色只表示建议人工复核，系统绝不自动替换现役版本。描述/公式型模块改验算一致性、偏差或覆盖率，不输出“准确率”。", "A is the frozen live version shown above. B is recorded only in the background from the same bucket and settled against the same realised price. Green only means manual review; the system never replaces A automatically. Descriptive/formula modules validate consistency, bias, or coverage rather than accuracy.")}</p><div id="abExperimentRegistry" class="ab-experiment-registry"><span><b>${tx("正在读取各板块影子实验…", "Loading module shadow experiments…")}</b></span></div></div>`;
@@ -9366,6 +11064,8 @@ function renderAbExperimentRegistry(payload) {
   const holder = $("abExperimentRegistry");
   if (!holder) return;
   const metric = (value) => (Number.isFinite(value) ? value.toFixed(3) : "--"),
+    percent = (value) =>
+      Number.isFinite(value) ? `${(value * 100).toFixed(1)}%` : "--",
     experiments = payload?.experiments || [];
   holder.innerHTML =
     experiments
@@ -9382,12 +11082,13 @@ function renderAbExperimentRegistry(payload) {
             : experiment.status === "collecting"
               ? tx("等待特征历史", "awaiting feature history")
               : safeText(
-                  verdict?.label || tx("继续观察", "continue observing"),
+                  txVerdictLabel(verdict?.label) ||
+                    tx("继续观察", "continue observing"),
                 );
         const samples = comparison
           ? `${tx("配对", "paired")} ${comparison.paired || 0} · ${tx("每周期门槛", "per-horizon gate")} ${comparison.minSamples}`
-          : safeText(experiment.note || "");
-        return `<article class="ab-experiment ${tone}"><b>${safeText(experiment.name)}</b><span>${safeText(experiment.candidate)}</span><small>${status}${samples ? ` · ${samples}` : ""}</small>${comparison ? `<small>Brier ${metric(base.brier)} → ${metric(candidate.brier)} · Log Loss ${metric(base.logLoss)} → ${metric(candidate.logLoss)}</small>` : ""}</article>`;
+          : safeText(txExpNote(experiment.note || ""));
+        return `<article class="ab-experiment ${tone}"><b>${safeText(txExpName(experiment.name))}</b><span>${safeText(txExpCand(experiment.candidate))}</span><small>${status}${samples ? ` · ${samples}` : ""}</small>${comparison ? `<small>${tx("方向命中", "Directional hit")} ${percent(base.directionalAccuracy)} → ${percent(candidate.directionalAccuracy)} · ${tx("信号覆盖", "Signal coverage")} ${percent(base.coverage)} → ${percent(candidate.coverage)}</small><small>Brier ${metric(base.brier)} → ${metric(candidate.brier)} · Log Loss ${metric(base.logLoss)} → ${metric(candidate.logLoss)} · ${tx("成本后", "After cost")} ${percent(base.economic?.netReturn)} → ${percent(candidate.economic?.netReturn)} · ${tx("回撤", "Drawdown")} ${percent(base.economic?.maxDrawdown)} → ${percent(candidate.economic?.maxDrawdown)}</small>` : ""}</article>`;
       })
       .join("") ||
     `<span>${tx("实验注册表暂不可用。", "Experiment registry unavailable.")}</span>`;
@@ -9443,23 +11144,12 @@ setInterval(() => loadResearchOutlook(), 900_000);
 function installDataCadenceLabels() {
   const selectedSource = () =>
     String(state.lastGood?.source || state.source || "OKX").toUpperCase();
+  // The chart selector already owns its display configuration.  Do not add a
+  // second, unrelated help button to the control strip.
+  document.querySelector("#mainChartCard .toolbar > .help-dot")?.remove();
+  // #ruleSignalCard has its own dedicated help-dot with full signal-state
+  // documentation; do not overwrite it with generic cadence text.
   const labels = [
-    [
-      "#mainChartCard",
-      () =>
-        tx(
-          `${selectedSource()} 行情 · 报价每 1 秒 · K 线/指标每 10 秒`,
-          `${selectedSource()} market · quote 1s · candles/indicators 10s`,
-        ),
-    ],
-    [
-      "#ruleSignalCard",
-      () =>
-        tx(
-          `${selectedSource()} K 线 · 每 15 秒评估`,
-          `${selectedSource()} candles · evaluated every 15s`,
-        ),
-    ],
     [
       "#indicatorDetailsCard",
       () =>
@@ -9607,8 +11297,29 @@ function installDataCadenceLabels() {
   applyLanguage = function () {
     applyLanguageWithCadence();
     installDataCadenceLabels();
+    applyStaticI18n();
   };
 })();
+
+// 同步 index.html 中的静态文案（标题、页头、各卡片标题等）到当前语言。
+// Sync static text nodes in index.html (title, header, card headings, etc.) to the active language.
+function applyStaticI18n() {
+  const zh = uiLang === "zh";
+  document.querySelectorAll("[data-zh][data-en]").forEach((el) => {
+    if (el.matches("title")) {
+      document.title = zh ? el.dataset.zh : el.dataset.en;
+      return;
+    }
+    // 仅替换首个文本节点，避免覆盖内部子元素（如 <select>）。
+    // Only replace the first text node so nested children (e.g. <select>) are preserved.
+    const text = zh ? el.dataset.zh : el.dataset.en;
+    if (el.firstChild && el.firstChild.nodeType === 3) {
+      el.firstChild.textContent = text;
+    } else if (!el.querySelector(":scope > *")) {
+      el.textContent = text;
+    }
+  });
+}
 
 /* Keep the first time label wholly inside the plot after the left scale has
    been widened for readable price labels. */
@@ -9688,7 +11399,7 @@ $("appVersion")?.addEventListener("click", () => {
   const card = document.createElement("section");
   card.id = "wechatAlertCard";
   card.className = "card wechat-alert-card";
-  card.innerHTML = `<div class="forecast-head"><div><h2>${tx("消息推送", "Message alerts")}</h2><p>${tx("SendKey 与规则仅保存在当前浏览器；本站服务器不会接收或保存。页面需保持打开才能监测并推送。", "The SendKey and rules stay only in this browser; this server never receives or stores them. Keep this page open for monitoring and delivery.")}</p></div><span id="wechatAlertState" class="badge flat"></span></div><form id="wechatKeyForm" class="wechat-key-form"><label>Server酱 SendKey<input name="sendKey" type="password" autocomplete="off" placeholder="SCT…"></label><a href="https://sct.ftqq.com/sendkey" target="_blank" rel="noopener">${tx("获取 SendKey", "Get SendKey")}</a><button type="submit">${tx("仅保存到本机", "Save locally only")}</button><button type="button" id="testLocalSendKey">${tx("测试推送", "Test push")}</button><button type="button" id="clearLocalSendKey" class="danger">${tx("清除本机 Key", "Clear local Key")}</button></form><form id="wechatAlertForm" class="wechat-alert-form"><label>${tx("触发类型", "Trigger")}<select name="kind"><option value="price_above">${tx("上涨到指定价", "Rises to target")}</option><option value="price_below">${tx("下跌到指定价", "Falls to target")}</option><option value="long_liquidation">${tx("多头爆仓价", "Long liquidation")}</option><option value="short_liquidation">${tx("空头爆仓价", "Short liquidation")}</option></select></label><label>${tx("触发价格（USDT）", "Target price (USDT)")}<input name="targetPrice" type="number" inputmode="decimal" min="0" step="0.01" required placeholder="80000"></label><label>${tx("触发冷却（分钟）", "Cooldown (minutes)")}<input name="cooldownMinutes" type="number" inputmode="numeric" min="0" step="1" value="0" required><small>${tx("0 = 不限制", "0 = no limit")}</small></label><button type="submit">${tx("添加推送规则", "Add alert rule")}</button></form><div id="wechatAlertDetail" class="wechat-alert-detail"></div>`;
+  card.innerHTML = `<div class="forecast-head"><div><h2>${tx("消息推送", "Message alerts")}</h2><p>${tx("SendKey 与规则仅保存在当前浏览器；本站服务器不会接收或保存。页面需保持打开才能监测并推送。", "The SendKey and rules stay only in this browser; this server never receives or stores them. Keep this page open for monitoring and delivery.")}</p></div><span id="wechatAlertState" class="badge flat"></span></div><form id="wechatKeyForm" class="wechat-key-form"><label>${tx("Server酱 SendKey", "ServerChan SendKey")}<input name="sendKey" type="password" autocomplete="off" placeholder="SCT…"></label><a href="https://sct.ftqq.com/sendkey" target="_blank" rel="noopener">${tx("获取 SendKey", "Get SendKey")}</a><button type="submit">${tx("仅保存到本机", "Save locally only")}</button><button type="button" id="testLocalSendKey">${tx("测试推送", "Test push")}</button><button type="button" id="clearLocalSendKey" class="danger">${tx("清除本机 Key", "Clear local Key")}</button></form><form id="wechatAlertForm" class="wechat-alert-form"><label>${tx("触发类型", "Trigger")}<select name="kind"><option value="price_above">${tx("上涨到指定价", "Rises to target")}</option><option value="price_below">${tx("下跌到指定价", "Falls to target")}</option><option value="long_liquidation">${tx("多头爆仓价", "Long liquidation")}</option><option value="short_liquidation">${tx("空头爆仓价", "Short liquidation")}</option></select></label><label>${tx("触发价格（USDT）", "Target price (USDT)")}<input name="targetPrice" type="number" inputmode="decimal" min="0" step="0.01" required placeholder="80000"></label><label>${tx("触发冷却（分钟）", "Cooldown (minutes)")}<input name="cooldownMinutes" type="number" inputmode="numeric" min="0" step="1" value="0" required><small>${tx("0 = 不限制", "0 = no limit")}</small></label><button type="submit">${tx("添加推送规则", "Add alert rule")}</button></form><div id="wechatAlertDetail" class="wechat-alert-detail"></div>`;
   const footer = main.querySelector("footer");
   if (footer) main.insertBefore(card, footer);
   else main.append(card);
@@ -9893,46 +11604,48 @@ function renderSignalAlertSlot(sourceMetrics) {
   const m = sourceMetrics || metrics(candles),
     five = (candles.at(-1).close / candles.at(-6).close - 1) * 100,
     atrPct = (m.atr / Math.max(m.close, 1)) * 100,
-    emaGap = (Math.abs(m.e20 - m.e50) / Math.max(m.close, 1)) * 100;
+    emaGap = (Math.abs(m.e20 - m.e50) / Math.max(m.close, 1)) * 100,
+    basis = fixedRuleSignal.interval || state.interval || "15m",
+    shortWindow = `${basis} · ${tx("最近 5 根", "last 5 candles")}`;
   let alert = null;
   if (m.rsi >= 72)
     alert = {
       kind: "warning",
       text: tx(
-        `RSI 偏热 ${m.rsi.toFixed(1)} · 短线追高风险上升`,
-        `RSI elevated ${m.rsi.toFixed(1)} · chasing risk rising`,
+        `${basis} · RSI 偏热 ${m.rsi.toFixed(1)} · 短线追高风险上升`,
+        `${basis} · RSI elevated ${m.rsi.toFixed(1)} · chasing risk rising`,
       ),
     };
   else if (m.rsi <= 28)
     alert = {
       kind: "warning",
       text: tx(
-        `RSI 偏弱 ${m.rsi.toFixed(1)} · 短线波动可能放大`,
-        `RSI weak ${m.rsi.toFixed(1)} · short-term volatility may expand`,
+        `${basis} · RSI 偏弱 ${m.rsi.toFixed(1)} · 短线波动可能放大`,
+        `${basis} · RSI weak ${m.rsi.toFixed(1)} · short-term volatility may expand`,
       ),
     };
   else if (Math.abs(five) >= Math.max(0.55, atrPct * 1.75))
     alert = {
       kind: "warning",
       text: tx(
-        `近 5 根 K 线 ${pct(five)} · 短线快速${five > 0 ? "拉升" : "回撤"}`,
-        `Last 5 candles ${pct(five)} · rapid short-term ${five > 0 ? "rise" : "pullback"}`,
+        `${shortWindow} ${pct(five)} · 短线快速${five > 0 ? "拉升" : "回撤"}`,
+        `${shortWindow} ${pct(five)} · rapid short-term ${five > 0 ? "rise" : "pullback"}`,
       ),
     };
   else if (emaGap <= Math.max(0.035, atrPct * 0.42))
     alert = {
       kind: "caution",
       text: tx(
-        `EMA 收敛 ${emaGap.toFixed(2)}% · 方向尚待确认`,
-        `EMA convergence ${emaGap.toFixed(2)}% · direction awaits confirmation`,
+        `${basis} · EMA 收敛 ${emaGap.toFixed(2)}% · 方向尚待确认`,
+        `${basis} · EMA convergence ${emaGap.toFixed(2)}% · direction awaits confirmation`,
       ),
     };
   else if (Math.abs(five) < Math.max(0.18, atrPct * 0.55))
     alert = {
       kind: "caution",
       text: tx(
-        `近 5 根 K 线 ${pct(five)} · 短线震荡`,
-        `Last 5 candles ${pct(five)} · short-term consolidation`,
+        `${shortWindow} ${pct(five)} · 短线无加速 / 震荡`,
+        `${shortWindow} ${pct(five)} · no acceleration / consolidation`,
       ),
     };
   if (!alert) {
@@ -9941,7 +11654,7 @@ function renderSignalAlertSlot(sourceMetrics) {
     placeRuleSignalMeta();
     return;
   }
-  slot.className = `signal-alert-slot is-visible ${alert.kind}`;
+  slot.className = `signal-alert-slot is-visible short-status ${alert.kind}`;
   let item = slot.querySelector(".signal-alert");
   if (!item) {
     item = document.createElement("p");
@@ -10093,10 +11806,11 @@ renderTicker = function () {
   renderedPriceText = value;
   /* Save the current quote as the next refresh baseline. */
   previousTickerPrice = ticker.last;
-  /* Preserve the compact header fields. */
-  $("open24").textContent = money(ticker.open24h);
-  /* Preserve the high and low text order. */
-  $("highlow").textContent = `${money(ticker.high24)} / ${money(ticker.low24)}`;
+  /* Update the legacy compact header only when it is present. */
+  const compactOpen24 = $("open24"),
+    compactHighLow = $("highlow");
+  if (compactOpen24) compactOpen24.textContent = money(ticker.open24h);
+  if (compactHighLow) compactHighLow.textContent = `${money(ticker.high24)} / ${money(ticker.low24)}`;
   /* Resolve the readable perpetual-market name for the hero card. */
   const source = state.lastGood?.source || state.source;
   /* Use the same exchange labels as the existing final wrapper. */
@@ -10107,8 +11821,9 @@ renderTicker = function () {
       binance: tx("Binance USDT-M 永续", "Binance USDT-M perpetual"),
       gate: tx("Gate USDT 永续", "Gate USDT perpetual"),
     }[source] || tx("USDT 永续", "USDT perpetual");
-  /* Update the hero source with the human-readable market label. */
-  $("sourceUsed").textContent = market;
+  /* Update the legacy compact header only when it is present. */
+  const compactSource = $("sourceUsed");
+  if (compactSource) compactSource.textContent = market;
   /* Recreate the source line if an early render has not created it yet. */
   let sourceLine = $("priceSource");
   /* Append the source line beside the live timestamp exactly once. */

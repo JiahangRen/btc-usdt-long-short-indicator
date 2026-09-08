@@ -1281,6 +1281,8 @@ html[data-theme="light"] {
   --text-secondary: #56616e;
   --text-muted: #7c8793;
   color-scheme: light;
+  background: var(--bg-base);
+  color: var(--text-primary);
 }
 html[data-theme="light"] body {
   background: var(--bg-base);
@@ -1304,6 +1306,8 @@ html[data-theme="light"] #chartTooltip {
     --text-secondary: #56616e;
     --text-muted: #7c8793;
     color-scheme: light;
+    background: var(--bg-base);
+    color: var(--text-primary);
   }
   html[data-theme="auto"] body {
     background: var(--bg-base);
@@ -2431,6 +2435,9 @@ header p b {
   width: 14px;
   border-top: 2px solid currentColor;
 }
+.candle-series {
+  color: #a3b3c8;
+}
 .price-line {
   color: var(--bull);
 }
@@ -2442,6 +2449,25 @@ header p b {
 }
 .ma200-line {
   color: #a970ff;
+}
+/* 图例色块与图上线条一一对应。 */
+.boll-line {
+  color: #7c9ac4;
+}
+.vwap-line {
+  color: #ff5cd0;
+}
+.rsi-line {
+  color: #f4f8ff;
+}
+html[data-theme="light"] .rsi-line {
+  color: #64748b;
+}
+#chartLegend .volume-line:before {
+  border-top: 0;
+  height: 2px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, #ef4d78, #28c76f);
 }
 #chartLegend .personal-entry-long {
   color: #19d3b0;
@@ -3668,6 +3694,32 @@ main > header:before {
   .chart-line-toggles {
     padding-left: 0;
     border-left: 0;
+  }
+}
+.chart-legend-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 18px;
+  padding: 8px 2px 4px;
+  margin: 0 0 6px;
+}
+.chart-legend-strip #chartPatternLegend,
+.chart-legend-strip #chartLegend {
+  margin: 0;
+  padding: 0;
+}
+#chartLegend {
+  flex: 0 0 auto;
+  justify-content: flex-start;
+}
+@media (max-width: 860px) {
+  .chart-legend-strip {
+    gap: 10px 12px;
+  }
+  #chartLegend {
+    justify-content: flex-start;
+    width: 100%;
   }
 }
 .toolbar {
@@ -4906,6 +4958,96 @@ html[data-theme="light"] .range-extreme {
   font-size: 14px;
   letter-spacing: 0;
   color: var(--text-muted);
+}
+/* 持仓编辑表单：持仓量 / 保证金 / 杠杆 / 开仓均价 四个字段一行排布。 */
+.personal-entry-form {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  width: 100%;
+}
+.personal-entry-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.personal-entry-form label small {
+  color: var(--text-muted);
+  font:
+    600 9px ui-sans-serif,
+    system-ui,
+    sans-serif;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+.personal-entry-form .personal-entry-input {
+  width: 100%;
+  min-width: 0;
+  padding: 2px 0 3px;
+  border: 0;
+  border-bottom: 1.5px solid var(--accent-cyan);
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-primary);
+  outline: 0;
+  font:
+    600 12px/1.2 "SF Mono",
+    "JetBrains Mono",
+    monospace;
+  letter-spacing: -0.2px;
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+.personal-entry-form .personal-entry-input::placeholder {
+  font-size: 11px;
+  letter-spacing: 0;
+}
+/* 保存 / 取消 / 清除 按钮行。 */
+.personal-entry-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+.personal-entry-btn {
+  min-height: 0;
+  padding: 3px 12px;
+  border: 1px solid var(--border-subtle) !important;
+  border-radius: 999px;
+  background: transparent !important;
+  color: var(--text-secondary) !important;
+  font:
+    700 10px ui-sans-serif,
+    system-ui,
+    sans-serif;
+  letter-spacing: 0.02em;
+  box-shadow: none !important;
+  cursor: pointer;
+}
+.personal-entry-btn:hover {
+  color: var(--text-primary) !important;
+  border-color: var(--accent-cyan) !important;
+}
+.personal-entry-btn.primary {
+  border-color: var(--accent-cyan) !important;
+  color: var(--accent-cyan) !important;
+}
+.personal-entry-btn.danger {
+  color: var(--bear) !important;
+}
+.personal-entry-btn.danger:hover {
+  border-color: var(--bear) !important;
+}
+.personal-entry-form .personal-entry-input::-webkit-outer-spin-button,
+.personal-entry-form .personal-entry-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+@media (max-width: 680px) {
+  .personal-entry-form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
 }
 @media (max-width: 1320px) {
   .personal-entry-card {
@@ -6600,6 +6742,19 @@ main > #marketClocks #exchangeMeta .exchange-row {
   gap: 4px;
   min-width: 0;
   padding: 2px 8px;
+  cursor: grab;
+}
+.personal-entry-slot:active {
+  cursor: grabbing;
+}
+.personal-entry-slot.is-dragging {
+  opacity: 0.4;
+  transform: scale(0.98);
+}
+.personal-entry-slot.drag-over {
+  outline: 2px dashed var(--accent-cyan);
+  outline-offset: -3px;
+  background: rgba(0, 212, 170, 0.06);
 }
 .personal-entry-slot + .personal-entry-slot {
   border-left: 1px solid var(--border-subtle);
@@ -8056,11 +8211,31 @@ main > #marketClocks #exchangeMeta .exchange-row {
   color: var(--text-muted);
   font-size: 9.5px;
 }
-.voice-panel-grid {
+.voice-alert-panel .voice-panel-grid {
   display: grid;
-  grid-template-columns: minmax(150px, 0.9fr) minmax(220px, 1.6fr) auto;
+  /* 三栏宽度由 --voice-col-left / --voice-col-mid 控制（JS 拖动写入，本地记忆）。 */
+  grid-template-columns: var(--voice-col-left, 200px) 8px var(--voice-col-mid, 208px) 8px minmax(210px, 1fr);
   gap: 8px;
   align-items: stretch;
+}
+/* 栏间分割线：按住左右拖动调节栏宽，双击复位。 */
+.voice-grid-resizer {
+  align-self: stretch;
+  width: 6px;
+  margin: 0 -1px;
+  border-radius: 3px;
+  background: transparent;
+  cursor: col-resize;
+  transition: background 0.15s ease;
+}
+.voice-grid-resizer:hover,
+.voice-grid-resizer:focus-visible,
+.voice-grid-resizer.is-dragging {
+  background: rgba(0, 200, 224, 0.4);
+}
+body.voice-grid-resizing {
+  cursor: col-resize;
+  user-select: none;
 }
 .voice-panel-group {
   display: grid;
@@ -8108,18 +8283,127 @@ main > #marketClocks #exchangeMeta .exchange-row {
 .voice-alert-panel label:has(select:disabled) {
   opacity: 0.45;
 }
+/* 语音设置顶部开关组：把原生 checkbox 换成整齐的拨钮卡片。 */
+.voice-panel-toggles {
+  gap: 9px;
+}
 .voice-panel-toggles .voice-switch {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 2px 0;
+  flex-direction: row-reverse;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 9px;
+  background: var(--bg-surface-2);
   color: var(--text-secondary);
   font-size: 11.5px;
   cursor: pointer;
+  transition:
+    border-color 0.15s,
+    background 0.15s;
+}
+.voice-panel-toggles .voice-switch:hover {
+  border-color: rgba(0, 212, 170, 0.4);
+}
+/* 拨钮本体：input 视觉化为轨道，::after 为滑块。 */
+.voice-panel-toggles .voice-switch input[type="checkbox"] {
+  position: relative;
+  flex: 0 0 auto;
+  appearance: none;
+  -webkit-appearance: none;
+  width: 38px;
+  height: 21px;
+  margin: 0;
+  border-radius: 999px;
+  background: var(--border-strong);
+  cursor: pointer;
+  transition: background 0.2s ease;
+}
+.voice-panel-toggles .voice-switch input[type="checkbox"]::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  transition: transform 0.2s ease;
+}
+.voice-panel-toggles .voice-switch input[type="checkbox"]:checked {
+  background: var(--accent-cyan);
+}
+.voice-panel-toggles .voice-switch input[type="checkbox"]:checked::after {
+  transform: translateX(17px);
+}
+.voice-panel-toggles .voice-live-interval {
+  display: flex;
+  flex-direction: row-reverse;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 12px;
+  border: 1px dashed var(--border-subtle);
+  border-radius: 9px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.voice-panel-toggles .voice-live-interval select {
+  width: auto;
+  min-height: 24px;
+  padding: 2px 6px;
+  font-size: 10.5px;
 }
 .voice-panel-actions button {
   border-color: rgba(85, 161, 213, 0.55);
   color: var(--accent-cyan);
+}
+/* 播报优先级：按住条目拖拽排序。 */
+.voice-priority-list {
+  display: grid;
+  gap: 4px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.voice-priority-list li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--bg-surface-2);
+  color: var(--text-secondary);
+  font-size: 10.5px;
+  cursor: grab;
+  user-select: none;
+  transition:
+    border-color 0.15s,
+    background 0.15s,
+    opacity 0.15s;
+}
+.voice-priority-list li:hover {
+  border-color: rgba(0, 212, 170, 0.4);
+}
+.voice-priority-list li.is-dragging {
+  opacity: 0.45;
+  cursor: grabbing;
+  border-color: var(--accent-cyan);
+  background: rgba(0, 212, 170, 0.08);
+}
+.voice-priority-grip {
+  color: var(--text-muted);
+  font-size: 11px;
+  letter-spacing: -1px;
+}
+.voice-priority-index {
+  min-width: 13px;
+  color: var(--text-muted);
+  font:
+    600 9.5px ui-monospace,
+    monospace;
 }
 .voice-alert-panel.is-enabled {
   border-color: rgba(0, 212, 170, 0.35);
@@ -8131,8 +8415,11 @@ main > #marketClocks #exchangeMeta .exchange-row {
 }
 /* 窄屏退化为单列，避免控件挤压换行错位。 */
 @media (max-width: 980px) {
-  .voice-panel-grid {
+  .voice-alert-panel .voice-panel-grid {
     grid-template-columns: 1fr;
+  }
+  .voice-grid-resizer {
+    display: none;
   }
   .voice-panel-actions {
     flex-direction: row;
@@ -8248,6 +8535,21 @@ main > #marketClocks #exchangeMeta .exchange-row {
   color: #86b4ff;
   box-shadow: none;
 }
+/* 「播报中」标签：悬浮在按钮平行右侧，不挤占按钮内部空间。 */
+.voice-quick-toggle .voice-quick-toggle-label {
+  position: absolute;
+  left: calc(100% + 6px);
+  top: 50%;
+  transform: translateY(-50%);
+  white-space: nowrap;
+  color: var(--accent-bull, #00d4aa);
+  font:
+    700 11px ui-sans-serif,
+    system-ui,
+    sans-serif;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+}
 .voice-quick-toggle.is-muted {
   background: transparent;
   color: #728096;
@@ -8322,6 +8624,8 @@ main > #marketClocks #exchangeMeta .exchange-row {
 }
 .voice-rule-list {
   display: grid;
+  /* align-content: start：容器被拉伸时多余高度不灌进标题行，避免标题下出现空白。 */
+  align-content: start;
   gap: 7px;
   margin-top: 8px;
   padding: 9px 11px;
@@ -8851,6 +9155,42 @@ html[data-theme="light"] #ruleSignalCard[data-signal-tone="bull"] {
 html[data-theme="light"] #ruleSignalCard[data-signal-tone="bear"] {
   --rule-signal-wash: rgba(209, 54, 79, 0.11);
   --rule-signal-edge: rgba(195, 52, 79, 0.38);
+}
+#ruleSignalCard h2 {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 9px;
+}
+.signal-basis-chip {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+  margin-left: 6px;
+  padding: 5px 14px;
+  border-radius: 999px;
+  background: var(--text-muted);
+  color: #fff;
+  font: 800 13px/1 ui-sans-serif, system-ui, sans-serif;
+  font-style: normal;
+  letter-spacing: 0.02em;
+  text-transform: lowercase;
+  white-space: nowrap;
+}
+.signal-basis-chip[data-tone="bull"] { background: var(--bull); }
+.signal-basis-chip[data-tone="bear"] { background: var(--bear); }
+.signal-basis-chip[data-tone="flat"] { background: var(--text-muted); }
+html[data-theme="light"] .signal-basis-chip[data-tone="bull"],
+html[data-theme="light"] .signal-basis-chip[data-tone="bear"],
+html[data-theme="light"] .signal-basis-chip[data-tone="flat"] {
+  color: #fff;
+}
+@media (prefers-color-scheme: light) {
+  html[data-theme="auto"] .signal-basis-chip[data-tone="bull"],
+  html[data-theme="auto"] .signal-basis-chip[data-tone="bear"],
+  html[data-theme="auto"] .signal-basis-chip[data-tone="flat"] {
+    color: #fff;
+  }
 }
 html[data-theme="dark"] body:before,
 html[data-theme="dark"] body:after,
@@ -9846,10 +10186,10 @@ main > header {
   transform: none !important;
 }
 #okxMicrostructureCard .microstructure-item.bull .microstructure-meter em {
-  background: #f6465d !important;
+  background: #16c784 !important;
 }
 #okxMicrostructureCard .microstructure-item.bear .microstructure-meter em {
-  background: #16c784 !important;
+  background: #f6465d !important;
 }
 #okxMicrostructureCard .microstructure-alert {
   min-width: 0 !important;
@@ -10266,5 +10606,503 @@ main > header {
   #mainChartCard > #periodChangeCard.chart-periods > #changeTags {
     grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
     gap: 12px 8px !important;
+  }
+}
+
+/* =================================================================
+   Light-mode surface fixes: make dark-hardcoded cards, buttons and
+   panels readable on the bright canvas without rewriting the entire
+   dark-first stylesheet.
+   ================================================================= */
+
+html[data-theme="light"] .card,
+html[data-theme="light"] .status,
+html[data-theme="light"] .optional,
+html[data-theme="light"] select,
+html[data-theme="light"] button,
+html[data-theme="light"] .metric,
+html[data-theme="light"] pre,
+html[data-theme="light"] .signal-basis-chip,
+html[data-theme="light"] .signal-validity,
+html[data-theme="light"] .dropdown-menu,
+html[data-theme="light"] .control-popover-panel,
+html[data-theme="light"] #versionLog,
+html[data-theme="light"] .personal-entry-card,
+html[data-theme="light"] .index-card {
+  background: var(--bg-surface);
+  border-color: var(--border-subtle);
+  color: var(--text-primary);
+}
+
+html[data-theme="light"] .metric,
+html[data-theme="light"] pre,
+html[data-theme="light"] .change-card span,
+html[data-theme="light"] .chart-periods span,
+html[data-theme="light"] .signal-validity-scale,
+html[data-theme="light"] .signal-validity-track,
+html[data-theme="light"] .fear-greed-summary div,
+html[data-theme="light"] .personal-entry-card {
+  background: var(--bg-surface-2);
+}
+
+html[data-theme="light"] .signal-projection,
+html[data-theme="light"] .fear-greed-gauge-card.fear-greed-compact,
+html[data-theme="light"] .macro-event-tile {
+  background: linear-gradient(135deg, var(--bg-surface), var(--bg-surface-2)) !important;
+}
+
+html[data-theme="light"] .chart-periods span,
+html[data-theme="light"] .change-card span {
+  border-color: var(--border-subtle);
+}
+
+html[data-theme="light"] .card h2,
+html[data-theme="light"] .card h3,
+html[data-theme="light"] .card strong,
+html[data-theme="light"] .signal,
+html[data-theme="light"] .hero strong,
+html[data-theme="light"] .metric,
+html[data-theme="light"] .change-card b,
+html[data-theme="light"] .chart-periods b,
+html[data-theme="light"] .signal-basis-chip,
+html[data-theme="light"] .signal-validity-head > b,
+html[data-theme="light"] .signal-validity-foot b,
+html[data-theme="light"] .index-card b,
+html[data-theme="light"] .personal-entry-card b {
+  color: var(--text-primary);
+}
+
+html[data-theme="light"] p,
+html[data-theme="light"] .muted,
+html[data-theme="light"] .meta,
+html[data-theme="light"] .status,
+html[data-theme="light"] .metric span,
+html[data-theme="light"] pre,
+html[data-theme="light"] #coverage,
+html[data-theme="light"] .chart-caption,
+html[data-theme="light"] .chart-pattern-legend,
+html[data-theme="light"] .change-card small,
+html[data-theme="light"] .chart-periods small,
+html[data-theme="light"] .signal-projection > span,
+html[data-theme="light"] .signal-projection small,
+html[data-theme="light"] .signal-validity-head > span,
+html[data-theme="light"] .signal-validity-label small,
+html[data-theme="light"] .signal-validity-label em,
+html[data-theme="light"] .signal-validity-foot small,
+html[data-theme="light"] .index-card span,
+html[data-theme="light"] .personal-entry-card small,
+html[data-theme="light"] .fear-greed-head p,
+html[data-theme="light"] footer,
+html[data-theme="light"] #signalReason {
+  color: var(--text-secondary);
+}
+
+html[data-theme="light"] button:hover,
+html[data-theme="light"] button.active,
+html[data-theme="light"] select:hover {
+  border-color: var(--accent-cyan);
+  color: var(--accent-cyan);
+}
+
+html[data-theme="light"] .bull {
+  color: var(--bull);
+}
+html[data-theme="light"] .bear {
+  color: var(--bear);
+}
+html[data-theme="light"] .flat {
+  color: var(--warn);
+}
+
+html[data-theme="light"] .help-dot:after {
+  background: #17263b;
+  color: #f7fbff;
+  border-color: #52708e;
+}
+
+html[data-theme="light"] #chartTooltip {
+  background: rgba(255, 255, 255, 0.96);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+  box-shadow: 0 8px 24px rgba(43, 64, 88, 0.22);
+}
+
+html[data-theme="light"] #chartTooltip b {
+  color: var(--text-primary);
+}
+
+html[data-theme="light"] .range-extreme {
+  background: rgba(255, 255, 255, 0.96) !important;
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+}
+
+html[data-theme="light"] ::-webkit-scrollbar {
+  background: var(--bg-surface-2);
+}
+html[data-theme="light"] ::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+}
+
+html[data-theme="light"] .gauge-strength {
+  background: var(--bg-surface-2);
+}
+html[data-theme="light"] .signal-alert {
+  color: var(--text-primary);
+}
+
+html[data-theme="light"] #okxMicrostructureCard .microstructure-item {
+  background: var(--bg-surface-2) !important;
+  border-color: var(--border-subtle) !important;
+}
+html[data-theme="light"] #okxMicrostructureCard .microstructure-item > div:first-child > span {
+  color: var(--text-secondary) !important;
+}
+
+html[data-theme="light"] .signal-validity-now-price {
+  background: var(--bg-surface-2) !important;
+  color: var(--text-primary) !important;
+  border-color: rgba(0, 150, 170, 0.45) !important;
+  box-shadow: 0 7px 18px rgba(15, 30, 55, 0.12) !important;
+}
+html[data-theme="light"] .signal-validity-now-price:after {
+  background: var(--bg-surface-2) !important;
+  border-color: rgba(0, 150, 170, 0.45) !important;
+}
+
+/* Header utility buttons (#langToggle / #themeToggle) are styled with an ID
+   selector in the base CSS, so the light override must out-specify it. */
+html[data-theme="light"] .controls #langToggle,
+html[data-theme="light"] .controls #themeToggle {
+  color: var(--text-primary);
+  background: var(--bg-surface-2);
+  border-color: var(--border-strong);
+}
+
+/* Toolbar chart controls keep dark glass surfaces in dark mode; lighten them
+   for light mode. Foundation.css uses !important, so these must too. */
+html[data-theme="light"] .toolbar .control-trigger,
+html[data-theme="light"] .toolbar .chart-display-controls .control-trigger {
+  background: var(--bg-surface-2) !important;
+  color: var(--text-primary) !important;
+  border-color: var(--border-subtle) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6) !important;
+}
+html[data-theme="light"] .toolbar .control-trigger:hover,
+html[data-theme="light"] .toolbar .control-popover.is-open .control-trigger,
+html[data-theme="light"] .toolbar .chart-display-controls .control-trigger:hover,
+html[data-theme="light"] .toolbar .chart-display-controls .control-popover.is-open .control-trigger {
+  background: var(--bg-elevated) !important;
+  border-color: var(--border-strong) !important;
+}
+html[data-theme="light"] .toolbar .control-trigger .control-label,
+html[data-theme="light"] .toolbar .chart-display-controls .control-label,
+html[data-theme="light"] .toolbar .control-trigger i,
+html[data-theme="light"] .toolbar .chart-display-controls .control-trigger i {
+  color: var(--text-secondary) !important;
+}
+html[data-theme="light"] .toolbar .control-trigger b,
+html[data-theme="light"] .toolbar .chart-display-controls .control-trigger b {
+  color: var(--text-primary) !important;
+}
+html[data-theme="light"] .toolbar .zoom-tools {
+  background: var(--bg-surface-2) !important;
+  border-color: var(--border-subtle) !important;
+}
+html[data-theme="light"] .toolbar .zoom-tools button,
+html[data-theme="light"] .toolbar .zoom-tools span {
+  color: var(--text-primary) !important;
+  background: transparent !important;
+  border-color: var(--border-subtle) !important;
+}
+html[data-theme="light"] .toolbar .pan-tools {
+  background: var(--bg-surface-2) !important;
+  border-color: var(--border-subtle) !important;
+}
+html[data-theme="light"] .toolbar .pan-tools button,
+html[data-theme="light"] .toolbar .pan-tools #panLabel {
+  color: var(--text-primary) !important;
+}
+
+/* OKX microstructure card: convert the dark instrument panel to a light
+   surface in light mode so it reads on the bright canvas. */
+html[data-theme="light"] .okx-microstructure-card {
+  background: var(--bg-surface) !important;
+  border-color: var(--border-subtle) !important;
+}
+html[data-theme="light"] .microstructure-head p,
+html[data-theme="light"] .microstructure-conclusion > span {
+  color: var(--text-secondary) !important;
+}
+html[data-theme="light"] .microstructure-conclusion {
+  background: var(--bg-surface-2) !important;
+  border-color: var(--border-strong) !important;
+}
+html[data-theme="light"] .microstructure-conclusion p {
+  color: var(--text-secondary) !important;
+}
+html[data-theme="light"] .microstructure-item.bull > div:first-child i,
+html[data-theme="light"] .microstructure-item.bull b .microstructure-value-main {
+  color: var(--bull) !important;
+}
+html[data-theme="light"] .microstructure-item.bear > div:first-child i,
+html[data-theme="light"] .microstructure-item.bear b .microstructure-value-main {
+  color: var(--bear) !important;
+}
+html[data-theme="light"] #okxMicrostructureCard .microstructure-neutral-toggle {
+  background: var(--bg-surface-2) !important;
+  border-color: var(--border-subtle) !important;
+  color: var(--text-primary) !important;
+}
+html[data-theme="light"] #okxMicrostructureCard .microstructure-neutral-toggle b {
+  color: var(--text-primary) !important;
+}
+html[data-theme="light"] #okxMicrostructureCard .microstructure-neutral-toggle:hover,
+html[data-theme="light"] #okxMicrostructureCard .microstructure-neutral-toggle:focus-visible {
+  border-color: var(--accent-cyan) !important;
+  color: var(--text-primary) !important;
+}
+
+@media (prefers-color-scheme: light) {
+  html[data-theme="auto"] .card,
+  html[data-theme="auto"] .status,
+  html[data-theme="auto"] .optional,
+  html[data-theme="auto"] select,
+  html[data-theme="auto"] button,
+  html[data-theme="auto"] .metric,
+  html[data-theme="auto"] pre,
+  html[data-theme="auto"] .signal-basis-chip,
+  html[data-theme="auto"] .signal-validity,
+  html[data-theme="auto"] .dropdown-menu,
+  html[data-theme="auto"] .control-popover-panel,
+  html[data-theme="auto"] #versionLog,
+  html[data-theme="auto"] .personal-entry-card,
+  html[data-theme="auto"] .index-card {
+    background: var(--bg-surface);
+    border-color: var(--border-subtle);
+    color: var(--text-primary);
+  }
+
+  html[data-theme="auto"] .metric,
+  html[data-theme="auto"] pre,
+  html[data-theme="auto"] .change-card span,
+  html[data-theme="auto"] .chart-periods span,
+  html[data-theme="auto"] .signal-validity-scale,
+  html[data-theme="auto"] .signal-validity-track,
+  html[data-theme="auto"] .fear-greed-summary div,
+  html[data-theme="auto"] .personal-entry-card {
+    background: var(--bg-surface-2);
+  }
+
+  html[data-theme="auto"] .signal-projection,
+  html[data-theme="auto"] .fear-greed-gauge-card.fear-greed-compact,
+  html[data-theme="auto"] .macro-event-tile {
+    background: linear-gradient(135deg, var(--bg-surface), var(--bg-surface-2)) !important;
+  }
+
+  html[data-theme="auto"] .chart-periods span,
+  html[data-theme="auto"] .change-card span {
+    border-color: var(--border-subtle);
+  }
+
+  html[data-theme="auto"] .card h2,
+  html[data-theme="auto"] .card h3,
+  html[data-theme="auto"] .card strong,
+  html[data-theme="auto"] .signal,
+  html[data-theme="auto"] .hero strong,
+  html[data-theme="auto"] .metric,
+  html[data-theme="auto"] .change-card b,
+  html[data-theme="auto"] .chart-periods b,
+  html[data-theme="auto"] .signal-basis-chip,
+  html[data-theme="auto"] .signal-validity-head > b,
+  html[data-theme="auto"] .signal-validity-foot b,
+  html[data-theme="auto"] .index-card b,
+  html[data-theme="auto"] .personal-entry-card b {
+    color: var(--text-primary);
+  }
+
+  html[data-theme="auto"] p,
+  html[data-theme="auto"] .muted,
+  html[data-theme="auto"] .meta,
+  html[data-theme="auto"] .status,
+  html[data-theme="auto"] .metric span,
+  html[data-theme="auto"] pre,
+  html[data-theme="auto"] #coverage,
+  html[data-theme="auto"] .chart-caption,
+  html[data-theme="auto"] .chart-pattern-legend,
+  html[data-theme="auto"] .change-card small,
+  html[data-theme="auto"] .chart-periods small,
+  html[data-theme="auto"] .signal-projection > span,
+  html[data-theme="auto"] .signal-projection small,
+  html[data-theme="auto"] .signal-validity-head > span,
+  html[data-theme="auto"] .signal-validity-label small,
+  html[data-theme="auto"] .signal-validity-label em,
+  html[data-theme="auto"] .signal-validity-foot small,
+  html[data-theme="auto"] .index-card span,
+  html[data-theme="auto"] .personal-entry-card small,
+  html[data-theme="auto"] .fear-greed-head p,
+  html[data-theme="auto"] footer,
+  html[data-theme="auto"] #signalReason {
+    color: var(--text-secondary);
+  }
+
+  html[data-theme="auto"] button:hover,
+  html[data-theme="auto"] button.active,
+  html[data-theme="auto"] select:hover {
+    border-color: var(--accent-cyan);
+    color: var(--accent-cyan);
+  }
+
+  html[data-theme="auto"] .bull {
+    color: var(--bull);
+  }
+  html[data-theme="auto"] .bear {
+    color: var(--bear);
+  }
+  html[data-theme="auto"] .flat {
+    color: var(--warn);
+  }
+
+  html[data-theme="auto"] .help-dot:after {
+    background: #17263b;
+    color: #f7fbff;
+    border-color: #52708e;
+  }
+
+  html[data-theme="auto"] #chartTooltip {
+    background: rgba(255, 255, 255, 0.96);
+    border-color: var(--border-strong);
+    color: var(--text-primary);
+    box-shadow: 0 8px 24px rgba(43, 64, 88, 0.22);
+  }
+
+  html[data-theme="auto"] #chartTooltip b {
+    color: var(--text-primary);
+  }
+
+  html[data-theme="auto"] .range-extreme {
+    background: rgba(255, 255, 255, 0.96) !important;
+    color: var(--text-primary);
+    border-color: var(--border-strong);
+  }
+
+  html[data-theme="auto"] ::-webkit-scrollbar {
+    background: var(--bg-surface-2);
+  }
+  html[data-theme="auto"] ::-webkit-scrollbar-thumb {
+    background: var(--border-strong);
+  }
+
+  html[data-theme="auto"] .gauge-strength {
+    background: var(--bg-surface-2);
+  }
+  html[data-theme="auto"] .signal-alert {
+    color: var(--text-primary);
+  }
+
+  html[data-theme="auto"] #okxMicrostructureCard .microstructure-item {
+    background: var(--bg-surface-2) !important;
+    border-color: var(--border-subtle) !important;
+  }
+  html[data-theme="auto"] #okxMicrostructureCard .microstructure-item > div:first-child > span {
+    color: var(--text-secondary) !important;
+  }
+
+  html[data-theme="auto"] .signal-validity-now-price {
+    background: var(--bg-surface-2) !important;
+    color: var(--text-primary) !important;
+    border-color: rgba(0, 150, 170, 0.45) !important;
+    box-shadow: 0 7px 18px rgba(15, 30, 55, 0.12) !important;
+  }
+  html[data-theme="auto"] .signal-validity-now-price:after {
+    background: var(--bg-surface-2) !important;
+    border-color: rgba(0, 150, 170, 0.45) !important;
+  }
+
+  html[data-theme="auto"] .controls #langToggle,
+  html[data-theme="auto"] .controls #themeToggle {
+    color: var(--text-primary);
+    background: var(--bg-surface-2);
+    border-color: var(--border-strong);
+  }
+
+  html[data-theme="auto"] .toolbar .control-trigger,
+  html[data-theme="auto"] .toolbar .chart-display-controls .control-trigger {
+    background: var(--bg-surface-2) !important;
+    color: var(--text-primary) !important;
+    border-color: var(--border-subtle) !important;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6) !important;
+  }
+  html[data-theme="auto"] .toolbar .control-trigger:hover,
+  html[data-theme="auto"] .toolbar .control-popover.is-open .control-trigger,
+  html[data-theme="auto"] .toolbar .chart-display-controls .control-trigger:hover,
+  html[data-theme="auto"] .toolbar .chart-display-controls .control-popover.is-open .control-trigger {
+    background: var(--bg-elevated) !important;
+    border-color: var(--border-strong) !important;
+  }
+  html[data-theme="auto"] .toolbar .control-trigger .control-label,
+  html[data-theme="auto"] .toolbar .chart-display-controls .control-label,
+  html[data-theme="auto"] .toolbar .control-trigger i,
+  html[data-theme="auto"] .toolbar .chart-display-controls .control-trigger i {
+    color: var(--text-secondary) !important;
+  }
+  html[data-theme="auto"] .toolbar .control-trigger b,
+  html[data-theme="auto"] .toolbar .chart-display-controls .control-trigger b {
+    color: var(--text-primary) !important;
+  }
+  html[data-theme="auto"] .toolbar .zoom-tools {
+    background: var(--bg-surface-2) !important;
+    border-color: var(--border-subtle) !important;
+  }
+  html[data-theme="auto"] .toolbar .zoom-tools button,
+  html[data-theme="auto"] .toolbar .zoom-tools span {
+    color: var(--text-primary) !important;
+    background: transparent !important;
+    border-color: var(--border-subtle) !important;
+  }
+  html[data-theme="auto"] .toolbar .pan-tools {
+    background: var(--bg-surface-2) !important;
+    border-color: var(--border-subtle) !important;
+  }
+  html[data-theme="auto"] .toolbar .pan-tools button,
+  html[data-theme="auto"] .toolbar .pan-tools #panLabel {
+    color: var(--text-primary) !important;
+  }
+
+  html[data-theme="auto"] .okx-microstructure-card {
+    background: var(--bg-surface) !important;
+    border-color: var(--border-subtle) !important;
+  }
+  html[data-theme="auto"] .microstructure-head p,
+  html[data-theme="auto"] .microstructure-conclusion > span {
+    color: var(--text-secondary) !important;
+  }
+  html[data-theme="auto"] .microstructure-conclusion {
+    background: var(--bg-surface-2) !important;
+    border-color: var(--border-strong) !important;
+  }
+  html[data-theme="auto"] .microstructure-conclusion p {
+    color: var(--text-secondary) !important;
+  }
+  html[data-theme="auto"] .microstructure-item.bull > div:first-child i,
+  html[data-theme="auto"] .microstructure-item.bull b .microstructure-value-main {
+    color: var(--bull) !important;
+  }
+  html[data-theme="auto"] .microstructure-item.bear > div:first-child i,
+  html[data-theme="auto"] .microstructure-item.bear b .microstructure-value-main {
+    color: var(--bear) !important;
+  }
+  html[data-theme="auto"] #okxMicrostructureCard .microstructure-neutral-toggle {
+    background: var(--bg-surface-2) !important;
+    border-color: var(--border-subtle) !important;
+    color: var(--text-primary) !important;
+  }
+  html[data-theme="auto"] #okxMicrostructureCard .microstructure-neutral-toggle b {
+    color: var(--text-primary) !important;
+  }
+  html[data-theme="auto"] #okxMicrostructureCard .microstructure-neutral-toggle:hover,
+  html[data-theme="auto"] #okxMicrostructureCard .microstructure-neutral-toggle:focus-visible {
+    border-color: var(--accent-cyan) !important;
+    color: var(--text-primary) !important;
   }
 }

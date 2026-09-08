@@ -287,7 +287,10 @@ const QUOTE_TTL = 1_000;
 const UPSTREAM_TIMEOUT = 1_200;
 // A market request must always finish promptly.  Individual upstream calls have
 // their own abort timer, but this protects callers from a stuck/coalesced task.
-const MARKET_REQUEST_TIMEOUT = 2_200;
+// OKX history is retrieved in 300-candle pages. Allow an ordinary paged
+// history window to complete instead of treating it as a stale quote.
+const MARKET_REQUEST_TIMEOUT = 8_000;
+const MAX_MARKET_CANDLES = 1800;
 const STALE_QUOTE_MAX_AGE = 60_000;
 const cache = new Map();
 const inFlight = new Map();
@@ -360,11 +363,13 @@ function recentTakerFlow(now = Date.now()) {
     windowSeconds:60, updatedAt:okxStream.tradeAt || null
   } : null;
   }
-// --- 后台语音接力：页面关闭后服务端继续按规则播报 ---
-// Background voice relay: when the browser tab is closed, the server keeps evaluating rules and speaks via macOS afplay.
+// Voice rules are evaluated and spoken by the browser only.  The local server
+// may retain settings for the active page, but must never speak after a tab
+// closes or after macOS restarts.
 const VOICE_STATE_FILE = join(DATA_DIR, 'voice_state.json');
-const VOICE_HEARTBEAT_TIMEOUT_MS = 60_000; // 前端心跳断 60s 即接管
+const VOICE_HEARTBEAT_TIMEOUT_MS = 60_000; // 保留会话状态读数；不触发服务端接力
 const VOICE_RELAY_INTERVAL_MS = 2_000;
+const SERVER_VOICE_RELAY_ENABLED = false;
 const RELAY_VOICE_ALLOWLIST = ['zh-CN-XiaoxiaoNeural','zh-CN-XiaoyiNeural','zh-CN-YunxiNeural','zh-CN-YunyangNeural','zh-CN-shaanxi-XiaoniNeural','zh-CN-liaoning-XiaobeiNeural','zh-HK-HiuGaaiNeural','zh-TW-HsiaoChenNeural'];
 let voiceState = { settings:null, personalEntries:[], rules:[], lastHeartbeatAt:0, lastSpokenAt:0, inFlightUntil:0 };
 const loadVoiceState = () => {
@@ -441,6 +446,7 @@ async function playVoiceOnServer(text, voice) {
     .finally(() => { try { unlinkSync(tmp); } catch {} });
 }
 async function relayTick() {
+  if (!SERVER_VOICE_RELAY_ENABLED) return;
   const now = Date.now();
   // 仍在心跳窗口内：前端接管，不抢权
   if (voiceState.lastHeartbeatAt && now - voiceState.lastHeartbeatAt < VOICE_HEARTBEAT_TIMEOUT_MS) return;
@@ -464,7 +470,7 @@ async function relayTick() {
     } catch {}
   }
   if (!Number.isFinite(last)) return;
-  // 定时行情播报与网页打开时的内容保持一致；仅在页面心跳中断后接力。
+  // Disabled page-closed relay implementation retained behind the feature flag.
   const intervalMs = Math.max(15, Number(settings.interval) || 60) * 1_000;
   if (hasLivePriceBroadcast && now - Number(voiceState.lastSpokenAt || 0) >= intervalMs) {
     voiceState.lastSpokenAt = now;
@@ -498,7 +504,8 @@ async function relayTick() {
   }
   persistVoiceState();
 }
-setInterval(relayTick, VOICE_RELAY_INTERVAL_MS).unref?.();
+if (SERVER_VOICE_RELAY_ENABLED)
+  setInterval(relayTick, VOICE_RELAY_INTERVAL_MS).unref?.();
 function okxDerivativeFeatures(now = Date.now()) {
   const book = okxStream.orderBook && streamAge(okxStream.bookAt, now) <= 10_000 ? { ...okxStream.orderBook, updatedAt:okxStream.bookAt } : null;
   const takerFlow = recentTakerFlow(now);
@@ -694,12 +701,16 @@ async function okxCandleRows(interval, limit) {
     // OKX returns at most 300 rows per request.  A one-year daily view needs
     // 366 rows, so fetch backwards page-by-page instead of silently returning
     // a shorter chart while the UI still says “1Y”.
-    if (limit <= 300) return request(`https://www.okx.com/api/v5/market/candles?instId=BTC-USDT-SWAP&bar=${intervalFor('okx', interval)}&limit=${limit}`);
+    // The live-candles endpoint only exposes roughly one day of 1-minute
+    // history.  The history endpoint has the same current bars but continues
+    // beyond that retention boundary, so range selection stays independent
+    // from candle granularity.
+    if (limit <= 300) return request(`https://www.okx.com/api/v5/market/history-candles?instId=BTC-USDT-SWAP&bar=${intervalFor('okx', interval)}&limit=${limit}`);
     const pages = [], pageSize = 300;
     let after = '';
     for (let page = 0; page < Math.ceil(limit / pageSize); page++) {
       const suffix = after ? `&after=${after}` : '';
-      const payload = await request(`https://www.okx.com/api/v5/market/candles?instId=BTC-USDT-SWAP&bar=${intervalFor('okx', interval)}&limit=${pageSize}${suffix}`);
+      const payload = await request(`https://www.okx.com/api/v5/market/history-candles?instId=BTC-USDT-SWAP&bar=${intervalFor('okx', interval)}&limit=${pageSize}${suffix}`);
       if (payload.code !== '0' || !payload.data?.length) return payload;
       pages.push(...payload.data);
       after = payload.data.at(-1)?.[0];
@@ -708,14 +719,16 @@ async function okxCandleRows(interval, limit) {
     const unique = [...new Map(pages.map(row => [row[0], row])).values()];
     return { code:'0', data:unique.slice(0, limit) };
   }
-  // OKX 没有原生 3 小时 K 线：分页取得足量 1 小时 K 线后，按 UTC 3 小时边界聚合，确保信号仍有 200 根数据。
-  // OKX has no native 3H bar. Fetch enough native 1H bars in pages, then
-  // aggregate them on a UTC 3-hour boundary so the signal still has 200 bars.
+  // OKX 没有原生 3 小时 K 线：分页取得足量 1 小时历史 K 线后，按 UTC 3 小时边界聚合。
+  // Fetch three native hours for every requested 3H bar so the rule-signal
+  // history can fully warm up EMA200 rather than silently stopping at 300 bars.
   const pages = [];
   let after = '';
-  for (let page = 0; page < 3; page++) {
+  const hourlyNeeded = limit * 3 + 3;
+  const pageSize = 300;
+  for (let page = 0; page < Math.ceil(hourlyNeeded / pageSize); page++) {
     const suffix = after ? `&after=${after}` : '';
-    const payload = await request(`https://www.okx.com/api/v5/market/candles?instId=BTC-USDT-SWAP&bar=1H&limit=300${suffix}`);
+    const payload = await request(`https://www.okx.com/api/v5/market/history-candles?instId=BTC-USDT-SWAP&bar=1H&limit=${pageSize}${suffix}`);
     if (payload.code !== '0' || !payload.data?.length) throw new Error(payload.msg || 'OKX 1H history unavailable');
     pages.push(...payload.data);
     after = payload.data.at(-1)?.[0];
@@ -1229,6 +1242,14 @@ function abRsi(values, period=14) { if(values.length<=period)return 50;let gains
 function abAtr(series, period=14) { const rows=series.slice(-(period+1));if(rows.length<2)return 0;const ranges=[];for(let i=1;i<rows.length;i++)ranges.push(Math.max(rows[i].high-rows[i].low,Math.abs(rows[i].high-rows[i-1].close),Math.abs(rows[i].low-rows[i-1].close)));return ranges.reduce((sum,x)=>sum+x,0)/ranges.length; }
 function abRegime(series) { const closes=series.map(row=>Number(row.close)), last=closes.at(-1), trend=last/closes[Math.max(0,closes.length-21)]-1, atrPct=abAtr(series,14)/Math.max(last,1);return Math.abs(trend)<Math.max(.003,atrPct*1.6)?'range':trend>0?'bull':'bear'; }
 function abDirection(probability, band=.035) { return probability>=.5+band?'up':probability<=.5-band?'down':'flat'; }
+// Exact server-side equivalents of the visible rule card's closed-candle
+// score.  Keeping this separate from the older shadow baseline prevents a
+// convenient but invalid comparison against a merely similar heuristic.
+function ruleEma(values, period) { if(values.length<period)return NaN;let value=values.slice(0,period).reduce((sum,row)=>sum+row,0)/period,alpha=2/(period+1);for(let index=period;index<values.length;index++)value=values[index]*alpha+value*(1-alpha);return value; }
+function ruleRsi(values, period=14) { if(values.length<=period)return NaN;let gain=0,loss=0;for(let index=1;index<=period;index++){const delta=values[index]-values[index-1];if(delta>=0)gain+=delta;else loss-=delta;}let averageGain=gain/period,averageLoss=loss/period;for(let index=period+1;index<values.length;index++){const delta=values[index]-values[index-1];averageGain=(averageGain*(period-1)+Math.max(delta,0))/period;averageLoss=(averageLoss*(period-1)+Math.max(-delta,0))/period;}return averageLoss===0?100:100-100/(1+averageGain/averageLoss); }
+function ruleAtr(series, period=14) { if(series.length<=period)return NaN;let total=0;for(let index=1;index<=period;index++){const row=series[index],prior=series[index-1];total+=Math.max(row.high-row.low,Math.abs(row.high-prior.close),Math.abs(row.low-prior.close));}let value=total/period;for(let index=period+1;index<series.length;index++){const row=series[index],prior=series[index-1],range=Math.max(row.high-row.low,Math.abs(row.high-prior.close),Math.abs(row.low-prior.close));value=(value*(period-1)+range)/period;}return value; }
+function liveRuleMetrics(series) { const closes=series.map(row=>Number(row.close));if(closes.length<200)return null;const close=closes.at(-1),e20=ruleEma(closes,20),e50=ruleEma(closes,50),e200=ruleEma(closes,200),rsi=ruleRsi(closes),macd=ruleEma(closes,12)-ruleEma(closes,26),basis=closes.slice(-20).reduce((sum,row)=>sum+row,0)/20,sd=Math.sqrt(closes.slice(-20).reduce((sum,row)=>sum+(row-basis)**2,0)/20),bb=(close-(basis-2*sd))/(4*sd||1);let score=0;score+=e20>e50?25:-25;score+=close>e50?20:-20;score+=Number.isFinite(e200)?(close>e200?20:-20):0;score+=clamp(macd/(close*.0015)*15,-15,15);score+=clamp((rsi-50)/2.5,-10,10);score+=clamp((bb-.5)*20,-10,10);return {score:Math.round(score),close,e20,e50,e200,rsi,atr:ruleAtr(series,14),bb}; }
+function scoreProbability(score) { return clamp(sigmoid(score/35),.08,.92); }
 function abRuleProbabilities(series) {
   const closes=series.map(row=>Number(row.close)), close=closes.at(-1), ema20=abEma(closes.slice(-80),20), ema50=abEma(closes.slice(-160),50), ema200=abEma(closes.slice(-220),200), rsi=abRsi(closes), atrPct=abAtr(series,14)/Math.max(close,1), momentum=close/closes[Math.max(0,closes.length-5)]-1;
   // A reproduces the existing card's overlapping EMA-style score.  B counts
@@ -1240,6 +1261,32 @@ function abRuleProbabilities(series) {
   const confirmation=trend&&(rsi>52&&trend>0||rsi<48&&trend<0)&&volumeNow>=volumeMean*.94?trend:0;
   const bScore=confirmation*.9+clamp(momentum/Math.max(atrPct*2,.001),-1,1)*.28+clamp((rsi-50)/28,-1,1)*.18-(atrPct>.012?Math.sign(confirmation)*.12:0);
   return { a:clamp(sigmoid(a/31),.08,.92), b:clamp(sigmoid(bScore*1.25),.08,.92), regime:abRegime(series), meta:{ atrPct, rsi, trend, volumeConfirmation:confirmation!==0 } };
+}
+function abStrictRuleProbabilities(series) {
+  const live=liveRuleMetrics(series);if(!live)return { a:.5,b:.5,regime:abRegime(series),meta:{ready:false} };
+  const direction=score=>score>=55?1:score<=-55?-1:0;
+  const recent=[2,1,0].map(offset=>liveRuleMetrics(series.slice(0,series.length-offset))).filter(Boolean);
+  const consensus=recent.length===3&&recent.every(metric=>direction(metric.score)===direction(live.score)&&direction(metric.score)!==0), trend=live.close>live.e20&&live.e20>live.e50&&live.e50>live.e200?1:live.close<live.e20&&live.e20<live.e50&&live.e50<live.e200?-1:0, volumeNow=Math.log1p(Number(series.at(-1)?.volume||0)),volumeMean=series.slice(-21,-1).reduce((sum,row)=>sum+Math.log1p(Number(row.volume||0)),0)/20,volumeConfirmed=volumeNow>=volumeMean*.94,aligned=consensus&&trend===direction(live.score)&&volumeConfirmed&&((trend>0&&live.rsi>52)||(trend<0&&live.rsi<48));
+  return { a:scoreProbability(live.score), b:aligned?scoreProbability(live.score):.5, regime:abRegime(series), meta:{ready:true,score:live.score,threeCloseConsensus:consensus,trendAligned:trend===direction(live.score),volumeConfirmed,aligned} };
+}
+// GitHub v2.4.0 classified each closed-candle score immediately.  The current
+// card first requires two matching directions in the latest three closes and
+// then holds that state until the score returns inside the ±28 exit band.  Run
+// both state machines chronologically so B never sees a future candle.
+function abGithubCurrentRuleProbabilities(series) {
+  const live=liveRuleMetrics(series);if(!live)return {a:.5,b:.5,regime:abRegime(series),meta:{ready:false}};
+  const direction=score=>score>=45?1:score<=-45?-1:0;
+  let held=0,confirmedAt=null;
+  for(let end=199;end<series.length;end++){
+    const window=series.slice(0,end+1), metric=liveRuleMetrics(window), current=direction(metric.score);
+    const recent=[2,1,0].map(offset=>end-offset>=199?direction(liveRuleMetrics(series.slice(0,end-offset+1)).score):0);
+    const sustained=current!==0&&recent.filter(value=>value===current).length>=2;
+    if(held===0&&sustained){held=current;confirmedAt=Number(series[end].time)}
+    else if(held!==0&&sustained&&current!==held){held=current;confirmedAt=Number(series[end].time)}
+    else if(held!==0&&Math.abs(metric.score)<=28){held=0;confirmedAt=null}
+  }
+  const currentProbability=held?scoreProbability(Math.sign(held)*Math.max(45,Math.abs(live.score))):.5;
+  return {a:scoreProbability(live.score),b:currentProbability,regime:abRegime(series),meta:{ready:true,githubScore:live.score,currentHeld:held,confirmedAt}};
 }
 function abProbabilityPair(series, horizon) {
   const closes=series.map(row=>Number(row.close)), last=closes.at(-1), r1=last/closes.at(-2)-1, r4=last/closes[Math.max(0,closes.length-5)]-1, r12=last/closes[Math.max(0,closes.length-13)]-1, vol=abAtr(series,14)/Math.max(last,1);
@@ -1253,7 +1300,7 @@ function abProbabilityPair(series, horizon) {
 function abResonancePair(series, horizon) { const closes=series.map(row=>Number(row.close)), last=closes.at(-1), spans=[4,16,48], votes=spans.map(span=>Math.sign(last/closes[Math.max(0,closes.length-1-span)]-1)), a=clamp(.5+votes.reduce((s,v)=>s+v,0)/12,.12,.88), atr=abAtr(series,14)/Math.max(last,1), weighted=spans.reduce((sum,span,index)=>sum+(last/closes[Math.max(0,closes.length-1-span)]-1)/(Math.max(atr*Math.sqrt(span),.001))*[.48,.32,.2][index],0);return {a,b:clamp(sigmoid(weighted*.38),.1,.9),regime:abRegime(series),meta:{votes}}; }
 function abPatternPair(series) { const closes=series.map(row=>Number(row.close)), last=closes.at(-1), prior=series.slice(-21,-1), high=Math.max(...prior.map(row=>row.high)), low=Math.min(...prior.map(row=>row.low)), atr=abAtr(series,14), volume=Number(series.at(-1)?.volume||0), avgVolume=prior.reduce((sum,row)=>sum+Number(row.volume||0),0)/prior.length, raw=last>high?1:last<low?-1:0, a=clamp(.5+raw*.3,.15,.85), confirmed=raw&&volume>=avgVolume*1.2&&Math.abs(last-(raw>0?high:low))>=atr*.12?raw:0;return {a,b:clamp(.5+confirmed*.34,.12,.88),regime:abRegime(series),meta:{breakout:raw,confirmed:!!confirmed}}; }
 function recordAbPair(experimentKey, source, interval, series, horizon, calculator, now=Date.now()) {
-  if(series.length<201)return;const closed=series.slice(0,-1), entry=closed.at(-1);if(!entry)return;const values=calculator(closed,horizon), bucketAt=Number(entry.time), unit=interval==='1m'?60_000:interval==='5m'?300_000:interval==='1h'?3_600_000:900_000, targetAt=bucketAt+horizon*unit;
+  if(series.length<201)return;const closed=series.slice(0,-1), entry=closed.at(-1);if(!entry)return;const values=calculator(closed,horizon), bucketAt=Number(entry.time), unit=({ '1m':60_000,'5m':300_000,'15m':900_000,'30m':1_800_000,'1h':3_600_000,'3h':10_800_000 })[interval]||900_000, targetAt=bucketAt+horizon*unit;
   safelyStore(()=>storeAbShadowPair.run(experimentKey,bucketAt,source,interval,`${interval}:${horizon}`,targetAt,Number(entry.close),values.regime,values.a,abDirection(values.a),values.b,abDirection(values.b,.055),JSON.stringify(values.meta||{}),now));
 }
 function recordAbExternalPair(experimentKey, source, series, horizon, probabilities, metadata, now=Date.now()) {
@@ -1261,16 +1308,30 @@ function recordAbExternalPair(experimentKey, source, series, horizon, probabilit
   safelyStore(()=>storeAbShadowPair.run(experimentKey,bucketAt,source,'15m',`15m:${horizon}`,targetAt,Number(entry.close),abRegime(closed),clamp(probabilities.a,.08,.92),abDirection(probabilities.a),clamp(probabilities.b,.08,.92),abDirection(probabilities.b,.055),JSON.stringify(metadata||{}),now));
 }
 function captureAbExperiments(source, interval, candles, now=Date.now()) {
-  if(interval==='15m') { for(const horizon of [4,16,96])recordAbPair('rule-signal',source,interval,candles,horizon,abRuleProbabilities,now);for(const horizon of [1,4,16])recordAbPair('multi-period-probability',source,interval,candles,horizon,abProbabilityPair,now);for(const horizon of [4,16])recordAbPair('multi-period-resonance',source,interval,candles,horizon,abResonancePair,now);for(const horizon of [4,16])recordAbPair('pattern-key-levels',source,interval,candles,horizon,abPatternPair,now); }
+  if(interval==='15m') { for(const horizon of [4,16,96])recordAbPair('rule-signal',source,interval,candles,horizon,abRuleProbabilities,now);for(const horizon of [4,16,96])recordAbPair('github-rule-signal-walk-forward',source,interval,candles,horizon,abGithubCurrentRuleProbabilities,now);for(const horizon of [1,4,16])recordAbPair('multi-period-probability',source,interval,candles,horizon,abProbabilityPair,now);for(const horizon of [4,16])recordAbPair('multi-period-resonance',source,interval,candles,horizon,abResonancePair,now);for(const horizon of [4,16])recordAbPair('pattern-key-levels',source,interval,candles,horizon,abPatternPair,now); }
+  if(['5m','15m','1h','3h'].includes(interval)) for(const horizon of [4,16,96])recordAbPair('rule-signal-v2',source,interval,candles,horizon,abStrictRuleProbabilities,now);
   if(interval==='1m') for(const horizon of [1,5])recordAbPair('short-horizon-heuristic',source,interval,candles,horizon,abProbabilityPair,now);
 }
 function settleAbExperiments(histories, now=Date.now()) { for(const row of pendingAbShadowPairs.all(now)){const candles=histories[row.candle_interval]||[],target=candles.find(candle=>Number(candle.time)>=Number(row.target_at));if(!target)continue;const settled=Number(target.close), entry=Number(row.entry_price);if(!Number.isFinite(settled)||!entry)continue;const actualReturn=settled/entry-1;settleAbShadowPair.run(now,settled,actualReturn,actualReturn>0?1:0,row.id); } }
-function abComparison(experimentKey, minSamples=30) {
+function abComparison(experimentKey, minSamples=100) {
   const rows=database.prepare('SELECT horizon_key AS horizonKey, regime, a_probability AS aProbability, b_probability AS bProbability, actual_return AS actualReturn, is_up AS isUp FROM ab_shadow_pairs WHERE experiment_key=? AND settled_at IS NOT NULL ORDER BY target_at ASC').all(experimentKey).map(row=>({...row,aProbability:Number(row.aProbability),bProbability:Number(row.bProbability),actualReturn:Number(row.actualReturn),isUp:Number(row.isUp)}));
-  const horizons=[...new Set(rows.map(row=>row.horizonKey))];const perHorizon=Object.fromEntries(horizons.map(key=>{const subset=rows.filter(row=>row.horizonKey===key);return [key,{samples:subset.length,baseline:pairedPredictionMetrics(subset,'aProbability'),candidate:pairedPredictionMetrics(subset,'bProbability')}]}));const overall={samples:rows.length,baseline:pairedPredictionMetrics(rows,'aProbability'),candidate:pairedPredictionMetrics(rows,'bProbability')};const enough=horizons.length>0&&horizons.every(key=>perHorizon[key].samples>=minSamples), base=overall.baseline,candidate=overall.candidate, better=base&&candidate&&candidate.brier<=base.brier*.97&&candidate.logLoss<=base.logLoss*.97&&candidate.ece<=base.ece*1.05&&candidate.economic.netReturn>=base.economic.netReturn;const verdict=!enough?{tone:'yellow',label:'继续观察',reason:`每个周期需 ${minSamples} 个同桶已结算样本。`}:better?{tone:'green',label:'建议人工复核',reason:'候选在已配对样本中同时满足概率质量、校准与成本后表现门槛；不会自动切换。'}:{tone:'red',label:'不建议升级',reason:'样本足够，但候选没有同时达到预设门槛。'};return {experimentKey,paired:rows.length,minSamples,perHorizon,overall,verdict};
+  const horizons=[...new Set(rows.map(row=>row.horizonKey))];
+  const perHorizon=Object.fromEntries(horizons.map(key=>{const subset=rows.filter(row=>row.horizonKey===key);return [key,{samples:subset.length,baseline:pairedPredictionMetrics(subset,'aProbability'),candidate:pairedPredictionMetrics(subset,'bProbability')}]}));
+  const regimes=Object.fromEntries(['bull','bear','range'].map(key=>{const subset=rows.filter(row=>row.regime===key);return [key,{samples:subset.length,baseline:pairedPredictionMetrics(subset,'aProbability'),candidate:pairedPredictionMetrics(subset,'bProbability')}]}));
+  const overall={samples:rows.length,baseline:pairedPredictionMetrics(rows,'aProbability'),candidate:pairedPredictionMetrics(rows,'bProbability')};
+  const enough=horizons.length>0&&horizons.every(key=>perHorizon[key].samples>=minSamples)&&Object.values(regimes).filter(row=>row.samples>0).every(row=>row.samples>=minSamples);
+  const base=overall.baseline,candidate=overall.candidate;
+  const quality=base&&candidate&&candidate.brier<=base.brier*.97&&candidate.logLoss<=base.logLoss*.97;
+  const calibration=candidate&&candidate.brierSkill>=0&&candidate.ece<=base.ece*1.05;
+  const economics=candidate&&candidate.economic.netReturn>0&&candidate.economic.netReturn>=base.economic.netReturn&&candidate.economic.maxDrawdown>=base.economic.maxDrawdown-0.02;
+  const robust=Object.values(regimes).filter(row=>row.samples>=minSamples).every(row=>row.candidate.brier<=row.baseline.brier*.97&&row.candidate.economic.netReturn>0);
+  const better=quality&&calibration&&economics&&robust;
+  const verdict=!enough?{tone:'yellow',label:'继续影子评估',reason:`每个周期及已覆盖市场状态均需 ${minSamples} 个已结算配对样本。`}:better?{tone:'green',label:'建议人工复核',reason:'候选在严格对照、概率质量、校准、成本后正收益和市场状态稳健性门槛均达标；不会自动切换。'}:{tone:'red',label:'不建议升级',reason:'样本量已达到最低门槛，但候选尚未同时达到正 Brier Skill、成本后正收益与市场状态稳健性要求。'};return {experimentKey,paired:rows.length,minSamples,perHorizon,regimes,overall,criteria:{quality:'Brier 与 Log Loss 均至少优于基线 3%',calibration:'Brier Skill ≥ 0，且 ECE 不恶化超过 5%',economics:'固定 0.08% 往返成本后净收益为正，且不低于基线',robustness:'每个已覆盖市场状态均有足量样本、成本后正收益且 Brier 至少优于基线 3%'},verdict};
 }
 const abExperimentCatalog=[
-  {key:'rule-signal',name:'当前规则信号',kind:'prediction',candidate:'去重趋势计票 + 波动状态 + 滞回确认 + 成交量确认',minSamples:30,status:'active'},
+  {key:'rule-signal',name:'当前规则信号（旧口径）',kind:'prediction',candidate:'旧版近似基线；仅保留历史参照，不作为升级依据',minSamples:100,status:'active'},
+  {key:'github-rule-signal-walk-forward',name:'GitHub 规则信号对照（Walk-forward）',kind:'prediction',candidate:'A：GitHub v2.4.0 即时分数；B：当前 ±45 / ±28 稳定化核心与连续收盘确认。相同 15m 已收盘 K 线、相同 1h / 4h / 24h 结算与 0.08% 往返成本。',minSamples:100,status:'active'},
+  {key:'rule-signal-v2',name:'当前规则信号（严格对照）',kind:'prediction',candidate:'线上同分数基线 + 连续 3 根收盘确认 + EMA 排列 / RSI / 成交量确认',minSamples:100,status:'active'},
   {key:'short-horizon-heuristic',name:'短线机器预测',kind:'prediction',candidate:'仅已收盘 K 线的波动归一化候选',minSamples:100,status:'active'},
   {key:'multi-period-probability',name:'多周期概率预测',kind:'prediction',candidate:'时间顺序、波动归一化的校准候选',minSamples:30,status:'active'},
   {key:'multi-period-resonance',name:'多周期共振',kind:'prediction',candidate:'按趋势强度与波动率加权的一致性',minSamples:30,status:'active'},
@@ -1329,8 +1390,8 @@ function pairedPredictionMetrics(rows, probabilityKey) {
   if(!rows.length)return null;
   const probabilities=rows.map(row=>Number(row[probabilityKey])), labels=rows.map(row=>Number(row.isUp)), mean=values=>values.reduce((sum,value)=>sum+value,0)/Math.max(values.length,1), baseRate=mean(labels), brier=mean(probabilities.map((probability,index)=>(probability-labels[index])**2)), baselineBrier=mean(labels.map(label=>(baseRate-label)**2)), logLoss=mean(probabilities.map((probability,index)=>-(labels[index]*Math.log(clamp(probability,.000001,.999999))+(1-labels[index])*Math.log(clamp(1-probability,.000001,.999999))))), accuracy=mean(probabilities.map((probability,index)=>+(+(probability>=.5)===+labels[index]))), bins=Array.from({length:10},()=>[]);
   probabilities.forEach((probability,index)=>bins[Math.min(9,Math.floor(probability*10))].push({ probability,label:labels[index] }));
-  const ece=bins.reduce((sum,bin)=>sum+(bin.length?Math.abs(mean(bin.map(item=>item.probability))-mean(bin.map(item=>item.label)))*bin.length/rows.length:0),0), signals=rows.filter(row=>Math.abs(Number(row[probabilityKey])-.5)>=.06), returns=signals.map(row=>Number(row.actualReturn)*(Number(row[probabilityKey])>=.5?1:-1)-.0008);let equity=1,peak=1,maxDrawdown=0;for(const value of returns){equity*=1+value;peak=Math.max(peak,equity);maxDrawdown=Math.min(maxDrawdown,equity/peak-1)}const average=mean(returns), deviation=Math.sqrt(mean(returns.map(value=>(value-average)**2)))||0;
-  return { samples:rows.length, accuracy, brier, logLoss, brierSkill:baselineBrier?1-brier/baselineBrier:null, ece, economic:{ trades:signals.length, netReturn:equity-1, maxDrawdown, sharpe:deviation?average/deviation*Math.sqrt(returns.length):null } };
+  const ece=bins.reduce((sum,bin)=>sum+(bin.length?Math.abs(mean(bin.map(item=>item.probability))-mean(bin.map(item=>item.label)))*bin.length/rows.length:0),0), signals=rows.filter(row=>Math.abs(Number(row[probabilityKey])-.5)>=.06), directionalAccuracy=signals.length?mean(signals.map(row=>+(+(Number(row[probabilityKey])>=.5)===+Number(row.isUp)))):null, coverage=signals.length/rows.length, returns=signals.map(row=>Number(row.actualReturn)*(Number(row[probabilityKey])>=.5?1:-1)-.0008);let equity=1,peak=1,maxDrawdown=0;for(const value of returns){equity*=1+value;peak=Math.max(peak,equity);maxDrawdown=Math.min(maxDrawdown,equity/peak-1)}const average=mean(returns), deviation=Math.sqrt(mean(returns.map(value=>(value-average)**2)))||0;
+  return { samples:rows.length, accuracy, directionalAccuracy, coverage, brier, logLoss, brierSkill:baselineBrier?1-brier/baselineBrier:null, ece, economic:{ trades:signals.length, netReturn:equity-1, maxDrawdown, sharpe:deviation?average/deviation*Math.sqrt(returns.length):null } };
 }
 function compareCandidateToBaseline(trainingRunId) {
   const pairs=database.prepare(`SELECT candidate.horizon_key AS horizonKey, candidate.probability AS candidateProbability, candidate.is_up AS isUp, candidate.actual_return AS actualReturn, baseline.calibrated_probability AS baselineProbability, baseline.regime AS regime
@@ -1555,7 +1616,7 @@ http.createServer((req, res) => requestTiming.run({ started:performance.now(), u
     } catch(error) { json(res,503,{error:'Edge voice unavailable',detail:error.message}); }
     return;
   }
-  // 语音规则同步：前端保存时 POST 上当前 settings + rules；服务端持久化以便页面关闭后接力
+  // 语音规则同步：前端保存时 POST 上当前 settings + rules；仅用于页面内状态恢复。
   if (url.pathname === '/api/voice/sync' && req.method === 'POST') {
     try {
       const body = await readJson(req);
@@ -1652,7 +1713,7 @@ http.createServer((req, res) => requestTiming.run({ started:performance.now(), u
   }
   if (url.pathname === '/api/market') {
     const interval = url.searchParams.get('interval') || '4h';
-    const limit = Math.min(Math.max(Number(url.searchParams.get('limit') || 180), 30), 500);
+    const limit = Math.min(Math.max(Number(url.searchParams.get('limit') || 180), 30), MAX_MARKET_CANDLES);
     try { json(res, 200, await market(interval, limit, url.searchParams.get('source'))); } catch (e) { json(res, 503, { error:e.message, failures:e.failures || {} }); }
     return;
   }

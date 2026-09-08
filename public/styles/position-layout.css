@@ -1,0 +1,166 @@
+/* Desktop-only placement for the two personal-position slots.
+   The price summary stays in the first grid column; the position container
+   uses the two available columns to provide a clear, readable separation. */
+@media (min-width: 1200px) {
+  .hero > .personal-entry-card {
+    grid-column: 2 / -1;
+    grid-template-columns: minmax(0, 0.75fr) minmax(0, 1fr);
+    column-gap: 12px;
+  }
+
+  .personal-entry-leverage {
+    display: inline-flex;
+    align-items: center;
+    min-height: 18px;
+    padding: 0 7px;
+    border: 1px solid currentColor;
+    border-radius: 999px;
+    font: 800 10px/1 "SF Mono", "JetBrains Mono", monospace;
+    letter-spacing: 0;
+    text-transform: none;
+    white-space: nowrap;
+  }
+  .personal-entry-slot.long .personal-entry-leverage {
+    color: var(--bull);
+    background: rgba(0, 212, 170, 0.12);
+  }
+  .personal-entry-slot.short .personal-entry-leverage {
+    color: var(--bear);
+    background: rgba(255, 77, 106, 0.12);
+  }
+  .personal-entry-form-actions [data-entry-clear] {
+    border-color: rgba(255, 77, 106, 0.45);
+    background: rgba(255, 77, 106, 0.12);
+    color: var(--bear);
+  }
+
+  .personal-entry-status-pnl {
+    font: 800 12px/1.2 "SF Mono", "JetBrains Mono", monospace;
+    white-space: nowrap;
+  }
+  .personal-entry-price-row { gap: 14px; }
+  .personal-entry-slot.profit .personal-entry-status-pnl { color: var(--bull); }
+  .personal-entry-slot.loss .personal-entry-status-pnl { color: var(--bear); }
+  .personal-entry-slot.profit .personal-entry-pnl { color: var(--bull); }
+  .personal-entry-slot.loss .personal-entry-pnl { color: var(--bear); }
+  .personal-entry-pnl {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 8px;
+    font: 800 14px/1.2 "SF Mono", "JetBrains Mono", monospace;
+    white-space: nowrap;
+  }
+  .personal-entry-pnl em {
+    font-style: normal;
+    font-size: 12px;
+    opacity: 0.92;
+  }
+  .personal-entry-return {
+    display: block;
+    margin-top: 3px;
+    color: var(--text-secondary);
+    font: 500 11px/1.35 ui-sans-serif, system-ui, sans-serif;
+    white-space: normal;
+  }
+  .personal-entry-liquidation {
+    display: inline;
+    margin-left: 10px;
+    color: var(--warn);
+    font: 700 11px/1.2 "SF Mono", "JetBrains Mono", monospace;
+    white-space: nowrap;
+  }
+  .personal-entry-pnl-layout {
+    display: block;
+    min-width: 0;
+  }
+  .personal-entry-pnl-layout > div {
+    min-width: 0;
+  }
+  .personal-entry-liquidation {
+    display: block;
+    margin: 4px 0 0;
+    color: var(--warn);
+    font: 800 12px/1.2 "SF Mono", "JetBrains Mono", monospace;
+    white-space: nowrap;
+  }
+  .personal-entry-liquidation small {
+    display: block;
+    margin-top: 4px;
+    color: inherit;
+    font: 700 10px/1.2 ui-sans-serif, system-ui, sans-serif;
+    white-space: normal;
+  }
+}
+
+.personal-entry-pnl-layout {
+  display: block;
+  min-width: 0;
+}
+.personal-entry-pnl-layout > div {
+  min-width: 0;
+}
+.personal-entry-pnl {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  font: 800 14px/1.2 "SF Mono", "JetBrains Mono", monospace;
+  white-space: nowrap;
+}
+.personal-entry-pnl em {
+  font-style: normal;
+  font-size: 12px;
+  opacity: 0.92;
+}
+.personal-entry-return {
+  display: block;
+  margin-top: 3px;
+  color: var(--text-secondary);
+  font: 500 11px/1.35 ui-sans-serif, system-ui, sans-serif;
+  white-space: normal;
+}
+.personal-entry-liquidation {
+  display: inline;
+  margin-left: 10px;
+  color: var(--warn);
+  font: 700 11px/1.2 "SF Mono", "JetBrains Mono", monospace;
+  white-space: nowrap;
+}
+.personal-entry-liquidation.is-near-liquidation {
+  animation: personal-entry-liquidation-alert 0.9s ease-in-out infinite alternate;
+}
+@keyframes personal-entry-liquidation-alert {
+  from { filter: brightness(1); text-shadow: 0 0 0 transparent; }
+  to { filter: brightness(1.3); text-shadow: 0 0 12px rgba(255, 184, 77, 0.95); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .personal-entry-liquidation.is-near-liquidation { animation: none; }
+}
+
+/* Compact single-input position-entry form (edit mode). */
+.personal-entry-slot.editing {
+  display: block;
+}
+.personal-entry-input {
+  display: block;
+  width: 100%;
+  margin: 4px 0 2px;
+  padding: 4px 2px;
+  border: 0;
+  border-bottom: 1px solid var(--border-strong);
+  background: transparent;
+  color: var(--text-primary);
+  font: 800 20px/1.08 "SF Mono", "JetBrains Mono", monospace;
+  letter-spacing: -1px;
+}
+.personal-entry-input:focus {
+  outline: none;
+  border-bottom-color: var(--accent-cyan);
+}
+.personal-entry-slot.editing > small {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-muted);
+  font: 500 10px/1.35 ui-sans-serif, system-ui, sans-serif;
+}
