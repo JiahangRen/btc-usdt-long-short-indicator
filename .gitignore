@@ -6,3 +6,11 @@ node_modules/
 *.log
 data/
 com.jeffereyreng.btc-indicator.plist.bak-*
+
+# 本地工作产物：绝不入库，也绝不能进 Docker 构建上下文 / 部署 rsync。
+# Local-only artifacts: never committed, never shipped in the Docker context or
+# the deploy rsync (sherpa-onnx is a ~1.4 GB vendored runtime).
+.workbuddy/
+.backup-*/
+screenshot-*.png
+tools/

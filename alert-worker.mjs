@@ -30,7 +30,11 @@ async function consumePushes() {
     const target = Number(job.rule.targetPrice).toLocaleString('en-US',{maximumFractionDigits:2});
     const current = Number(job.price).toLocaleString('en-US',{maximumFractionDigits:2});
     try {
-      const response = await fetchWithTimeout(`https://sctapi.ftqq.com/${encodeURIComponent(job.sendKey)}.send`,{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({title:title(job.rule.kind,target),short:short(job.rule.kind,target),desp:`${title(job.rule.kind,target)}\n\n${phrase(job.rule.kind,target)} USDT\n触发时市价 ${current} USDT`})});
+      // Redis jobs contain only the rule and user id.  Resolve the SendKey from
+      // the AES-GCM protected database row immediately before HTTPS delivery.
+      const sendKey=await store.getSendKey(job.rule.userId);
+      if(!sendKey) throw new Error('云端 SendKey 不存在或已被删除');
+      const response = await fetchWithTimeout(`https://sctapi.ftqq.com/${encodeURIComponent(sendKey)}.send`,{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({title:title(job.rule.kind,target),short:short(job.rule.kind,target),desp:`${title(job.rule.kind,target)}\n\n${phrase(job.rule.kind,target)} USDT\n触发时市价 ${current} USDT`})});
       const payload = await response.json().catch(()=>({}));
       await store.finishPush(job.deliveryId,{ok:response.ok && Number(payload.code)===0,payload,error:response.ok?'':'Server酱请求失败'});
     } catch (error) { await store.finishPush(job.deliveryId,{ok:false,payload:{},error:error.message}); }

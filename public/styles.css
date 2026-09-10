@@ -540,13 +540,14 @@ pre {
 #chartTooltip {
   position: absolute;
   z-index: 5;
+  pointer-events: none;
   display: none;
   gap: 5px;
   min-width: 170px;
   padding: 9px 10px;
   border: 1px solid rgba(170, 202, 242, 0.28);
   border-radius: 9px;
-  background: rgba(11, 18, 29, 0.92);
+  background: rgba(11, 18, 29, 0.72);
   box-shadow:
     0 12px 35px rgba(0, 0, 0, 0.35),
     inset 0 1px 0 rgba(255, 255, 255, 0.07);
@@ -1292,7 +1293,7 @@ html[data-theme="light"] .chart-box {
   background: #edf2f6;
 }
 html[data-theme="light"] #chartTooltip {
-  background: rgba(255, 255, 255, 0.95);
+  background: rgba(255, 255, 255, 0.78);
 }
 @media (prefers-color-scheme: light) {
   html[data-theme="auto"] {
@@ -1838,7 +1839,7 @@ html[data-theme="light"] #chartTooltip {
   padding: 9px 10px;
   border: 1px solid rgba(117, 183, 255, 0.65);
   border-radius: 8px;
-  background: rgba(16, 27, 41, 0.94);
+  background: rgba(16, 27, 41, 0.72);
   box-shadow: 0 8px 22px rgba(0, 0, 0, 0.3);
   backdrop-filter: blur(12px);
   font:
@@ -2916,7 +2917,7 @@ html[data-theme="light"] .signal-projection {
   border-color: #c4d2df;
 }
 html[data-theme="light"] #selectionOverlay {
-  background: rgba(248, 251, 255, 0.97);
+  background: rgba(248, 251, 255, 0.88);
   color: #32465d;
 }
 @media (prefers-color-scheme: light) {
@@ -3325,6 +3326,41 @@ html[data-theme="light"] #selectionOverlay {
 }
 .signal-indicator.sentiment-neutral {
   color: var(--text-secondary);
+}
+.primary-trend {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 0.5px solid var(--border-subtle);
+  font-size: 13px;
+}
+.primary-trend .muted {
+  color: var(--text-muted);
+}
+.primary-trend .signal-indicator {
+  font-weight: 650;
+}
+.primary-trend .pt-note {
+  color: var(--text-muted);
+  font-size: 12px;
+  margin-left: auto;
+  text-align: right;
+}
+.signal-flash {
+  animation: signalFlash 1.2s ease-out;
+}
+@keyframes signalFlash {
+  0% {
+    box-shadow: 0 0 0 0 rgba(40, 140, 220, 0);
+  }
+  18% {
+    box-shadow: 0 0 0 4px rgba(40, 140, 220, 0.35);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(40, 140, 220, 0);
+  }
 }
 #signalReason > .signal-summary > i {
   font-style: normal;
@@ -4300,6 +4336,21 @@ html[data-theme="light"] .connectivity-panel {
   min-width: 72px;
   white-space: nowrap;
 }
+/* 全屏模式下把页面顶部的 <header> 也藏起来（标题/账户/全屏按钮等）。
+   由 app.js 的 syncFullscreenButton 在 fullscreenchange 时同步 .is-fullscreen
+   class；ESC 退出全屏时浏览器会自动撤掉全屏并触发回调，header 自然回来。
+   用 :fullscreen 伪类做兜底，防止 JS 未加载时也能生效。 */
+html:fullscreen header,
+html:fullscreen #marketClocks,
+html.is-fullscreen > main > header,
+html.is-fullscreen #marketClocks {
+  display: none !important;
+}
+html:fullscreen,
+html.is-fullscreen {
+  /* 关掉页面级外边距，避免全屏时上下出现意外空隙 */
+  background: var(--bg-app, #050816);
+}
 
 /* 恐惧贪婪仪表盘是低频市场环境面板，应保持稳定尺寸以避免加载跳动。
    The fear-and-greed gauge is a slow-moving context panel. Keep the
@@ -4736,7 +4787,7 @@ html[data-theme="light"] .help-dot:after {
 html[data-theme="light"] #chartTooltip {
   color: #d8e2ee;
   border-color: #7892ae;
-  background: rgba(28, 36, 48, 0.97) !important;
+  background: rgba(28, 36, 48, 0.78) !important;
   box-shadow: 0 10px 28px rgba(43, 64, 88, 0.3);
 }
 html[data-theme="light"] #chartTooltip b {
@@ -4806,7 +4857,7 @@ html[data-theme="light"] .range-extreme {
   html[data-theme="auto"] #chartTooltip {
     color: #d8e2ee;
     border-color: #7892ae;
-    background: rgba(28, 36, 48, 0.97) !important;
+    background: rgba(28, 36, 48, 0.78) !important;
     box-shadow: 0 10px 28px rgba(43, 64, 88, 0.3);
   }
   html[data-theme="auto"] #chartTooltip b {
@@ -8245,6 +8296,12 @@ body.voice-grid-resizing {
   border: 1px solid var(--border-subtle);
   border-radius: 8px;
   background: var(--bg-surface);
+  /* 关键：允许卡片收缩到栏宽以内，min-width:auto 会把内容顶出卡片压到相邻栏。 */
+  min-width: 0;
+}
+/* 卡片内所有直接子项同样允许收缩，防止按钮/面板把卡片撑宽。 */
+.voice-panel-group > * {
+  min-width: 0;
 }
 .voice-panel-toggles {
   gap: 10px;
@@ -8339,10 +8396,11 @@ body.voice-grid-resizing {
   transform: translateX(17px);
 }
 .voice-panel-toggles .voice-live-interval {
-  display: flex;
-  flex-direction: row-reverse;
-  justify-content: space-between;
-  gap: 10px;
+  display: grid;
+  /* minmax(0,1fr)：标签列允许收缩，避免下拉框把整行顶出卡片。 */
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 10px;
+  align-items: center;
   padding: 7px 12px;
   border: 1px dashed var(--border-subtle);
   border-radius: 9px;
@@ -8351,9 +8409,17 @@ body.voice-grid-resizing {
 }
 .voice-panel-toggles .voice-live-interval select {
   width: auto;
+  max-width: 100%;
   min-height: 24px;
   padding: 2px 6px;
   font-size: 10.5px;
+}
+.voice-panel-toggles .voice-live-interval .voice-last-spoken {
+  grid-column: 1 / -1;
+  justify-self: start;
+  font-size: 10px;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
 }
 .voice-panel-actions button {
   border-color: rgba(85, 161, 213, 0.55);
@@ -8379,10 +8445,15 @@ body.voice-grid-resizing {
   font-size: 10.5px;
   cursor: grab;
   user-select: none;
+  min-width: 0;
   transition:
     border-color 0.15s,
     background 0.15s,
     opacity 0.15s;
+}
+.voice-priority-list li > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .voice-priority-list li:hover {
   border-color: rgba(0, 212, 170, 0.4);
@@ -8469,6 +8540,8 @@ body.voice-grid-resizing {
   display: flex;
   align-items: center;
   gap: 8px;
+  /* 窄栏下允许换行，避免音量滑条（min-width 110px）把行顶出卡片。 */
+  flex-wrap: wrap;
 }
 .voice-alert-panel .voice-volume-row output {
   flex: 0 0 auto;
@@ -8528,6 +8601,15 @@ body.voice-grid-resizing {
   fill: none;
   stroke: #ff708a;
   stroke-width: 6;
+  stroke-linecap: round;
+  display: none;
+}
+/* 语音总开关关闭时：显示红色斜杠（表示已静音/关闭），并隐藏声波。 */
+.voice-quick-toggle.is-muted .voice-wave {
+  display: none;
+}
+.voice-quick-toggle.is-muted .voice-mute {
+  display: inline;
 }
 .voice-quick-toggle:hover {
   transform: none;
@@ -9041,6 +9123,23 @@ body.voice-grid-resizing {
   min-height: 20px;
   margin: 0;
   padding: 0 8px;
+  border: 1px solid rgba(85, 161, 213, 0.62);
+  border-radius: 999px;
+  background: rgba(85, 161, 213, 0.11);
+  color: #55a1d5;
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
+}
+/* 徽章内联在“我的持仓”标题旁（顶部三卡互换改造后不再绝对定位）。 */
+.personal-entry-heading .personal-entry-account-sync {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  min-height: 15px;
+  padding: 2px 7px;
   border: 1px solid rgba(85, 161, 213, 0.62);
   border-radius: 999px;
   background: rgba(85, 161, 213, 0.11);
@@ -10721,7 +10820,7 @@ html[data-theme="light"] .help-dot:after {
 }
 
 html[data-theme="light"] #chartTooltip {
-  background: rgba(255, 255, 255, 0.96);
+  background: rgba(255, 255, 255, 0.80);
   border-color: var(--border-strong);
   color: var(--text-primary);
   box-shadow: 0 8px 24px rgba(43, 64, 88, 0.22);
@@ -10970,7 +11069,7 @@ html[data-theme="light"] #okxMicrostructureCard .microstructure-neutral-toggle:f
   }
 
   html[data-theme="auto"] #chartTooltip {
-    background: rgba(255, 255, 255, 0.96);
+    background: rgba(255, 255, 255, 0.80);
     border-color: var(--border-strong);
     color: var(--text-primary);
     box-shadow: 0 8px 24px rgba(43, 64, 88, 0.22);
@@ -11104,5 +11203,118 @@ html[data-theme="light"] #okxMicrostructureCard .microstructure-neutral-toggle:f
   html[data-theme="auto"] #okxMicrostructureCard .microstructure-neutral-toggle:focus-visible {
     border-color: var(--accent-cyan) !important;
     color: var(--text-primary) !important;
+  }
+}
+
+/* BTC investment calendar: a table-first risk window, intentionally separate
+   from the compact macro-context tiles. */
+.investment-calendar-card {
+  overflow: hidden;
+  padding: 0 !important;
+  border: 1px solid rgba(66, 209, 191, .28) !important;
+  background: linear-gradient(145deg, rgba(13, 28, 43, .98), rgba(10, 16, 28, .98)) !important;
+}
+
+/* Local API credential centre. Keys are write-only: the server reports only
+   whether one is saved, never the secret itself. */
+#apiCenterToggle { white-space:nowrap; }
+.api-center-modal > section { width:min(760px,calc(100vw - 28px)); max-height:min(82vh,820px); display:flex; flex-direction:column; overflow:hidden; }
+.api-center-modal header { flex-shrink:0; }
+.api-center-modal header > div { display:grid; gap:3px; }.api-center-modal header small { color:var(--text-muted); font-size:11px; font-weight:400; }
+.api-center-body { padding:16px 20px 20px; display:grid; gap:10px; flex:1 1 auto; min-height:0; overflow:auto; }.api-center-body h3 { margin:10px 0 2px; color:#cbd8e9; font-size:13px; }
+.api-center-row { display:flex; justify-content:space-between; align-items:center; gap:16px; padding:13px; border:1px solid rgba(137,166,199,.18); border-radius:10px; background:rgba(8,20,34,.62); }.api-center-row.free { background:rgba(25,103,93,.10); }.api-center-row.required { border-color:rgba(255,187,62,.38); }
+.api-center-row > div { min-width:0; }.api-center-row b { display:block; color:var(--text-primary); font-size:13px; }.api-center-row b small { margin-left:7px; color:#ffcb69; font-size:10px; }.api-center-row span,.api-center-row p { display:block; margin:4px 0 0; color:var(--text-secondary); font-size:11px; line-height:1.45; }.api-center-row p { color:var(--text-muted); }.api-center-row em { color:#68ead7; font-style:normal; font-size:12px; white-space:nowrap; }
+.api-center-row form { display:flex; flex:0 0 280px; flex-wrap:wrap; justify-content:flex-end; gap:7px; }.api-center-row input { box-sizing:border-box; width:100%; min-width:0; padding:8px 9px; border:1px solid rgba(137,166,199,.28); border-radius:7px; color:var(--text-primary); background:rgba(3,12,23,.72); font-size:11px; }.api-center-row input::placeholder { color:#62748c; }.api-center-row button { padding:7px 10px; border:1px solid rgba(53,223,197,.45); border-radius:7px; color:#78f7e5; background:rgba(19,129,116,.16); font-size:11px; cursor:pointer; }.api-center-row .api-clear { border-color:rgba(255,119,119,.36); color:#ff9b9b; background:rgba(160,50,50,.12); }
+.coingecko-usage { margin-top:9px; padding:9px; border-radius:7px; background:rgba(18,109,94,.12); }.coingecko-usage > div { display:flex; align-items:baseline; justify-content:space-between; gap:10px; }.coingecko-usage strong { color:#72efd9; font-size:18px; }.coingecko-usage i { display:block; height:5px; margin:7px 0; overflow:hidden; border-radius:99px; background:rgba(174,194,215,.18); }.coingecko-usage i span { display:block; height:100%; min-width:2px; border-radius:inherit; background:#39d4b7; }.coingecko-usage p,.coingecko-usage small { margin:0; color:#aebed1; font-size:10px; line-height:1.55; }.coingecko-usage.muted { color:var(--text-muted); background:rgba(137,166,199,.08); }.coingecko-usage.error { color:#ffba8f; background:rgba(166,83,36,.12); }
+.api-center-row .api-endpoint-note { margin-top:7px; color:#9fb3c8; font-size:10px; }.api-center-row .api-endpoint-note code { padding:1px 5px; border-radius:4px; color:#8fe6ff; background:rgba(40,120,160,.18); font-size:10px; word-break:break-all; }.api-center-row .api-endpoint-warn { margin-left:4px; color:#ff9b9b; font-weight:600; }.api-center-row code { padding:1px 4px; border-radius:4px; color:#8fe6ff; background:rgba(40,120,160,.18); }
+@media (max-width:760px) { .api-center-row { display:block; }.api-center-row form { margin-top:10px; width:100%; flex-basis:auto; }.api-center-row em { display:block; margin-top:7px; } }
+.api-qwen-quota { margin-top:9px; display:flex; align-items:center; gap:9px; flex-wrap:wrap; padding:8px 10px; border:1px solid rgba(137,166,199,.18); border-radius:8px; background:rgba(8,20,34,.45); }
+.api-qwen-quota-bar { flex:1 1 100%; min-width:120px; height:6px; border-radius:3px; background:rgba(137,166,199,.16); overflow:hidden; position:relative; }
+.api-qwen-quota-fill { position:absolute; inset:0; width:100%; background:var(--accent-purple,#a78bfa); transition:width .4s ease,background-color .3s ease; }
+.api-qwen-quota-fill[data-level='mid'] { background:#f59e0b; }
+.api-qwen-quota-fill[data-level='low'] { background:#ff4d6a; }
+.api-qwen-quota-pct { font:500 12px/1 ui-monospace,SFMono-Regular,monospace; color:var(--text-primary); font-variant-numeric:tabular-nums; min-width:48px; text-align:right; }
+.api-qwen-quota-meta { font:400 10px/1.4 system-ui,sans-serif; color:var(--text-secondary,#9aa4b2); flex:1 1 auto; word-break:break-word; }
+.api-qwen-quota[data-empty='true'] .api-qwen-quota-pct { color:var(--text-muted); }
+.api-qwen-quota-meta b { color:var(--text-primary); font-weight:500; }
+.investment-calendar-head { display:flex; justify-content:space-between; gap:18px; align-items:flex-start; padding:22px 24px 16px; border-bottom:1px solid rgba(137,166,199,.16); }
+.investment-calendar-kicker { display:flex; gap:8px; align-items:center; margin-bottom:7px; color:#68ead7; font:700 11px/1 ui-monospace,SFMono-Regular,monospace; letter-spacing:.1em; text-transform:uppercase; }
+.investment-calendar-kicker i { width:7px; height:7px; border-radius:99px; background:#38dfc4; box-shadow:0 0 12px #38dfc4; }
+.investment-calendar-head h2 { margin:0; color:var(--text-primary); font-size:21px; }
+.investment-calendar-head p { max-width:720px; margin:7px 0 0; color:var(--text-secondary); font-size:13px; line-height:1.55; }
+.investment-calendar-actions { display:flex; flex-wrap:wrap; align-items:center; justify-content:flex-end; gap:8px; }
+.investment-calendar-actions button { min-height:31px; padding:0 11px; border:1px solid rgba(135,164,199,.28); border-radius:8px; color:var(--text-secondary); background:rgba(11,24,39,.7); font-size:12px; cursor:pointer; }
+.investment-calendar-actions button.active { border-color:rgba(53,223,197,.62); color:#78f7e5; background:rgba(19,129,116,.2); }
+.investment-calendar-actions .calendar-expand { border-color:rgba(255,187,62,.42); color:#ffcb69; }
+.investment-calendar-actions .calendar-source { color:var(--text-muted); font-size:11px; white-space:nowrap; }
+.investment-calendar-toolbar { display:flex; justify-content:space-between; gap:12px; padding:13px 24px; background:rgba(4,12,23,.36); }
+.calendar-risk-callout { display:flex; align-items:center; gap:10px; color:var(--text-secondary); font-size:12px; }
+.calendar-risk-callout b { padding:5px 8px; border-radius:6px; color:#ffcb69; background:rgba(245,177,48,.12); font:800 11px/1 ui-monospace,SFMono-Regular,monospace; }
+.calendar-risk-callout b.safe { color:#68ead7; background:rgba(45,203,181,.1); }
+.calendar-time-note { color:var(--text-muted); font-size:11px; text-align:right; }
+.calendar-treasury-note { flex:1 1 100%; padding-top:2px; color:#8595aa; font-size:11px; line-height:1.45; }
+.investment-calendar-table { width:100%; border-collapse:collapse; table-layout:fixed; }
+.investment-calendar-table th { padding:12px 14px; border-bottom:1px solid rgba(137,166,199,.17); color:#8d9bad; font-size:11px; letter-spacing:.04em; text-align:left; font-weight:650; white-space:nowrap; }
+.investment-calendar-table td { padding:14px; border-bottom:1px solid rgba(137,166,199,.13); color:var(--text-primary); vertical-align:middle; font-size:13px; }
+.investment-calendar-table tr:last-child td { border-bottom:0; }
+.investment-calendar-table tr:hover td { background:rgba(42,104,130,.09); }
+.investment-calendar-table .calendar-date-row td { padding:10px 14px; color:#bdcbe0; background:rgba(77,104,145,.09); font-size:13px; font-weight:750; }
+.calendar-time { color:#e2ebf7; font:700 13px/1.35 ui-monospace,SFMono-Regular,monospace; }
+.calendar-time small { display:block; margin-top:4px; color:var(--text-muted); font:11px/1.2 ui-monospace,SFMono-Regular,monospace; }
+.calendar-market { display:flex; gap:7px; align-items:center; color:#cbd8e9; font-weight:700; }
+.calendar-flag { display:grid; place-items:center; width:23px; height:17px; border-radius:3px; color:#f8fafc; font:800 9px/1 ui-monospace,SFMono-Regular,monospace; background:#285da3; }
+.calendar-flag.btc { color:#241400; background:#f79a22; }
+.calendar-event-title { display:flex; align-items:center; gap:8px; font-weight:750; }
+.calendar-event-title small { color:var(--text-muted); font-weight:500; }
+.calendar-impact { display:inline-flex; gap:2px; color:#516178; letter-spacing:1px; }
+.calendar-impact b { color:#ffbb3e; font-size:14px; }.calendar-impact.medium b:nth-child(3),.calendar-impact.low b:nth-child(n+2){color:#45536a}
+.calendar-value { color:#c9d4e1; font:650 12px/1.2 ui-monospace,SFMono-Regular,monospace; }.calendar-value.actual { color:#68ead7; }.calendar-value.empty { color:#526076; }
+.calendar-btc-read { color:#aab8ca; font-size:12px; line-height:1.4; }.calendar-btc-read b { display:block; color:#d8e5f4; font-size:12px; }.calendar-btc-read.high b { color:#ffc258; }
+.calendar-empty { padding:26px !important; color:var(--text-secondary) !important; text-align:center; }
+.calendar-footer { display:flex; justify-content:space-between; gap:12px; padding:12px 24px 16px; color:var(--text-muted); border-top:1px solid rgba(137,166,199,.12); font-size:11px; line-height:1.45; }
+@media (max-width: 760px) { .investment-calendar-head,.investment-calendar-toolbar,.calendar-footer { padding-left:15px; padding-right:15px; }.investment-calendar-head,.investment-calendar-toolbar,.calendar-footer { display:block; }.investment-calendar-actions { justify-content:flex-start; margin-top:14px; }.calendar-time-note { margin-top:9px; text-align:left; }.calendar-treasury-note { display:block; margin-top:9px; }.investment-calendar-table { min-width:810px; }.investment-calendar-scroll { overflow-x:auto; }.investment-calendar-table th,.investment-calendar-table td { padding:12px 10px; }.investment-calendar-head h2 { font-size:19px; } }
+
+/* ===== 顶部三卡（价格卡 + 两个持仓卡）拖拽互换位置 =====
+   仅桌面（≥1200px）布局启用：持仓容器 display:contents 透传，
+   价格块与两个持仓槽成为 .hero 网格的同级单元，用 order 排序互换。
+   窄屏保持原有卡片结构（价格卡固定在最左，两个持仓槽卡内互换）。 */
+@media (min-width: 1200px) {
+  #personalEntryCard {
+    display: contents !important;
+  }
+  /* 三张可互换卡片等分整行：各占 1/3，分割线正好落在 1/3 和 2/3 处。 */
+  .hero {
+    grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+    column-gap: 16px !important;
+    row-gap: 0 !important;
+    align-items: stretch !important;
+  }
+  #personalEntryCard .personal-entry-slot {
+    min-width: 0;
+    width: auto;
+    align-self: stretch;
+    padding: 8px 16px !important;
+  }
+  .hero [data-hero-unit] {
+    min-width: 0;
+    padding-inline: 16px;
+    border-left: 1px solid var(--border-subtle);
+  }
+  .hero > div:first-child {
+    min-width: 0 !important;
+  }
+  .hero [data-hero-unit].hero-unit-first {
+    border-left: 0;
+  }
+  .hero [data-hero-unit].hero-unit-drag-over {
+    outline: 2px dashed var(--accent-cyan);
+    outline-offset: 3px;
+    background: rgba(0, 212, 170, 0.06);
+  }
+  .hero > div:first-child {
+    cursor: grab;
+  }
+  .hero > div:first-child:active {
+    cursor: grabbing;
   }
 }

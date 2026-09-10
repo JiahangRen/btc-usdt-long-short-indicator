@@ -1,12 +1,12 @@
 {
   "name": "btc-indicator-rebuilt",
   "private": true,
-  "version": "2.4.0",
+  "version": "2.5.0",
   "type": "module",
   "scripts": {
     "start": "node server.mjs",
     "alerts:worker": "node alert-worker.mjs",
-    "check": "node --check server.mjs && node --check alert-store.mjs && node --check alert-worker.mjs && node --check public/app.js && node --check public/cloud-alerts.js"
+    "check": "node --check server.mjs && node --check ai-chat.mjs && node --check mcp-server.mjs && node --check alert-store.mjs && node --check alert-worker.mjs && node --check public/app.js && node --check public/ai-chat.js && node --check public/cloud-alerts.js"
   },
   "dependencies": {
     "edge-tts.js": "^2.0.4",

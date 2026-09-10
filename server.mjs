@@ -1,11 +1,13 @@
 import http from 'node:http';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { extname, join, normalize } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Communicate } from 'edge-tts.js';
+import { createAiChat, DEFAULT_MODEL as QWEN_DEFAULT_MODEL } from './ai-chat.mjs';
 import { createAlertStore } from './alert-store.mjs';
 
 // BTC 指标服务端：负责静态页面、公开数据源、SQLite 快照与实时 OKX 连接。
@@ -18,15 +20,228 @@ process.on('uncaughtException', (error) => console.error('[fatal] uncaughtExcept
 
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || '127.0.0.1';
+// Optional: a Finnhub key upgrades the calendar with consensus, actual and
+// previous values.  The dashboard deliberately remains useful without one.
 const PUBLIC = join(process.cwd(), 'public');
 const DATA_DIR = join(process.cwd(), 'data');
 mkdirSync(DATA_DIR, { recursive:true });
+const API_CREDENTIALS_FILE = join(DATA_DIR, 'api-credentials.json');
+let apiCredentialsNeedsMigration=false;
+function apiCredentialKey() {
+  const raw=process.env.API_CREDENTIAL_ENCRYPTION_KEY || process.env.ALERT_ENCRYPTION_KEY || '';
+  const key=raw ? Buffer.from(raw,'base64') : null;
+  if(!key || key.length!==32) throw Object.assign(new Error('API_CREDENTIAL_ENCRYPTION_KEY (32-byte base64) is required before saving API settings'),{statusCode:503});
+  return key;
+}
+function sealApiCredentials(value) {
+  const key=apiCredentialKey(), iv=randomBytes(12), cipher=createCipheriv('aes-256-gcm',key,iv);
+  cipher.setAAD(Buffer.from('btc-indicator:api-credentials:v1'));
+  const body=Buffer.concat([cipher.update(JSON.stringify(value),'utf8'),cipher.final()]);
+  return JSON.stringify({version:1,ciphertext:Buffer.concat([iv,cipher.getAuthTag(),body]).toString('base64')});
+}
+function openApiCredentials(text) {
+  const parsed=JSON.parse(text), ciphertext=parsed?.ciphertext;
+  // A former plaintext file remains readable only to migrate it immediately
+  // on the next save; it is never written in plaintext again.
+  if(!ciphertext) { apiCredentialsNeedsMigration=true; return parsed && typeof parsed==='object' ? parsed : {}; }
+  const raw=Buffer.from(ciphertext,'base64'); if(raw.length<29) throw new Error('Encrypted API settings are malformed');
+  const key=apiCredentialKey(), cipher=createDecipheriv('aes-256-gcm',key,raw.subarray(0,12));
+  cipher.setAAD(Buffer.from('btc-indicator:api-credentials:v1')); cipher.setAuthTag(raw.subarray(12,28));
+  return JSON.parse(Buffer.concat([cipher.update(raw.subarray(28)),cipher.final()]).toString('utf8'));
+}
+let apiCredentials={};
+try { apiCredentials=openApiCredentials(readFileSync(API_CREDENTIALS_FILE,'utf8')); } catch(error) { console.warn(`API credentials unavailable: ${error.message}`); apiCredentials={}; }
+// A key explicitly saved through API Center is the active local preference.
+// Environment variables remain the deployment fallback when no local setting
+// exists, so a restart cannot silently restore an older .env credential.
+let FINNHUB_API_KEY = String(apiCredentials.finnhub || process.env.FINNHUB_API_KEY || '').trim();
+let EIA_API_KEY = String(apiCredentials.eia || process.env.EIA_API_KEY || '').trim();
+let COINGECKO_API_KEY = String(apiCredentials.coingecko || process.env.COINGECKO_API_KEY || '').trim();
+// 千问凭据是一组配置（key + endpoint + 模型），整组加密存储，与单个 key 的 provider 分开处理。
+// Qwen is a credential bundle (key + endpoint + model) stored as one encrypted object.
+const QWEN_DEFAULT_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+const QWEN_TOKEN_PLAN_BASE_URL = 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1';
+// 千问两套体系：Token Plan 订阅 Key 以 sk-sp- 开头，必须走 token-plan 端点；
+// 按量付费 Key（sk-/sk-ws-）走 dashscope。混用一律 401。
+// Qwen has two isolated systems: Token Plan keys start with sk-sp- and require the
+// token-plan endpoint; pay-as-you-go keys (sk-/sk-ws-) use dashscope. Mixing = 401.
+function inferQwenBaseUrl(key) {
+  return /^sk-sp-/i.test(String(key || '').trim()) ? QWEN_TOKEN_PLAN_BASE_URL : QWEN_DEFAULT_BASE_URL;
+}
+function qwenCredential() {
+  const saved = apiCredentials.qwen && typeof apiCredentials.qwen === 'object' ? apiCredentials.qwen : {};
+  const key = String(saved.key || process.env.DASHSCOPE_API_KEY || '').trim();
+  const stored = String(saved.baseUrl || process.env.DASHSCOPE_BASE_URL || '').trim();
+  // 已存的端点若跨体系（sk-sp- 配 dashscope，或按量 Key 配 token-plan），调用必然 401，
+  // 没有任何保留价值 —— 运行时直接纠正，重新保存时会落到磁盘。
+  // A stored endpoint from the wrong system can only ever 401, so correct it at runtime.
+  let baseUrl = stored || inferQwenBaseUrl(key) || QWEN_DEFAULT_BASE_URL, autoCorrected = false;
+  if (key && stored) {
+    const isTokenPlanKey = /^sk-sp-/i.test(key);
+    if (isTokenPlanKey !== stored.includes('token-plan')) { baseUrl = inferQwenBaseUrl(key); autoCorrected = true; }
+  }
+  return {
+    key,
+    baseUrl,
+    autoCorrected,
+    model:String(saved.model || process.env.DASHSCOPE_MODEL || QWEN_DEFAULT_MODEL).trim()
+  };
+}
+function apiCredentialStatus() { return { finnhub:Boolean(FINNHUB_API_KEY), eia:Boolean(EIA_API_KEY), coingecko:Boolean(COINGECKO_API_KEY), custom:Boolean(apiCredentials.custom?.url), qwen:Boolean(qwenCredential().key) }; }
+function apiCredentialVerification() { const saved=apiCredentials._verification || {}; return {finnhub:Boolean(saved.finnhub?.valid),eia:Boolean(saved.eia?.valid),coingecko:Boolean(saved.coingecko?.valid),qwen:Boolean(saved.qwen?.valid)}; }
+function saveApiCredentialsFile() { writeFileSync(API_CREDENTIALS_FILE,sealApiCredentials(apiCredentials),{mode:0o600}); }
+// Migrate legacy plaintext settings as soon as a configured encryption key is
+// available.  If the key is absent we keep the service running, but refuse all
+// subsequent writes rather than silently creating a weakly protected secret.
+if(apiCredentialsNeedsMigration) { try { saveApiCredentialsFile(); apiCredentialsNeedsMigration=false; } catch(error) { console.warn(`API credentials migration deferred: ${error.message}`); } }
+// 一次性迁移：早期版本把 qwen3.8-max 硬编码成了出厂默认值，用户几乎不会主动挑最贵的型号。
+// 首次启动时挪到性价比档；用户之后自己挑的模型不会被覆盖（靠 _qwenModelMigrated 标记）。
+// One-off migration: qwen3.8-max used to be the hard-coded factory default. Move it to the value
+// tier once; a model the user picks afterwards is never overridden (guarded by the flag below).
+if (apiCredentials.qwen && apiCredentials.qwen.model === 'qwen3.8-max' && !apiCredentials._qwenModelMigrated) {
+  apiCredentials = { ...apiCredentials, qwen:{ ...apiCredentials.qwen, model:QWEN_DEFAULT_MODEL }, _qwenModelMigrated:true };
+  try { saveApiCredentialsFile(); } catch(error) { console.warn(`Qwen model migration deferred: ${error.message}`); }
+}
+function validApiUrl(value) { try { const url=new URL(String(value||'').trim()); return url.protocol==='https:' && !url.username && !url.password && url.href.length<=2048 ? url.href : null; } catch { return null; } }
+const API_PROVIDERS = ['finnhub','eia','coingecko','custom','qwen'];
+function saveApiCredential(provider, key, url, model) {
+  if (!API_PROVIDERS.includes(provider)) throw Object.assign(new Error('Unsupported API provider'),{statusCode:400});
+  const value=String(key || '').trim();
+  // 千问需要三件套：Key、端点、模型名。端点和模型都可留空走默认值。
+  // Qwen needs a triple: key, endpoint and model name. Both extras fall back to defaults.
+  if (provider === 'qwen') {
+    if (!value || value.length > 512) throw Object.assign(new Error('千问 API Key 必填，且不能超过 512 个字符'),{statusCode:400});
+    // 端点留空时按 Key 前缀自动匹配（sk-sp- → Token Plan，否则 → DashScope）。
+    // When the endpoint is blank, auto-match it from the key prefix.
+    const baseUrl=url ? validApiUrl(url) : inferQwenBaseUrl(value);
+    if (url && !baseUrl) throw Object.assign(new Error('千问 API 地址必须是有效 HTTPS URL，且不能包含用户名或密码。'),{statusCode:400});
+    const chosenModel=String(model || '').trim() || QWEN_DEFAULT_MODEL;
+    if (chosenModel.length > 64) throw Object.assign(new Error('模型名称过长'),{statusCode:400});
+    const verification={...(apiCredentials._verification||{})}; delete verification.qwen;
+    apiCredentials={...apiCredentials,qwen:{key:value,baseUrl,model:chosenModel},_verification:verification}; saveApiCredentialsFile(); return;
+  }
+  if (provider==='custom') { const endpoint=validApiUrl(url); if(!endpoint) throw Object.assign(new Error('自定义 API 地址必须是有效 HTTPS URL，且不能包含用户名或密码。'),{statusCode:400}); if(value.length>512) throw Object.assign(new Error('API key must be at most 512 characters'),{statusCode:400}); apiCredentials={...apiCredentials,custom:{url:endpoint,key:value||null}}; saveApiCredentialsFile(); return; }
+  if (!value || value.length > 512) throw Object.assign(new Error('API key is required and must be at most 512 characters'),{statusCode:400});
+  const verification={...(apiCredentials._verification||{})}; delete verification[provider]; apiCredentials={...apiCredentials,[provider]:value,_verification:verification}; saveApiCredentialsFile();
+  if (provider==='finnhub') { FINNHUB_API_KEY=value; cache.delete('investment-calendar'); }
+  if (provider==='eia') EIA_API_KEY=value;
+  if (provider==='coingecko') { COINGECKO_API_KEY=value; cache.delete('fed-market-signals'); }
+}
+// 切换千问模型：只重写模型名，Key 与端点原样保留，无需重新验证。
+// Switch the Qwen model: only the model name is rewritten; key and endpoint stay untouched.
+function setQwenModel(model) {
+  const id=String(model || '').trim();
+  if(!id) return { ok:false, error:'模型名不能为空。' };
+  const current=apiCredentials.qwen && typeof apiCredentials.qwen === 'object' ? apiCredentials.qwen : {};
+  if(!current.key) return { ok:false, error:'尚未配置千问 API Key，无法切换模型。' };
+  const previous=apiCredentials;
+  apiCredentials={...apiCredentials,qwen:{...current,model:id}};
+  try { saveApiCredentialsFile(); }
+  catch(error) { apiCredentials=previous; return { ok:false, error:`保存模型失败：${error.message}` }; }
+  return { ok:true, model:id };
+}
+function deleteApiCredential(provider) {
+  if (!API_PROVIDERS.includes(provider)) throw Object.assign(new Error('Unsupported API provider'),{statusCode:400});
+  delete apiCredentials[provider]; if(apiCredentials._verification)delete apiCredentials._verification[provider]; saveApiCredentialsFile();
+  if (provider==='finnhub') { FINNHUB_API_KEY=String(process.env.FINNHUB_API_KEY || '').trim(); cache.delete('investment-calendar'); }
+  if (provider==='eia') EIA_API_KEY=String(process.env.EIA_API_KEY || '').trim();
+  if (provider==='coingecko') { COINGECKO_API_KEY=String(process.env.COINGECKO_API_KEY || '').trim(); cache.delete('fed-market-signals'); }
+}
+async function verifyApiCredential(provider) {
+  if (!['finnhub','eia','coingecko','qwen'].includes(provider)) throw Object.assign(new Error('该类型的 API 地址无法通用验证；请按其服务商文档确认响应格式。'),{statusCode:400});
+  const credential = provider === 'qwen' ? qwenCredential() : null;
+  const key = provider === 'qwen' ? credential.key : {finnhub:FINNHUB_API_KEY,eia:EIA_API_KEY,coingecko:COINGECKO_API_KEY}[provider];
+  if(!key) throw Object.assign(new Error('请先保存 API Key。'),{statusCode:400});
+  try {
+    // 千问：用一次极小请求验证 Key + 端点 + 模型三者是否匹配。
+    // Qwen: a minimal request validates key, endpoint and model in one shot.
+    if(provider==='qwen') {
+      const ctrl=new AbortController(), timer=setTimeout(()=>ctrl.abort(),30_000);
+      let response;
+      try {
+        // max_tokens 给到 16：思考型模型给 1 会被拒绝，而验证只关心 HTTP 状态。
+        // max_tokens 16: thinking models reject 1, and the check only inspects the HTTP status.
+        response=await fetch(`${credential.baseUrl.replace(/\/+$/,'')}/chat/completions`,{method:'POST',signal:ctrl.signal,
+          headers:{'content-type':'application/json',authorization:`Bearer ${credential.key}`},
+          body:JSON.stringify({model:credential.model,messages:[{role:'user',content:'ping'}],max_tokens:16,stream:false})});
+      } finally { clearTimeout(timer); }
+      if(!response.ok) {
+        const detail=await response.text().catch(()=>'');
+        let parsed=null; try { parsed=JSON.parse(detail); } catch { /* 忽略非 JSON 错误体 / ignore non-JSON bodies */ }
+        throw new Error(parsed?.error?.message || parsed?.message || detail.slice(0,200) || `HTTP ${response.status}`);
+      }
+    } else if(provider==='coingecko') {
+      // /key is an account-usage endpoint and may be unavailable to free Demo
+      // keys. /ping is documented for Demo authentication and is the correct
+      // minimal credential check.
+      const payload=await request(`https://api.coingecko.com/api/v3/ping?x_cg_demo_api_key=${encodeURIComponent(key)}`,8_000);
+      if(!payload || typeof payload!=='object') throw new Error('CoinGecko 返回格式无效');
+    } else if(provider==='finnhub') {
+      // Economic Calendar is Premium. Verify a free-plan endpoint first so a
+      // valid free registration is not incorrectly reported as a bad key.
+      const quote=await request(`https://finnhub.io/api/v1/quote?symbol=AAPL&token=${encodeURIComponent(key)}`,8_000);
+      if(!quote || typeof quote!=='object') throw new Error('Finnhub 返回格式无效');
+      const day=new Date().toISOString().slice(0,10);
+      try { const payload=await request(`https://finnhub.io/api/v1/calendar/economic?from=${day}&to=${day}&token=${encodeURIComponent(key)}`,8_000); if(payload?.error) throw new Error(String(payload.error)); }
+      catch { apiCredentials._verification={...(apiCredentials._verification||{}),finnhub:{valid:true,limited:true,verifiedAt:Date.now()}}; saveApiCredentialsFile(); return {valid:true,limited:true,message:'Finnhub Key 已验证通过；但 Economic Calendar 是付费接口，免费套餐将继续使用内置公开宏观日历。'}; }
+    } else {
+      const payload=await request(`https://api.eia.gov/v2/petroleum/pri/spt/data/?api_key=${encodeURIComponent(key)}&length=1`,8_000);
+      if(payload?.error) throw new Error(String(payload.error));
+    }
+    // 验证通过即把自动纠正后的端点落盘，下次启动不用再纠一次。
+    // Persist an auto-corrected endpoint once verification proves it works.
+    if (provider === 'qwen' && credential.autoCorrected) {
+      apiCredentials={...apiCredentials,qwen:{...(apiCredentials.qwen||{}),key:credential.key,baseUrl:credential.baseUrl,model:credential.model}};
+    }
+    apiCredentials._verification={...(apiCredentials._verification||{}),[provider]:{valid:true,verifiedAt:Date.now()}}; saveApiCredentialsFile();
+    return { valid:true, message:`${provider==='qwen'?`千问（${credential.model}）`:provider==='finnhub'?'Finnhub':provider==='eia'?'EIA':'CoinGecko'} 验证通过。`, ...(provider==='qwen'?{endpoint:credential.baseUrl,model:credential.model}:{}) };
+  } catch(error) {
+    // 千问 401 最常见的真实原因不是 Key 错，而是 Key 与端点不配套。
+    // The most common cause of a Qwen 401 is not a bad key but a key/endpoint mismatch.
+    let detail;
+    if (provider === 'qwen') {
+      const isSp = /^sk-sp-/i.test(credential.key);
+      const usingTokenPlan = credential.baseUrl.includes('token-plan');
+      const mismatch = isSp !== usingTokenPlan;
+      const expected = inferQwenBaseUrl(credential.key);
+      if (mismatch) detail = `Key 与端点不配套：你填的 Key 是「${isSp ? 'Token Plan 订阅版（sk-sp-）' : '按量付费版（sk-）'}」，但端点用的是 ${credential.baseUrl}。请在下方端点选择「${isSp ? 'Token Plan 个人版' : '按量付费 DashScope'}」，或直接填 ${expected}`;
+      else if (error.message==='HTTP 401') detail=`服务商拒绝认证（HTTP 401）：请检查 Key 是否正确、未过期、未被撤销。（当前端点 ${credential.baseUrl}）`;
+      else if (error.message==='HTTP 403') detail=`服务商拒绝访问（HTTP 403）：该套餐可能不含模型 ${credential.model}，或来源受限。（当前端点 ${credential.baseUrl}）`;
+      else detail=error.name==='AbortError'?'验证请求超时，请稍后重试。':`验证失败：${error.message}`;
+      return { valid:false, message:detail, endpoint:credential.baseUrl, model:credential.model };
+    }
+    detail=error.message==='HTTP 401'?'服务商拒绝认证（HTTP 401）：请检查 Key 类型、权限或是否已撤销。':error.message==='HTTP 403'?'服务商拒绝访问（HTTP 403）：请检查套餐权限或来源限制。':error.name==='AbortError'?'验证请求超时，请稍后重试。':`验证失败：${error.message}`;
+    return { valid:false, message:detail };
+  }
+}
+const COINGECKO_USAGE_TTL = 5 * 60_000;
+async function coinGeckoUsage() {
+  if (!COINGECKO_API_KEY) return { available:false, reason:'未保存 CoinGecko API key' };
+  const cacheKey='coingecko-usage', hit=cache.get(cacheKey), now=Date.now();
+  if (hit && now-hit.time<COINGECKO_USAGE_TTL) return cacheResult(hit,now);
+  try {
+    const data=await request('https://api.coingecko.com/api/v3/key',8_000,{ 'x-cg-demo-api-key':COINGECKO_API_KEY });
+    const monthlyLimit=Number(data.api_key_monthly_call_credit ?? data.monthly_call_credit);
+    const used=Number(data.api_key_current_total_monthly_calls ?? data.current_total_monthly_calls);
+    const remaining=Number(data.current_remaining_monthly_calls ?? (Number.isFinite(monthlyLimit)&&Number.isFinite(used) ? monthlyLimit-used : NaN));
+    const usage={ available:true, plan:data.plan || 'Demo', monthlyLimit:Number.isFinite(monthlyLimit)?monthlyLimit:null, used:Number.isFinite(used)?used:null, remaining:Number.isFinite(remaining)?remaining:null,
+      rateLimit:Number(data.api_key_rate_limit_request_per_minute ?? data.rate_limit_request_per_minute) || null, fetchedAt:now, refreshMs:COINGECKO_USAGE_TTL };
+    remember(cacheKey,usage); return usage;
+  } catch(error) {
+    // Free Demo keys can authenticate successfully while the account-usage
+    // endpoint remains unavailable.  Verify with the documented ping endpoint
+    // and report usage as unavailable rather than falsely calling the key bad.
+    if(error.message==='HTTP 401') try { await request(`https://api.coingecko.com/api/v3/ping?x_cg_demo_api_key=${encodeURIComponent(COINGECKO_API_KEY)}`,8_000); return { available:true, plan:'Demo', monthlyLimit:null, used:null, remaining:null, rateLimit:null, fetchedAt:now, refreshMs:COINGECKO_USAGE_TTL, usageUnavailable:true }; } catch {}
+    return { available:false, reason:error.name==='AbortError'?'CoinGecko 用量查询超时':error.message };
+  }
+}
 const database = new DatabaseSync(join(DATA_DIR, 'market.sqlite'));
 const alertStore = await createAlertStore();
 if (!alertStore.enabled) console.warn(`Server-side alerts disabled: ${alertStore.reason}`);
 database.exec(`
   PRAGMA journal_mode = WAL;
   PRAGMA synchronous = NORMAL;
+  PRAGMA busy_timeout = 5000;
   CREATE TABLE IF NOT EXISTS quote_snapshots (
     id INTEGER PRIMARY KEY, source TEXT NOT NULL, observed_at INTEGER NOT NULL,
     last REAL NOT NULL, open24h REAL, change_pct REAL, high24 REAL, low24 REAL
@@ -638,7 +853,7 @@ function json(res, status, body) {
     upstreamCalls: scope.upstreamCalls
   } : undefined;
   const payload = timing && body && typeof body === 'object' && !Array.isArray(body) ? { ...body, timing } : body;
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options':'nosniff', 'referrer-policy':'same-origin' });
   res.end(JSON.stringify(payload));
 }
 async function readJson(req) {
@@ -650,9 +865,26 @@ function setSessionCookie(res, session) {
   res.setHeader('set-cookie', `btc_alert_session=${encodeURIComponent(session.token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${30*86400}${secure?'; Secure':''}`);
 }
 function clearSessionCookie(res) { res.setHeader('set-cookie','btc_alert_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0'); }
+function secureCloudTransport(req, res) {
+  const forwarded=String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+  const host=String(req.headers.host || '').replace(/:\d+$/,'');
+  if(forwarded==='https'||(['127.0.0.1','localhost','::1'].includes(host)&&process.env.NODE_ENV!=='production')) return true;
+  json(res,400,{error:'账户云端服务仅接受 HTTPS 连接。'}); return false;
+}
 async function requireAlertUser(req, res) {
+  if(!secureCloudTransport(req,res)) return null;
   if(!alertStore.enabled){json(res,503,{error:'Cloud alerts unavailable',detail:alertStore.reason});return null;}
   const user=await alertStore.userFromRequest(req);if(!user){json(res,401,{error:'请先登录云端提醒账户。'});return null;}return user;
+}
+// API 接入中心的写操作默认要求登录。但千问是纯本地 AI 配置，与云端提醒账户无关：
+// 云基础设施（Postgres/Redis）停摆时若仍强制登录，本机就再也无法配置 AI，功能直接废掉。
+// 因此云端不可用时，只要传输是本机回环或 HTTPS，就放行千问的保存/清除/验证。
+// Writes to API Center normally require a login. Qwen is a purely local AI setting,
+// though: if the cloud stack is down, demanding a login would brick AI setup on this
+// machine, so we allow it over loopback or HTTPS whenever the cloud store is unavailable.
+async function requireApiCenterAccess(req, res, provider) {
+  if (provider === 'qwen' && !alertStore.enabled) return secureCloudTransport(req, res);
+  return Boolean(await requireAlertUser(req, res));
 }
 function validCandle(c) { return c && [c.time, c.open, c.high, c.low, c.close, c.volume].every(Number.isFinite); }
 function intervalFor(source, interval) {
@@ -660,13 +892,13 @@ function intervalFor(source, interval) {
   if (source === 'gate' || source === 'binance') return interval === '1h' ? '1h' : interval === '2h' ? '2h' : interval === '4h' ? '4h' : interval === '1d' ? '1d' : interval === '1w' ? '1w' : interval;
   return map[interval];
 }
-async function request(url, timeout = UPSTREAM_TIMEOUT) {
+async function request(url, timeout = UPSTREAM_TIMEOUT, extraHeaders = {}) {
   const scope = requestTiming.getStore(), started = performance.now();
   if (scope && scope.upstreamStarted === null) scope.upstreamStarted = started;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeout);
   try {
-    const r = await fetch(url, { signal: ctrl.signal, headers: { accept: 'application/json' } });
+    const r = await fetch(url, { signal: ctrl.signal, headers: { accept: 'application/json', ...extraHeaders } });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     return await r.json();
   } finally {
@@ -1052,15 +1284,19 @@ async function fedMarketSignals() {
   const key='fed-market-signals', hit=cache.get(key), now=Date.now();
   if (hit && now-hit.time<FED_MARKET_SIGNALS_TTL) return cacheResult(hit, now);
   return coalesce(key, async () => {
-    const [gold,dxy,coingecko,coinlore] = await Promise.allSettled([
+    const [gold,dxy,wti,vix,coingecko,coinlore] = await Promise.allSettled([
       yahooHistory('GC=F'),
       yahooHistory('DX-Y.NYB'),
-      request('https://api.coingecko.com/api/v3/global', 8_000),
+      yahooHistory('CL=F'),
+      yahooHistory('^VIX'),
+      request('https://api.coingecko.com/api/v3/global', 8_000, COINGECKO_API_KEY ? { 'x-cg-demo-api-key':COINGECKO_API_KEY } : {}),
       request('https://api.coinlore.net/api/global/', 8_000)
     ]);
     const market=[];
     market.push(gold.status==='fulfilled' ? dailySignal('gold','黄金指数',gold.value.quote,'Yahoo Finance') : { key:'gold', name:'黄金指数', available:false, source:'Yahoo Finance', detail:'公开行情暂不可用' });
     market.push(dxy.status==='fulfilled' ? dailySignal('dxy','美元指数',dxy.value.quote,'Yahoo Finance') : { key:'dxy', name:'美元指数', available:false, source:'Yahoo Finance', detail:'公开行情暂不可用' });
+    market.push(wti.status==='fulfilled' ? dailySignal('wti','WTI 原油',wti.value.quote,'Yahoo Finance') : { key:'wti', name:'WTI 原油', available:false, source:'Yahoo Finance', detail:'公开行情暂不可用' });
+    market.push(vix.status==='fulfilled' ? dailySignal('vix','VIX 波动率',vix.value.quote,'Yahoo Finance') : { key:'vix', name:'VIX 波动率', available:false, source:'Yahoo Finance', detail:'公开行情暂不可用' });
     const cg=coingecko.status==='fulfilled' ? coingecko.value?.data : null;
     const cl=coinlore.status==='fulfilled' ? (Array.isArray(coinlore.value) ? coinlore.value[0] : coinlore.value?.data?.[0]) : null;
     const dominance=Number(cg?.market_cap_percentage?.btc ?? cl?.btc_d);
@@ -1113,6 +1349,259 @@ async function fedMonitor() {
   try { signals=await fedMarketSignals(); }
   catch { signals={ market:[], fetchedAt:Date.now(), refreshMs:FED_MARKET_SIGNALS_TTL }; }
   return { ...calendar, events, marketSignals:signals.market, marketSignalsFetchedAt:signals.fetchedAt, marketSignalsRefreshMs:signals.refreshMs };
+}
+
+// A BTC-focused calendar has a paid-feed enhancement path, but never exposes a
+// provider key to the browser.  Official Fed/BLS dates remain the dependable
+// zero-config baseline; mempool.space supplies the native Bitcoin event.
+const INVESTMENT_CALENDAR_TTL = 5 * 60_000;
+function calendarImportance(value) {
+  const text = String(value || '').toLowerCase();
+  if (/high|3|important/.test(text)) return 'high';
+  if (/medium|2/.test(text)) return 'medium';
+  return 'low';
+}
+function numberOrText(value) {
+  return value === null || value === undefined || value === '' ? null : String(value);
+}
+function normalizeFinnhubCalendar(rows, now) {
+  const keywords = /consumer price|cpi|nonfarm|payroll|fomc|fed interest|pce|producer price|retail sales|gross domestic|jobless/i;
+  return (Array.isArray(rows) ? rows : [])
+    .filter(row => String(row.country || '').toUpperCase() === 'US' && keywords.test(String(row.event || row.name || '')))
+    .map((row, index) => {
+      const at = Date.parse(row.time || row.datetime || row.date);
+      if (!Number.isFinite(at) || at < now - 24 * 3_600_000) return null;
+      return {
+        id:`finnhub-${at}-${index}`, at, country:'US', category:'macro',
+        title:String(row.event || row.name || '美国宏观数据'), importance:calendarImportance(row.impact),
+        actual:numberOrText(row.actual), estimate:numberOrText(row.estimate), previous:numberOrText(row.prev ?? row.previous),
+        source:'Finnhub', directional:'等待实际值与预期的偏差确认',
+      };
+    }).filter(Boolean).sort((a,b) => a.at - b.at).slice(0, 30);
+}
+function xmlBlocks(text, tag) {
+  return [...String(text || '').matchAll(new RegExp(`<${tag}>[\\s\\S]*?</${tag}>`, 'gi'))].map(match => match[0]);
+}
+function newYorkTimestamp(date, time='12:00') {
+  const [year, month, day]=String(date).split('-').map(Number), [hour, minute]=String(time).split(':').map(Number);
+  if (![year,month,day,hour,minute].every(Number.isFinite)) return NaN;
+  const base=Date.UTC(year, month-1, day, hour, minute);
+  const zone=new Intl.DateTimeFormat('en-US', { timeZone:'America/New_York', timeZoneName:'longOffset' }).formatToParts(new Date(base)).find(part => part.type==='timeZoneName')?.value || 'GMT-5';
+  const offset=zone.match(/GMT([+-])(\d{1,2})(?::(\d{2}))?/);
+  if (!offset) return base + 5 * 3_600_000;
+  const minutes=(Number(offset[2]) * 60 + Number(offset[3] || 0)) * (offset[1] === '+' ? 1 : -1);
+  return base - minutes * 60_000;
+}
+function calendarDate(value) {
+  const match=String(value || '').match(/(\d{4})-(\d{2})-(\d{2})/);
+  return match ? match[0] : null;
+}
+function treasuryAuctionKey(date, term, type) {
+  return [date, term, type].map(value => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase()).join('|');
+}
+function treasuryPercent(value) {
+  if (value === null || value === undefined || String(value).trim() === '') return null;
+  const number=Number(value);
+  return Number.isFinite(number) ? `${number.toFixed(3)}%` : null;
+}
+function treasuryEasternTime(value) {
+  const match=String(value || '').trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+  if (!match) return null;
+  let hour=Number(match[1]), minute=Number(match[2]);
+  if (hour === 12) hour=0;
+  if (match[3].toUpperCase() === 'PM') hour += 12;
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+}
+function treasuryAmount(value) {
+  const number=Number(value);
+  return Number.isFinite(number) && number > 0 ? `$${(number / 1e9).toFixed(1)}B` : null;
+}
+function parseTreasuryJsonp(text) {
+  const payload=String(text || '').match(/^\s*[^\(]*\(([\s\S]*)\)\s*;?\s*$/)?.[1];
+  if (!payload) throw new Error('invalid Treasury auction-query response');
+  const result=JSON.parse(payload);
+  return Array.isArray(result?.securityList) ? result.securityList : [];
+}
+async function treasuryAuctionResults() {
+  // TreasuryDirect's official Auction Query exposes competitive results in a
+  // JSONP envelope.  A 100-row window covers the current auction cycle and
+  // provides the immediately preceding same-term auction for comparison.
+  const text=await requestText('https://www.treasurydirect.gov/TA_WS/securities/jqsearch?format=jsonp&pagesize=100&pagenum=0', 8_000);
+  const rows=parseTreasuryJsonp(text).filter(row => /note|bond/i.test(String(row.securityType || '')));
+  const byAuction=new Map(), byDateAndType=new Map(), previousByTerm=new Map();
+  for (const row of rows) {
+    const date=calendarDate(row.auctionDate);
+    const term=String(row.securityTerm || '').trim(), type=String(row.securityType || '').trim();
+    if (!date || !term || !type) continue;
+    const key=treasuryAuctionKey(date, term, type);
+    byAuction.set(key, row);
+    // Re-openings may be called “9-Year 11-Month” by the results service while
+    // the tentative schedule calls them “10-Year”.  Date + security type is
+    // unambiguous in this limited coupon-auction calendar.
+    byDateAndType.set(treasuryAuctionKey(date, '', type), row);
+    const comparableTerm=String(row.originalSecurityTerm || term).trim();
+    const termKey=treasuryAuctionKey('', comparableTerm, type);
+    const known=previousByTerm.get(termKey) || [];
+    known.push(row); previousByTerm.set(termKey, known);
+  }
+  for (const rowsForTerm of previousByTerm.values()) rowsForTerm.sort((a,b) => String(b.auctionDate || '').localeCompare(String(a.auctionDate || '')));
+  return { byAuction, byDateAndType, previousByTerm };
+}
+function blsMacroEvents(ics, now) {
+  const relevant=/consumer price index|producer price index|employment situation|employment cost index|productivity and costs|import and export price/i;
+  return String(ics || '').split('BEGIN:VEVENT').slice(1).map((block, index) => {
+    const summary=(block.match(/(?:\r?\n|^)SUMMARY(?:;[^:]+)?:([^\r\n]+)/i) || [])[1]?.replace(/\\,/g, ',').trim();
+    const rawDate=(block.match(/(?:\r?\n|^)DTSTART(?:;[^:]+)?:([0-9TZ]+)/i) || [])[1];
+    if (!summary || !rawDate || !relevant.test(summary)) return null;
+    const parts=rawDate.match(/(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2}))?/);
+    if (!parts) return null;
+    const at=Date.UTC(+parts[1], +parts[2]-1, +parts[3], +(parts[4] || 12), +(parts[5] || 0));
+    if (at < now - 24 * 3_600_000 || at > now + 50 * 86_400_000) return null;
+    const importance=/consumer price index|employment situation/i.test(summary) ? 'high' : /producer price index/i.test(summary) ? 'medium' : 'low';
+    return { id:`bls-${at}-${index}`, at, country:'US', category:'macro', title:summary, importance,
+      actual:null, estimate:null, previous:null, source:'U.S. Bureau of Labor Statistics',
+      directional:'发布前后关注实际值相对市场预期的偏差；避免将单一数据直接当作 BTC 方向信号' };
+  }).filter(Boolean);
+}
+async function treasuryCalendarEvents(now) {
+  const page=await requestText('https://home.treasury.gov/policy-issues/financing-the-government/quarterly-refunding/most-recent-quarterly-refunding-documents/', 8_000);
+  const auctionUrl=(page.match(/href\s*=\s*["']?([^\s"'>]*TentativeAuctionSchedule[^\s"'>]*\.xml)/i) || [])[1];
+  const buybackUrl=(page.match(/href\s*=\s*["']?([^\s"'>]*Tentative-Buyback-Schedule[^\s"'>]*\.xml)/i) || [])[1];
+  const fullUrl=value => value && new URL(value, 'https://home.treasury.gov').href;
+  const [auctionXml,buybackXml,auctionResults]=await Promise.all([
+    auctionUrl ? requestText(fullUrl(auctionUrl), 8_000) : '',
+    buybackUrl ? requestText(fullUrl(buybackUrl), 8_000) : '',
+    treasuryAuctionResults(),
+  ]);
+  const events=[];
+  for (const [index, block] of xmlBlocks(auctionXml, 'AuctionCalendarDate').entries()) {
+    const date=calendarDate(xmlField(block, 'AuctionDate')); if (!date) continue;
+    const term=xmlField(block, 'SecurityTermWeekYear') || '美国国债', type=xmlField(block, 'SecurityType');
+    const result=auctionResults.byAuction.get(treasuryAuctionKey(date, term, type))
+      || auctionResults.byDateAndType.get(treasuryAuctionKey(date, '', type));
+    const closingTime=treasuryEasternTime(result?.closingTimeCompetitive);
+    const at=newYorkTimestamp(date, closingTime || '12:00');
+    if (at < now - 24 * 3_600_000 || at > now + 50 * 86_400_000) continue;
+    // Bills are frequent cash-management plumbing.  Keep coupon auctions,
+    // which carry more useful duration/liquidity information, on the main BTC timeline.
+    if (!/NOTE|BOND/i.test(type)) continue;
+    const resultTerm=String(result?.originalSecurityTerm || result?.securityTerm || term);
+    const previous=(auctionResults.previousByTerm.get(treasuryAuctionKey('', resultTerm, type)) || [])
+      .find(row => calendarDate(row.auctionDate) && calendarDate(row.auctionDate) < date && treasuryPercent(row.highYield));
+    const highYield=treasuryPercent(result?.highYield), bidToCover=result?.bidToCoverRatio === '' || result?.bidToCoverRatio === undefined || result?.bidToCoverRatio === null ? NaN : Number(result.bidToCoverRatio);
+    const actual=highYield ? `中标收益率 ${highYield}${Number.isFinite(bidToCover) ? ` · 投标倍数 ${bidToCover.toFixed(2)}x` : ''}` : null;
+    const previousYield=treasuryPercent(previous?.highYield);
+    events.push({ id:`treasury-auction-${date}-${index}`, at, country:'US', category:'liquidity',
+      title:`美国 ${term} 国债拍卖${type ? ` · ${type}` : ''}`, importance:/10-Year|20-Year|30-Year/i.test(term) ? 'high' : 'medium', actual,
+      estimate:treasuryAmount(result?.offeringAmount) ? `发行规模 ${treasuryAmount(result.offeringAmount)}` : null,
+      previous:previousYield ? `上次中标收益率 ${previousYield}` : null,
+      source:actual ? 'U.S. TreasuryDirect · Auction Query（官方竞争性拍卖结果）' : closingTime ? `U.S. TreasuryDirect · Auction Query（竞争性投标截止 ${result.closingTimeCompetitive} ET）` : 'U.S. Treasury · Tentative Auction Schedule（官方结果待发布）',
+      directional:'关注中标收益率、投标倍数与尾差；拍卖日不是 BTC 的单向交易信号' });
+  }
+  for (const [index, block] of xmlBlocks(buybackXml, 'BuybackCalendarDate').entries()) {
+    const date=calendarDate(xmlField(block, 'OperationDate')); if (!date) continue;
+    const at=newYorkTimestamp(date, xmlField(block, 'OperationStartTimeEasternUS') || '12:00');
+    if (at < now - 24 * 3_600_000 || at > now + 50 * 86_400_000) continue;
+    const bucket=xmlField(block, 'PurchaseBucketName'), operation=xmlField(block, 'OperationType') || 'Treasury Buyback';
+    const maximum=Number(xmlField(block, 'MaximumPurchaseAmountDollars'));
+    events.push({ id:`treasury-buyback-${date}-${index}`, at, country:'US', category:'liquidity',
+      title:`美财政部回购 · ${operation}${bucket ? ` · ${bucket}` : ''}`, importance:/Liquidity Support/i.test(operation) ? 'high' : 'medium', actual:null,
+      estimate:Number.isFinite(maximum) ? `最高 $${(maximum / 1e9).toFixed(maximum >= 1e9 ? 1 : 2)}B` : null, previous:null,
+      source:'U.S. Treasury · Tentative Buyback Schedule', directional:'财政部回购与美联储回购操作不同；关注公布的规模、期限桶与后续利率反应' });
+  }
+  return events;
+}
+function treasuryLongEndBuybackPolicyEvent(now) {
+  // This is a one-off policy change, distinct from an individual scheduled
+  // operation.  Keep it visible only while the announced refunding-quarter
+  // policy is in force, so a historic headline does not become a fake recurring event.
+  const effective=Date.UTC(2026, 8, 9, 4), expires=Date.UTC(2026, 10, 5);
+  if (now < effective - 21 * 86_400_000 || now > expires) return [];
+  return [{ id:'treasury-long-end-buyback-increase-2026q3', at:effective, country:'US', category:'liquidity', timePrecision:'date',
+    title:'美财政部长端流动性回购上限至少翻倍', importance:'high', actual:'政策已生效', estimate:'上限 ≥$4.0B / 次', previous:'上限 $2.0B / 次',
+    source:'U.S. Treasury · Aug. 19, 2026 policy announcement',
+    directional:'适用于 10–20 年与 20–30 年名义票据的流动性支持回购；这是财政部债务管理措施，不是美联储 QE 或 repo' }];
+}
+function nextWeekdayAt(now, weekday, time) {
+  const date=new Date(now), days=(weekday-date.getUTCDay()+7)%7 || 7;
+  date.setUTCDate(date.getUTCDate()+days);
+  return newYorkTimestamp(date.toISOString().slice(0,10), time);
+}
+function eiaNextReleaseEvent(schedule, now) {
+  const text=String(schedule || '');
+  const dateFromText=value => {
+    const match=String(value).match(/^([A-Za-z]+)\.?\s+(\d{1,2}),\s*(\d{4})$/);
+    const month={january:1,jan:1,february:2,feb:2,march:3,mar:3,april:4,apr:4,may:5,june:6,jun:6,july:7,jul:7,august:8,aug:8,september:9,sep:9,sept:9,october:10,oct:10,november:11,nov:11,december:12,dec:12}[match?.[1]?.toLowerCase()];
+    return month ? `${match[3]}-${String(month).padStart(2,'0')}-${String(match[2]).padStart(2,'0')}` : null;
+  };
+  // The EIA page deliberately publishes the normal Wednesday cadence and a
+  // holiday-exception table rather than a single machine-readable next date.
+  const exception=[...text.matchAll(/<tr[^>]*>\s*<th[^>]*>\s*[A-Za-z]+\s+\d{1,2},\s+\d{4}\s*<\/th>\s*<td[^>]*>\s*([A-Za-z]+\s+\d{1,2},\s+\d{4})\s*<\/td>\s*<td[^>]*>[^<]*<\/td>\s*<td[^>]*>\s*([^<]+?)\s*<\/td>/gi)]
+    .map(match => ({ date:dateFromText(match[1]), time:match[2] })).find(row => row.date && newYorkTimestamp(row.date, /12:00/i.test(row.time) ? '12:00' : /11:00/i.test(row.time) ? '11:00' : '10:30') >= now - 60_000);
+  const normal=nextWeekdayAt(now, 3, '10:30');
+  const at=exception ? newYorkTimestamp(exception.date, /12:00/i.test(exception.time) ? '12:00' : /11:00/i.test(exception.time) ? '11:00' : '10:30') : normal;
+  return Number.isFinite(at) ? { id:`eia-wpsr-${at}`, at, country:'OIL', category:'energy', title:'EIA 美国原油库存周报', importance:'medium', actual:null, estimate:null, previous:null,
+    source:'U.S. Energy Information Administration', directional:'库存意外会先影响油价与通胀预期；再观察美元、实际利率和风险偏好联动' } : null;
+}
+function deribitExpiryEvents(payload, now) {
+  const unique=[...new Set((payload?.result || []).map(row => Number(row.expiration_timestamp)).filter(at => Number.isFinite(at) && at > now && at < now + 50 * 86_400_000))].sort((a,b) => a-b);
+  const selected=unique.filter((at,index) => index < 2 || new Date(at).getUTCDay() === 5).slice(0, 8);
+  return selected.map(at => ({ id:`deribit-btc-expiry-${at}`, at, country:'BTC', category:'crypto', title:'Deribit BTC 期权到期', importance:new Date(at).getUTCDate() > 24 ? 'high' : 'medium', actual:null, estimate:null, previous:null,
+    source:'Deribit public API', directional:'到期日可能放大短线对冲与 Gamma 影响；需结合未平仓量和隐含波动率，不预设方向' }));
+}
+async function investmentCalendar() {
+  const key = 'investment-calendar', hit = cache.get(key), now = Date.now();
+  if (hit && now - hit.time < INVESTMENT_CALENDAR_TTL) return cacheResult(hit, now);
+  return coalesce(key, async () => {
+    const official = await fedCalendar();
+    const officialEvents = (official.events || []).map(event => ({
+      id:`official-${event.key}-${event.at}`, at:event.at, country:'US', category:'macro',
+      title:event.name, importance:'high', actual:event.actual?.value || null, estimate:null, previous:null,
+      source:event.source, fallback:Boolean(event.fallback),
+      directional:'发布前后波动可能放大；等待实际值与预期的偏差确认',
+    }));
+    const requests = [
+      request('https://mempool.space/api/v1/difficulty-adjustment', 8_000),
+      FINNHUB_API_KEY ? request(`https://finnhub.io/api/v1/calendar/economic?from=${new Date(now).toISOString().slice(0,10)}&to=${new Date(now + 31 * 86_400_000).toISOString().slice(0,10)}&token=${encodeURIComponent(FINNHUB_API_KEY)}`, 8_000) : Promise.resolve(null),
+      requestText('https://www.bls.gov/schedule/news_release/bls.ics', 8_000),
+      treasuryCalendarEvents(now),
+      requestText('https://www.eia.gov/petroleum/supply/weekly/schedule.php', 8_000),
+      EIA_API_KEY ? request(`https://api.eia.gov/v2/petroleum/pri/spt/data/?api_key=${encodeURIComponent(EIA_API_KEY)}&frequency=weekly&data[0]=value&length=1`,8_000) : Promise.resolve(null),
+      request('https://www.deribit.com/api/v2/public/get_instruments?currency=BTC&kind=option&expired=false', 8_000),
+    ];
+    const [difficulty, finnhub, blsIcs, treasury, eia, eiaActual, deribit] = await Promise.allSettled(requests);
+    const chainEvents = [];
+    if (difficulty.status === 'fulfilled') {
+      const raw = difficulty.value || {}, at = Number(raw.estimatedRetargetDate);
+      if (Number.isFinite(at) && at > now - 24 * 3_600_000) chainEvents.push({
+        id:`difficulty-${at}`, at, country:'BTC', category:'chain', title:'BTC 挖矿难度调整', importance:'medium',
+        actual:null, estimate:Number.isFinite(Number(raw.difficultyChange)) ? `${Number(raw.difficultyChange).toFixed(2)}%` : null,
+        previous:null, source:'mempool.space', directional:'链上供给节奏事件；不单独构成方向信号',
+      });
+    }
+    const premium = finnhub.status === 'fulfilled' && finnhub.value
+      ? normalizeFinnhubCalendar(finnhub.value.economicCalendar || finnhub.value.calendar || [], now) : [];
+    const macroEvents=blsIcs.status === 'fulfilled' ? blsMacroEvents(blsIcs.value, now) : [];
+    const liquidityEvents=treasury.status === 'fulfilled' ? treasury.value : [];
+    const policyEvents=treasuryLongEndBuybackPolicyEvent(now);
+    const energyEvent=eia.status === 'fulfilled' ? eiaNextReleaseEvent(eia.value, now) : null;
+    const eiaRow=eiaActual.status === 'fulfilled' ? (eiaActual.value?.response?.data?.[0] || eiaActual.value?.data?.[0]) : null;
+    if(energyEvent && eiaRow?.value !== undefined && eiaRow?.value !== null) { energyEvent.actual=String(eiaRow.value); energyEvent.source='U.S. Energy Information Administration · API Key'; }
+    const energyEvents=[energyEvent].filter(Boolean);
+    const derivativesEvents=deribit.status === 'fulfilled' ? deribitExpiryEvents(deribit.value, now) : [];
+    const cotAt=nextWeekdayAt(now, 5, '15:30');
+    const positioningEvents=[{ id:`cftc-cot-${cotAt}`, at:cotAt, country:'GLOBAL', category:'risk', title:'CFTC COT · 黄金/WTI 持仓', importance:'low', actual:null, estimate:null, previous:null,
+      source:'U.S. Commodity Futures Trading Commission · publication cadence', directional:'周度持仓用于识别拥挤与跨资产风险偏好，发布滞后于持仓截点，不能作为即时信号' }];
+    // Finnhub is authoritative for consensus fields when configured; retain
+    // official dates for items it does not return or while the feed is absent.
+    const events = [...premium, ...officialEvents.filter(item => !premium.some(row => Math.abs(row.at - item.at) < 18 * 3_600_000 && /cpi|payroll|fomc|fed/i.test(`${row.title} ${item.title}`))), ...macroEvents, ...policyEvents, ...liquidityEvents, ...energyEvents, ...positioningEvents, ...chainEvents, ...derivativesEvents]
+      .filter((event, index, rows) => !rows.slice(0,index).some(row => Math.abs(row.at-event.at) < 3_600_000 && row.category===event.category && (row.title===event.title || (event.category==='macro' && row.source===event.source))))
+      .sort((a,b) => a.at - b.at).slice(0, 48);
+    const result = { events, fetchedAt:now, refreshMs:INVESTMENT_CALENDAR_TTL, cached:false,
+      provider:{ finnhubConfigured:Boolean(FINNHUB_API_KEY), finnhubAvailable:Boolean(FINNHUB_API_KEY) && finnhub.status === 'fulfilled', officialSources:official.sources || [], treasuryAvailable:treasury.status === 'fulfilled', energyAvailable:eia.status === 'fulfilled', eiaKeyAvailable:Boolean(EIA_API_KEY) && eiaActual.status === 'fulfilled', derivativesAvailable:deribit.status === 'fulfilled', chainAvailable:difficulty.status === 'fulfilled' },
+      disclaimer:'日历用于识别风险窗口与宏观驱动，不构成投资建议。财政部日程为暂定表，操作规模以当日官方公告为准；所有时间均以 UTC 保存，界面默认显示北京时间，也可切换 UTC。' };
+    remember(key, result); return result;
+  });
 }
 async function binanceHistory(interval, limit = 1000) {
   const rows = await request(`https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${interval}&limit=${limit}`, 8_000);
@@ -1596,6 +2085,13 @@ async function market(interval, limit, preferred) {
     throw error;
   }
 }
+// AI 助手复用本文件已经写好的数据函数，不另起一套采集逻辑。
+// The AI assistant reuses the data functions above instead of duplicating them.
+const aiChat = createAiChat({
+  market, liveQuote, marketContext, fearGreedSentiment, fedMonitor, investmentCalendar,
+  getCredential: (provider) => (provider === 'qwen' ? qwenCredential() : null),
+  setModel: (model) => setQwenModel(model)
+});
 const mime = { '.html':'text/html; charset=utf-8', '.js':'text/javascript; charset=utf-8', '.css':'text/css; charset=utf-8', '.svg':'image/svg+xml', '.png':'image/png', '.ico':'image/x-icon' };
 async function edgeTtsAudio(text, voice='zh-CN-XiaoxiaoNeural') {
   const chunks=[];
@@ -1604,7 +2100,37 @@ async function edgeTtsAudio(text, voice='zh-CN-XiaoxiaoNeural') {
 }
 http.createServer((req, res) => requestTiming.run({ started:performance.now(), upstreamStarted:null, upstreamEnded:null, upstreamCalls:0 }, async () => {
  try {
-  const url = new URL(req.url, `http://${req.headers.host}`);
+ const url = new URL(req.url, `http://${req.headers.host}`);
+  if (await aiChat.handle({ req, res, url, readJsonBody:readJson, json, clientKey:req.socket.remoteAddress || 'local' })) return;
+  if (url.pathname === '/api/api-center/verify' && req.method === 'POST') {
+    let provider=null;
+    try { ({ provider } = await readJson(req)); }
+    catch(error) { json(res,error.statusCode||400,{error:error.message}); return; }
+    if(!await requireApiCenterAccess(req,res,provider)) return;
+    try { json(res,200,await verifyApiCredential(provider)); }
+    catch(error) { json(res,error.statusCode||500,{error:error.message}); }
+    return;
+  }
+  if (url.pathname === '/api/api-center') {
+    try {
+      if (req.method === 'GET') { json(res,200,{credentials:apiCredentialStatus(),verification:apiCredentialVerification(),coinGeckoUsage:await coinGeckoUsage()}); return; }
+      // API settings control server-side outbound credentials.  Reading their
+      // boolean status is safe, but every mutation is an authenticated,
+      // HTTPS-only account action.
+      if (req.method === 'PUT') {
+        const body=await readJson(req);
+        if(!await requireApiCenterAccess(req,res,body.provider)) return;
+        saveApiCredential(body.provider,body.key,body.url,body.model); json(res,200,{ok:true,credentials:apiCredentialStatus()}); return;
+      }
+      if (req.method === 'DELETE') {
+        const provider=url.searchParams.get('provider');
+        if(!await requireApiCenterAccess(req,res,provider)) return;
+        deleteApiCredential(provider); json(res,200,{ok:true,credentials:apiCredentialStatus()}); return;
+      }
+      json(res,405,{error:'GET, PUT or DELETE required'});
+    } catch(error) { json(res,error.statusCode||500,{error:error.message}); }
+    return;
+  }
   if (url.pathname === '/api/alerts/health') { json(res,200,{enabled:alertStore.enabled,reason:alertStore.reason||null}); return; }
   if (url.pathname === '/api/voice/edge' && req.method==='POST') {
     try {
@@ -1678,14 +2204,16 @@ http.createServer((req, res) => requestTiming.run({ started:performance.now(), u
     return;
   }
   if (url.pathname === '/api/auth/register' && req.method === 'POST') {
+    if(!secureCloudTransport(req,res))return;
     if(!alertStore.enabled){json(res,503,{error:'Cloud alerts unavailable',detail:alertStore.reason});return;}
     try { const result=await alertStore.register(...(({email,password})=>[email,password])(await readJson(req))); setSessionCookie(res,result.session); json(res,201,{user:result.user}); } catch(error) { json(res,error.statusCode||500,{error:error.message}); } return;
   }
   if (url.pathname === '/api/auth/login' && req.method === 'POST') {
+    if(!secureCloudTransport(req,res))return;
     if(!alertStore.enabled){json(res,503,{error:'Cloud alerts unavailable',detail:alertStore.reason});return;}
     try { const result=await alertStore.login(...(({email,password})=>[email,password])(await readJson(req))); setSessionCookie(res,result.session); json(res,200,{user:result.user}); } catch(error) { json(res,error.statusCode||500,{error:error.message}); } return;
   }
-  if (url.pathname === '/api/auth/logout' && req.method === 'POST') { if(alertStore.enabled) await alertStore.logout(req); clearSessionCookie(res); json(res,204,{}); return; }
+  if (url.pathname === '/api/auth/logout' && req.method === 'POST') { if(!secureCloudTransport(req,res))return; if(alertStore.enabled) await alertStore.logout(req); clearSessionCookie(res); json(res,204,{}); return; }
   if (url.pathname === '/api/auth/me') { const user=await requireAlertUser(req,res); if(user) json(res,200,{user,hasSendKey:await alertStore.hasSendKey(user.id)}); return; }
   if (url.pathname === '/api/account/profile') {
     const user=await requireAlertUser(req,res); if(!user)return;
@@ -1744,6 +2272,11 @@ http.createServer((req, res) => requestTiming.run({ started:performance.now(), u
     catch (e) { json(res, 503, { error:'Federal Reserve calendar unavailable', detail:e.message }); }
     return;
   }
+  if (url.pathname === '/api/investment-calendar') {
+    try { json(res, 200, await investmentCalendar()); }
+    catch (e) { json(res, 503, { error:'Investment calendar unavailable', detail:e.message }); }
+    return;
+  }
   if (url.pathname === '/api/forecast-history') {
     const key = 'forecast-history', force = url.searchParams.get('refresh') === '1'; const hit = cache.get(key);
     try {
@@ -1788,7 +2321,11 @@ http.createServer((req, res) => requestTiming.run({ started:performance.now(), u
   try {
     const file = join(PUBLIC, relative);
     const body = await readFile(file);
-    const immutable = url.searchParams.has('v') || url.searchParams.has('t');
+    // The dashboard's legacy HTML uses long-lived version query strings for
+    // app.js/styles.css. Keep those two entry assets revalidatable locally so a
+    // service restart can deliver feature updates without asking users to clear
+    // a browser cache; fingerprinted images/fonts remain immutable.
+    const immutable = (url.searchParams.has('v') || url.searchParams.has('t')) && !['app.js', 'styles.css'].includes(relative);
     res.writeHead(200, { 'content-type': mime[extname(file)] || 'application/octet-stream', 'cache-control': immutable ? 'public, max-age=31536000, immutable' : 'no-cache' });
     res.end(body);
   } catch (readError) {

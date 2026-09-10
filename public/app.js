@@ -6,6 +6,7 @@ function showAppDialog({
   confirmText = "我知道了",
   cancelText = "",
   onConfirm,
+  onCancel,
 } = {}) {
   let modal = $("appDialog");
   if (!modal) {
@@ -20,6 +21,7 @@ function showAppDialog({
   const close = () => {
     modal.hidden = true;
     modal._onConfirm = null;
+    modal._onCancel = null;
   };
   modal.querySelector("header b").textContent = title;
   modal.querySelector(".notice-body p").textContent = String(message);
@@ -29,8 +31,13 @@ function showAppDialog({
   cancel.textContent = cancelText;
   confirm.textContent = confirmText;
   modal._onConfirm = onConfirm || null;
+  modal._onCancel = onCancel || null;
   modal.querySelector("header button").onclick = close;
-  cancel.onclick = close;
+  cancel.onclick = () => {
+    const action = modal._onCancel;
+    close();
+    action?.();
+  };
   confirm.onclick = () => {
     const action = modal._onConfirm;
     close();
@@ -98,6 +105,13 @@ const time = (ms) =>
     hour: "2-digit",
     minute: "2-digit",
   }).format(ms);
+/* 主图 X 轴时间标签格式化；短周期显示 HH:mm，跨天或长周期追加 MM-DD。 */
+function formatTimeAxisLabel(ms, showDate) {
+  const d = new Date(ms);
+  const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  if (!showDate) return hm;
+  return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${hm}`;
+}
 async function apiFetch(url, timeout = 8_000) {
   const controller = new AbortController(),
     timer = setTimeout(() => controller.abort(), timeout);
@@ -165,7 +179,10 @@ function atr(data, p = 14) {
   }
   return out;
 }
-function metrics(data) {
+/* livePrice is optional: when given, the panel stops lagging one full candle.
+   Pass the live quote only for the headline signal, not for confirmation
+   intervals, so cross-interval checks stay on a consistent closed-candle basis. */
+function metrics(data, livePrice) {
   const closes = data.map((x) => x.close),
     e20 = ema(closes, 20),
     e50 = ema(closes, 50),
@@ -179,13 +196,36 @@ function metrics(data) {
       closes.slice(-20).reduce((s, x) => s + (x - basis) ** 2, 0) / 20,
     );
   const bb = (closes[i] - (basis - 2 * sd)) / (4 * sd || 1);
+  const atrV = at[i] || 1,
+    atrPct = (atrV / closes[i]) * 100,
+    mom5 = closes.length > 5 ? (closes[i] / closes[i - 5] - 1) * 100 : 0;
   let score = 0;
   score += e20[i] > e50[i] ? 25 : -25;
   score += closes[i] > e50[i] ? 20 : -20;
   score += Number.isFinite(e200[i]) ? (closes[i] > e200[i] ? 20 : -20) : 0;
-  score += Math.max(-15, Math.min(15, (macd / (closes[i] * 0.0015)) * 15));
+  /* ATR-normalised. The old close*0.0015 denominator (~118 at 78k) pinned this
+     term near zero on BTC, so MACD never moved the score. */
+  score += Math.max(-15, Math.min(15, (macd / (atrV * 1.2)) * 15));
   score += Math.max(-10, Math.min(10, (rs[i] - 50) / 2.5));
   score += Math.max(-10, Math.min(10, (bb - 0.5) * 20));
+  /* Damp (never flip) the score when the most recent direction opposes it. The
+     live quote counts 1.5x because it is the freshest evidence the user sees —
+     this is what stops a falling price from still reading "long". Damping is
+     one-sided by design: it can only abstain, never reverse a direction, which
+     is why 1h accuracy survives (backtest: 52.4% -> 50.8%). */
+  const driftPct =
+      Number.isFinite(livePrice) && livePrice > 0
+        ? ((livePrice - closes[i]) / closes[i]) * 100
+        : 0,
+    recentDir = mom5 + driftPct * 1.5;
+  let damped = 1;
+  if (
+    score !== 0 &&
+    recentDir !== 0 &&
+    Math.sign(score) !== Math.sign(recentDir)
+  )
+    score *= (damped =
+      1 - 0.5 * Math.min(1, Math.abs(recentDir) / (atrPct * 1.5 || 0.1)));
   return {
     close: closes[i],
     e20: e20[i],
@@ -195,6 +235,11 @@ function metrics(data) {
     atr: at[i],
     macd,
     bb,
+    mom5,
+    atrPct,
+    driftPct,
+    recentDir,
+    damped,
     score: Math.round(score),
   };
 }
@@ -978,16 +1023,21 @@ function applyAmbientLight() {
   document.documentElement.dataset.ambientTime = ambientTime;
 }
 function syncFullscreenButton() {
-  const b = $("fullscreenToggle");
-  if (!b) return;
-  const active = !!(
+  const b = $("fullscreenToggle"),
+    active = !!(
       document.fullscreenElement || document.webkitFullscreenElement
-    ),
-    label = active ? locale().exitFullscreen : locale().fullscreen;
-  b.textContent = active ? "⤢ " + label : "⛶ " + label;
-  b.title = label;
-  b.setAttribute("aria-label", label);
-  b.setAttribute("aria-pressed", String(active));
+    );
+  if (b) {
+    const label = active ? locale().exitFullscreen : locale().fullscreen;
+    b.textContent = active ? "⤢ " + label : "⛶ " + label;
+    b.title = label;
+    b.setAttribute("aria-label", label);
+    b.setAttribute("aria-pressed", String(active));
+  }
+  // 全屏时把页面顶部 header（标题/账户/全屏按钮等）也藏掉，
+  // 让画面只留图表与指标区。ESC 退出时浏览器 fullscreenchange
+  // 会再次回调本函数，自动把 class 撤掉、header 恢复。
+  document.documentElement.classList.toggle("is-fullscreen", active);
 }
 async function toggleFullscreen() {
   const active = document.fullscreenElement || document.webkitFullscreenElement;
@@ -1118,7 +1168,125 @@ function updateClocks() {
   fullscreen.type = "button";
   const theme = document.createElement("button");
   theme.id = "themeToggle";
-  controls.append(lang, fullscreen, theme);
+  const apiCenter = document.createElement("button");
+  apiCenter.id = "apiCenterToggle";
+  apiCenter.type = "button";
+  apiCenter.textContent = "API 接入中心";
+  apiCenter.title = "管理数据源 API 接入";
+  controls.append(apiCenter, lang, fullscreen, theme);
+  const apiCenterModal=document.createElement("div");
+  apiCenterModal.id="apiCenterModal";
+  apiCenterModal.className="alert-composer api-center-modal";
+  apiCenterModal.hidden=true;
+  document.body.append(apiCenterModal);
+  const apiCenterRequest=async(path, options={})=>{const response=await fetch(path,{...options,headers:{'content-type':'application/json',...(options.headers||{})}}),body=await response.json().catch(()=>({}));if(!response.ok)throw new Error(body.error||"请求失败");return body;};
+  const apiCenterFree=[['市场行情','OKX · Coinbase · Binance · Gate','无需填入'],['宏观日程','美联储 · BLS 日程 · 美国财政部 · EIA 发布时间 · CFTC','无需填入'],['加密与链上','mempool.space · Deribit 公共行情 · CoinLore · Alternative.me','无需填入'],['市场环境','Yahoo Finance（公开入口）','无需填入']];
+  const apiCenterOptional=[['coingecko','CoinGecko','加密市场总市值、BTC 占比','可以填入高级或升级版的 API key，如果不填，就默认使用已接入的免费版'],['eia','EIA','原油库存的完整实际值与历史数据','可填写免费 EIA API key；不填仍默认使用已接入的 EIA 发布时间日历'],['custom','自定义 HTTPS API','手动订阅的数据源地址与可选 API Key','仅接受 HTTPS 地址；地址和 Key 均以相同的服务端加密逻辑保存，不会回显']];
+  // 千问 mini 额度卡的渲染：复用 /api/ai/quota，单函数一处渲染全部字段。
+  // Qwen mini quota renderer: reuses /api/ai/quota, a single function covers all fields.
+  const renderApiQwenQuota=async(card)=>{
+    if(!card)return;
+    const fill=card.querySelector('.api-qwen-quota-fill');
+    const pct=card.querySelector('.api-qwen-quota-pct');
+    const meta=card.querySelector('.api-qwen-quota-meta');
+    let payload=null;
+    try { const res=await fetch('/api/ai/quota'); if(res.ok)payload=await res.json(); } catch {}
+    if(!payload||!payload.configured){ card.setAttribute('data-empty','true'); pct.textContent='—'; fill.style.width='0%'; meta.textContent='保存 Key 后再提问一次即可显示额度'; return; }
+    const remote=payload.remote,local=payload.local||{};
+    // 千问 API 不返回实时额度响应头，本地按模型换算表估算 credits 消耗。
+    // Qwen API does not surface live quota headers; we estimate from the model conversion table.
+    const estimateLimit=2500; // Token Plan Lite 默认值（按截图用户用的是 Lite 套餐）
+    const estCredits=Number(local.estimatedCredits||0);
+    const estPctRemaining=estCredits>0?Math.max(0,Math.min(100,(1-estCredits/estimateLimit)*100)):null;
+    if(remote&&remote.limit!=null&&remote.remaining!=null){
+      const remainingPct=Math.max(0,Math.min(100,remote.percentRemaining));
+      const usedPct=100-remainingPct;
+      fill.style.width=remainingPct+'%';
+      fill.setAttribute('data-level',remainingPct>50?'ok':remainingPct>20?'mid':'low');
+      card.setAttribute('data-empty','false');
+      pct.textContent=remainingPct.toFixed(1)+'%';
+      const usedNum=Number.isFinite(remote.used)?remote.used.toLocaleString():'—';
+      const limitNum=Number.isFinite(remote.limit)?remote.limit.toLocaleString():'—';
+      const cd=local.countdownMs?(()=>{const ms=local.countdownMs,totalMin=Math.floor(ms/60000),d=Math.floor(totalMin/1440),h=Math.floor((totalMin%1440)/60);return d>0?d+'d '+h+'h':h>0?h+'h':Math.max(1,totalMin)+'m';})():null;
+      const resetAt=remote.resetAt?(new Date(remote.resetAt)).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):null;
+      meta.innerHTML=`剩余 <b>${remote.remaining.toLocaleString()}</b> / ${limitNum}（${usedNum} 已用 · ${usedPct.toFixed(1)}%）${resetAt?` · 重置 ${resetAt}`:''}${cd?` · ${cd} 后`:''} · 累计 ${local.calls||0} 次 / ${(local.totalTokens||0).toLocaleString()} tokens`;
+    } else if(local.calls){
+      // 没有远程响应头，用本地估算显示。进度条按 Lite 套餐 2,500 credits 估算。
+      // No remote headers: render the local estimate. The bar compares against the Lite plan's 2,500 credits.
+      if(estPctRemaining!=null){
+        fill.style.width=estPctRemaining+'%';
+        fill.setAttribute('data-level',estPctRemaining>50?'ok':estPctRemaining>20?'mid':'low');
+        pct.textContent=estPctRemaining.toFixed(1)+'%';
+        card.setAttribute('data-empty','false');
+      } else {
+        fill.style.width='0%';
+        fill.removeAttribute('data-level');
+        pct.textContent='—';
+        card.setAttribute('data-empty','true');
+      }
+      const cd=local.countdownMs?(()=>{const ms=local.countdownMs,totalMin=Math.floor(ms/60000),d=Math.floor(totalMin/1440),h=Math.floor((totalMin%1440)/60);return d>0?d+'d '+h+'h':h>0?h+'h':Math.max(1,totalMin)+'m';})():null;
+      const resetTxt=local.periodEnd?(new Date(local.periodEnd)).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):null;
+      meta.innerHTML=`估算已用 <b>${estCredits.toFixed(1)}</b> credits / ${estimateLimit}（本地估算 · Token Plan Lite 默认） · 累计 ${local.calls} 次 / ${(local.totalTokens||0).toLocaleString()} tokens${resetTxt?` · 重置 ${resetTxt}`:''}${cd?`（${cd}）`:''} · <span style="color:#ffcb69">精确剩余请到 Token Plan 控制台查看</span>`;
+    } else {
+      card.setAttribute('data-empty','true');
+      pct.textContent='—';
+      fill.style.width='0%';
+      meta.textContent='尚未调用千问，额度无数据';
+    }
+  };
+  const renderApiCenter=async()=>{
+    let credentials={},verification={},coinGeckoUsage=null; try { const payload=await apiCenterRequest('/api/api-center'); credentials=payload.credentials||{}; verification=payload.verification||{}; coinGeckoUsage=payload.coinGeckoUsage||null; } catch {}
+    const free=apiCenterFree.map(([group,name,note])=>`<article class="api-center-row free"><div><b>${group}</b><span>${name}</span></div><em>${note}</em></article>`).join('');
+    // 千问配置需要模型列表与当前选择，单独从 AI 配置接口取。
+    // The Qwen card needs the model list and current choice, fetched from the AI config endpoint.
+    let aiConfig={configured:false,model:'',models:[]}; try { aiConfig=await (await fetch('/api/ai/config')).json(); } catch {}
+    // 模型下拉：只列可用于问答的文本模型，并标出额度档位（省 / 中 / 贵）。
+    // Model picker: only chat-capable text models, tagged with their credit tier.
+    const qwenTierTag={value:'省',balanced:'中',flagship:'贵'};
+    const qwenModels=(aiConfig.models||[]).filter(entry=>entry.usable!==false).map(entry=>{const tag=qwenTierTag[entry.tier]||'';return `<option value="${calendarEscape(entry.id)}"${entry.id===aiConfig.model?' selected':''}>${calendarEscape(entry.label)}${tag?' · '+tag:''}${entry.recommended?'（推荐）':''}</option>`;}).join('');
+    // 端点快捷选择：千问两套体系（按量付费 / Token Plan 订阅），端点与 Key 必须配套。
+    // Endpoint picker: Qwen has two isolated systems and the endpoint must match the key.
+    const qwenEndpoints=(aiConfig.endpoints||[]).map(entry=>`<option value="${calendarEscape(entry.baseUrl)}"${entry.baseUrl===aiConfig.baseUrl?' selected':''}>${calendarEscape(entry.label)}</option>`).join('');
+    const qwenEndpointNote=aiConfig.baseUrl?`<p class="api-endpoint-note">当前端点：<code>${calendarEscape(aiConfig.baseUrl)}</code> · 识别为${aiConfig.keyKind==='token-plan'?'Token Plan 订阅 Key（sk-sp-）':'按量付费 Key（sk-）'}${aiConfig.mismatch?'<b class="api-endpoint-warn"> · ⚠️ 与 Key 前缀不匹配，调用会返回 401</b>':''}${aiConfig.autoCorrected?'<b class="api-endpoint-warn"> · 已自动纠正为匹配端点</b>':''}</p>`:'';
+    // 千问额度小卡：进度条 + 剩余 % + 倒计时，与右下角 AI 助手面板同源。
+    // Qwen quota mini card: bar + remaining % + countdown, mirrors the chat-panel source.
+    const qwenQuotaMarkup=`<div class="api-qwen-quota" data-empty="true"><div class="api-qwen-quota-bar"><div class="api-qwen-quota-fill"></div></div><span class="api-qwen-quota-pct">—</span><span class="api-qwen-quota-meta">尚未调用千问，额度无数据</span></div>`;
+    const qwen=`<article class="api-center-row"><div><b>千问 Qwen<small>AI 行情助手</small>${verification.qwen?'<span class="badge bull api-verified">已验证</span>':''}</b><span>为右下角 AI 助手提供行情解读与涨跌判断；默认 <code>${calendarEscape(aiConfig.defaultModel||'qwen3.8-flash')}</code>，额度消耗约为旗舰的 1/15</span><p>两种 Key 体系，<b>端点必须配套</b>，混用一律 401：① 按量付费（<code>sk-</code> / <code>sk-ws-</code>）→ DashScope 端点；② Token Plan 个人版订阅（<code>sk-sp-</code>）→ Token Plan 端点。Token Plan 的 Key 在「我的订阅」页面生成，只完整显示一次。Key 仅以服务端加密方式保存，不会回显。</p>${qwenEndpointNote}${qwenQuotaMarkup}</div><form data-api-provider="qwen" autocomplete="off"><input name="key" type="password" autocomplete="new-password" placeholder="${credentials.qwen?'已保存，重新填写以更新':'sk-… / sk-sp-… 千问 API Key'}" data-1p-ignore="true" data-lpignore="true" ${credentials.qwen?'data-saved="true"':''}><label>模型<select name="model">${qwenModels}</select></label><label>端点类型<select name="endpoint" class="qwen-endpoint"><option value="">按 Key 前缀自动匹配（推荐）</option>${qwenEndpoints}</select></label><label>API 地址（可选，留空自动匹配）<input name="url" type="url" inputmode="url" autocomplete="off" aria-label="Qwen compatible endpoint" placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1"></label><button>${credentials.qwen?'更新 Key':'保存 Key'}</button><button type="button" class="api-verify-qwen">验证 Key</button>${credentials.qwen?'<button type="button" class="api-clear">清除</button>':''}</form></article>`;
+    const coinGeckoUsageMarkup=(()=>{if(!credentials.coingecko)return '<div class="coingecko-usage muted">保存 CoinGecko Demo Key 后显示月度额度统计。</div>';if(!coinGeckoUsage?.available)return `<div class="coingecko-usage error">额度暂不可用：${calendarEscape(coinGeckoUsage?.reason||'请稍后重试')}</div>`;const used=coinGeckoUsage.used,limit=coinGeckoUsage.monthlyLimit,remaining=coinGeckoUsage.remaining,pct=Number.isFinite(used)&&Number.isFinite(limit)&&limit>0?Math.min(100,used/limit*100):0,next=new Date();next.setMonth(next.getMonth()+1,1);next.setHours(0,0,0,0);return `<div class="coingecko-usage"><div><b>CoinGecko 月度额度 · ${calendarEscape(coinGeckoUsage.plan)}</b><strong>${Number.isFinite(pct)?pct.toFixed(1):'--'}%</strong></div><i><span style="width:${pct}%"></span></i><p>${Number.isFinite(used)?used.toLocaleString():'--'} 已用 · ${Number.isFinite(remaining)?remaining.toLocaleString():'--'} 剩余 · 月度总额 ${Number.isFinite(limit)?limit.toLocaleString():'--'}</p><small>${coinGeckoUsage.rateLimit?`限额 ${coinGeckoUsage.rateLimit}/分钟 · `:''}下次重置 ${next.toLocaleDateString('zh-CN')} · 统计缓存 5 分钟</small></div>`;})();
+    const optional=apiCenterOptional.map(([id,name,scope,hint])=>`<article class="api-center-row"><div><b>${name}<small>可选升级（默认免费）</small>${verification[id]?'<span class="badge bull api-verified">已验证</span>':''}</b><span>${scope}</span><p>${hint}</p>${id==='coingecko'?coinGeckoUsageMarkup:''}</div><form data-api-provider="${id}" autocomplete="off">${id==='custom'?`<label>API URL<input name="url" type="url" inputmode="url" autocomplete="url" aria-label="HTTPS API URL" placeholder="https://api.example.com/v1/data" data-1p-ignore="true" data-lpignore="true" ${credentials[id]?'data-saved="true"':''}></label><label>API Key（${credentials[id]?'重新填写以更新':'可选'}）<input name="key" type="password" autocomplete="new-password" aria-label="Optional API key" placeholder="可选 API Key（不会回显）" data-1p-ignore="true" data-lpignore="true"></label>`:`<input name="key" type="password" autocomplete="off" placeholder="${hint}" ${credentials[id]?'data-saved="true"':''}>`}<button>${credentials[id]?'更新':'保存'}${id==='custom'?'配置':' Key'}</button>${credentials[id]&&id!=='custom'?'<button type="button" class="api-verify">验证 Key</button>':''}${credentials[id]?'<button type="button" class="api-clear">清除</button>':''}</form></article>`).join('');
+    apiCenterModal.innerHTML=`<section role="dialog" aria-modal="true" aria-labelledby="apiCenterTitle"><header><div><b id="apiCenterTitle">API 接入中心</b><small>密钥仅保存于本机服务端，不会回显到浏览器</small></div><button type="button" data-close-api-center aria-label="关闭">×</button></header><div class="api-center-body"><h3>默认免费（无需填入）</h3>${free}<h3>可选升级（默认免费）</h3>${optional}<h3>AI 大模型（可选）</h3>${qwen}<h3>付费数据（可选）</h3><article class="api-center-row required"><div><b>Finnhub Economic Calendar<small>付费套餐</small>${verification.finnhub?'<span class="badge bull api-verified">Key 已验证</span>':''}</b><span>宏观实际值、市场一致预期、前值</span><p>免费 Key 可验证基础行情，但 Economic Calendar 需要付费套餐；未开通时自动使用内置公开宏观日历。</p></div><form data-api-provider="finnhub"><input name="key" type="password" autocomplete="off" placeholder="可选：仅付费套餐可启用 Economic Calendar" ${credentials.finnhub?'data-saved="true"':''}><button>${credentials.finnhub?'更新 Key':'保存 Key'}</button>${credentials.finnhub?'<button type="button" class="api-verify">验证 Key</button><button type="button" class="api-clear">清除</button>':''}</form></article></div></section>`;
+    apiCenterModal.querySelector('[data-close-api-center]').onclick=()=>{apiCenterModal.hidden=true;};
+    apiCenterModal.onclick=event=>{if(event.target===apiCenterModal)apiCenterModal.hidden=true;};
+    apiCenterModal.querySelectorAll('form[data-api-provider]').forEach(form=>form.onsubmit=async event=>{event.preventDefault();const provider=form.dataset.apiProvider,key=(form.elements.key?.value||'').trim(),url=(form.elements.url?.value||'').trim(),model=(form.elements.model?.value||'').trim();if(provider==='custom'?!url:!key){showAppDialog({title:'API 接入中心',message:provider==='custom'?'请填写有效的 HTTPS API 地址。':'请填写 API Key。'});return;}try{await apiCenterRequest('/api/api-center',{method:'PUT',body:JSON.stringify({provider,key,url,model})});const saved=await window.btcSecureVault?.get('api-center')||{};await window.btcSecureVault?.put('api-center',{...saved,[provider]:{key,url}});await renderApiCenter();}catch(error){showAppDialog({title:'API 接入中心',message:error.message});}});
+    apiCenterModal.querySelectorAll('.api-clear').forEach(button=>button.onclick=async()=>{try{const provider=button.closest('form').dataset.apiProvider;await apiCenterRequest(`/api/api-center?provider=${provider}`,{method:'DELETE'});const saved=await window.btcSecureVault?.get('api-center')||{};delete saved[provider];await window.btcSecureVault?.put('api-center',saved);await renderApiCenter();}catch(error){showAppDialog({title:'API 接入中心',message:error.message});}});
+    apiCenterModal.querySelectorAll('.api-verify').forEach(button=>button.onclick=async()=>{const provider=button.closest('form').dataset.apiProvider;button.disabled=true;button.textContent='验证中…';try{const result=await apiCenterRequest('/api/api-center/verify',{method:'POST',body:JSON.stringify({provider})});if(result.valid)await renderApiCenter();showAppDialog({title:'API Key 验证',message:result.message});}catch(error){showAppDialog({title:'API Key 验证',message:error.message});}finally{button.disabled=false;button.textContent='验证 Key';}});
+    // 千问验证：输入框里填了新 Key 就先保存再验证，一次点击走完整个流程。
+    // Qwen verify: save first when a new key is typed, so one click completes the whole flow.
+    // 端点下拉只是填充工具：选中即写入 API 地址输入框；留空表示交给服务端按 Key 前缀自动匹配。
+    // The endpoint dropdown only fills the URL field; blank means auto-match by key prefix.
+    const qwenEndpointSelect=apiCenterModal.querySelector('.qwen-endpoint');
+    if(qwenEndpointSelect)qwenEndpointSelect.onchange=()=>{const form=apiCenterModal.querySelector('form[data-api-provider="qwen"]');if(form?.elements.url)form.elements.url.value=qwenEndpointSelect.value;};
+    // 粘贴 Key 立刻提示它属于哪套体系（sk-sp- = Token Plan 订阅）。
+    // Typing a key immediately reveals which system it belongs to.
+    const qwenKeyInput=apiCenterModal.querySelector('form[data-api-provider="qwen"] input[name="key"]');
+    if(qwenKeyInput&&qwenEndpointSelect){const tokenPlanOption=[...qwenEndpointSelect.options].find(option=>option.value.includes('token-plan'));if(tokenPlanOption)qwenKeyInput.oninput=()=>{qwenEndpointSelect.value=/^sk-sp-/i.test(qwenKeyInput.value.trim())?tokenPlanOption.value:'';};}
+    const qwenVerifyButton=apiCenterModal.querySelector('.api-verify-qwen');
+    if(qwenVerifyButton)qwenVerifyButton.onclick=async()=>{const form=apiCenterModal.querySelector('form[data-api-provider="qwen"]');const key=(form?.elements.key?.value||'').trim(),model=(form?.elements.model?.value||'').trim(),url=(form?.elements.url?.value||'').trim();if(!key&&!credentials.qwen){showAppDialog({title:'千问 API Key 验证',message:'请先填写 API Key 再验证。'});return;}qwenVerifyButton.disabled=true;qwenVerifyButton.textContent='验证中…';try{if(key){await apiCenterRequest('/api/api-center',{method:'PUT',body:JSON.stringify({provider:'qwen',key,url,model})});}const result=await apiCenterRequest('/api/api-center/verify',{method:'POST',body:JSON.stringify({provider:'qwen'})});if(result.valid)await renderApiCenter();showAppDialog({title:'千问 API Key 验证',message:result.message});}catch(error){showAppDialog({title:'千问 API Key 验证',message:error.message});}finally{qwenVerifyButton.disabled=false;qwenVerifyButton.textContent='验证 Key';}};
+
+    // 千问额度小卡渲染：与右下角对话窗同源（同一接口），数据保留 60s。
+    // Mini Qwen quota card: same endpoint as the chat panel; data cached for 60s.
+    const qwenQuotaCard=apiCenterModal.querySelector('.api-qwen-quota');
+    if(qwenQuotaCard)renderApiQwenQuota(qwenQuotaCard);
+  };
+  apiCenter.onclick=async()=>{apiCenterModal.hidden=false;await renderApiCenter();};
+  // API 中心打开时 60s 拉一次千问额度；关闭后停掉，避免空转。
+  // While the API center is open, refresh the Qwen quota card every 60s; stop when hidden.
+  let apiQuotaTimer=null;
+  const startApiQuotaLoop=()=>{if(apiQuotaTimer)return;const tick=()=>{const card=apiCenterModal.querySelector('.api-qwen-quota');if(card)renderApiQwenQuota(card);};apiQuotaTimer=setInterval(()=>{if(!apiCenterModal.hidden)tick();else{clearInterval(apiQuotaTimer);apiQuotaTimer=null;}},60_000);};
+  const stopApiQuotaLoop=()=>{if(apiQuotaTimer){clearInterval(apiQuotaTimer);apiQuotaTimer=null;}};
+  const apiCenterCloseBtn=apiCenterModal.querySelector('[data-close-api-center]');
+  if(apiCenterCloseBtn){const original=apiCenterCloseBtn.onclick;apiCenterCloseBtn.onclick=(event)=>{stopApiQuotaLoop();if(typeof original==='function')original.call(apiCenterCloseBtn,event);};}
+  apiCenter.onclick=async()=>{apiCenterModal.hidden=false;await renderApiCenter();startApiQuotaLoop();};
   lang.onclick = () => {
     uiLang = uiLang === "zh" ? "en" : "zh";
     localStorage.setItem("btc_lang", uiLang);
@@ -1167,6 +1335,8 @@ const MACRO_EVENT_NAMES = {
 const ENV_SIGNAL_NAMES = {
   gold: ["黄金", "Gold"],
   dxy: ["美元指数", "US Dollar Index"],
+  wti: ["WTI 原油", "WTI crude oil"],
+  vix: ["VIX 波动率", "VIX volatility"],
   "btc-dominance": ["BTC 总市值占比", "BTC dominance"],
   "crypto-total-cap": ["全网加密总市值", "Total crypto market cap"],
   "crypto-volume": ["全网 24h 成交额", "Total 24h crypto volume"],
@@ -1385,21 +1555,47 @@ function ensureInteractionUI() {
     addHelp(
       signalHeading,
       `<b>综合信号状态说明</b><br><br>` +
-      `<b style="color:#00d4aa">● 做多 +分数</b> / <b style="color:#ff4d6a">● 做空 +分数</b><br>已确认信号 — 多周期（15m/1h）交叉验证通过，综合评分露出。最强状态，可作参考。<br><br>` +
-      `<b style="color:#00d4aa">● 做多趋势</b> / <b style="color:#ff4d6a">● 做空趋势</b><br>已确认弱信号 — 当前周期连续 3 根同向，但其他周期未跟上。方向锁定但置信度中等。<br><br>` +
-      `<b style="color:#00d4aa">● 偏多趋势 · 待收盘</b> / <b style="color:#ff4d6a">● 偏空趋势 · 待收盘</b><br>观察期 — 当前周期算出方向，但还未通过多周期验证。等 K 线收盘后可能升级或回落。<br><br>` +
-      `<b>● 观望 · 等待确认</b><br>无明确方向（评分在 ±45 之间），指标中性，不触发任何信号。<br><br>` +
-      `<b style="color:var(--text-muted)">● 重新评估中</b><br>信号曾被清除/止损，正在重新积累 K 线（需 2 根），期间不给出新信号。<br><br>` +
-      `<hr style="border-color:var(--border);margin:8px 0"><b>速查：</b>带数字 = 已确认最强信号；带「待收盘」= 还在观察期；带「趋势」二字无数字 = 弱确认<br><br>` +
-      `<small>提示：信号仅基于技术指标（EMA/RSI/MACD/布林），不构成投资建议。</small>`,
+      `<b style="color:#00d4aa">● 做多 +分数</b> / <b style="color:#ff4d6a">● 做空 +分数</b><br><b>最强信号</b> — 多周期（15m/1h）方向一致，评分已确认。<br>` +
+      `✅ 可参考：按自身规则设好止损/止盈后小仓位跟进。<br>` +
+      `❌ 切忌：因分数高就重仓追；信号会随新 K 线变化。<br><br>` +
+      `<b style="color:#00d4aa">● 做多趋势</b> / <b style="color:#ff4d6a">● 做空趋势</b><br><b>弱确认</b> — 当前周期连续 3 根同向，但大周期未跟上。<br>` +
+      `✅ 可小仓位试单，或等“+分数”最强信号再进场。<br>` +
+      `❌ 切忌：此时满仓；胜率只比随机略高。<br><br>` +
+      `<b style="color:#00d4aa">● 超买 · 回落风险</b> / <b style="color:#ff4d6a">● 超卖 · 反弹机会</b><br><b>短线反转预警</b>（5m/15m 观察期）— 价格短期冲过头，动能透支。<br>` +
+      `✅ 若持有多单，可考虑减仓/上移止盈；空仓则等回落结束。<br>` +
+      `❌ 切忌：此时追涨杀跌；“超买”不是继续涨的理由。<br><br>` +
+      `<b style="color:#00d4aa">● 偏多趋势 · 待收盘</b> / <b style="color:#ff4d6a">● 偏空趋势 · 待收盘</b><br><b>趋势初显</b>（1h 及以上周期）— 方向刚算出来，还没收盘确认。<br>` +
+      `✅ 等当前 K 线收盘、状态升级后再决定。<br>` +
+      `❌ 切忌：在“待收盘”阶段开新仓。<br><br>` +
+      `<b>● 观望 · 等待确认</b><br><b>无方向</b> — 评分在 ±45 之间，多空力量均衡。<br>` +
+      `✅ 空仓等待；或只做已有持仓的保护。<br>` +
+      `❌ 切忌：强行解读为做多/做空信号。<br><br>` +
+      `<b style="color:var(--text-muted)">● 重新评估中</b><br><b>信号刚被清除</b> — 上一段信号触发止损或条件不再满足，需重新积累 2 根 K 线。<br>` +
+      `✅ 暂停开新仓，等系统给出新状态。<br>` +
+      `❌ 切忌：急着反手。<br><br>` +
+      `<hr style="border-color:var(--border);margin:8px 0"><b>速查：</b>带数字 = 最强信号；超买/超卖 = 短线反转预警（5m/15m）；待收盘 = 等确认、别动手；趋势无数字 = 弱确认。<br><br>` +
+      `<small>提示：信号仅基于技术指标（EMA/RSI/MACD/布林），用于辅助观察，不构成投资建议。高杠杆请格外谨慎。</small>`,
       `<b>Rule Signal States</b><br><br>` +
-      `<b style="color:#00d4aa">● Long +score</b> / <b style="color:#ff4d6a">● Short +score</b><br>Confirmed — multi-timeframe (15m/1h) cross-validated. Strongest state.<br><br>` +
-      `<b style="color:#00d4aa">● Long trend</b> / <b style="color:#ff4d6a">● Short trend</b><br>Weak confirmation — 3 consecutive same-direction candles on base TF only.<br><br>` +
-      `<b style="color:#00d4aa">● Bullish trend · close pending</b> / <b style="color:#ff4d6a">● Bearish trend · close pending</b><br>Observation — direction detected but awaiting multi-TF confirmation after candle close.<br><br>` +
-      `<b>● Wait · confirmation pending</b><br>No clear direction (score between ±45). Neutral.<br><br>` +
-      `<b style="color:var(--text-muted)">● Re-evaluating</b><br>Signal was invalidated; re-accumulating candles (need 2).<br><br>` +
-      `<hr style="border-color:var(--border);margin:8px 0"><b>Quick ref:</b> +score = confirmed (strongest); "close pending" = observing; "trend" without score = weak confirmation<br><br>` +
-      `<small>Note: signals are based on technical indicators only, not investment advice.</small>`,
+      `<b style="color:#00d4aa">● Long +score</b> / <b style="color:#ff4d6a">● Short +score</b><br><b>Strongest signal</b> — multi-timeframe (15m/1h) aligned and score confirmed.<br>` +
+      `✅ OK: follow with small size after setting your own stop/take-profit.<br>` +
+      `❌ Don't: size up just because the score is high; signals update with each candle.<br><br>` +
+      `<b style="color:#00d4aa">● Long trend</b> / <b style="color:#ff4d6a">● Short trend</b><br><b>Weak confirmation</b> — 3 consecutive same-direction candles on base TF only.<br>` +
+      `✅ OK: tiny probe position, or wait for a "+score" strongest signal.<br>` +
+      `❌ Don't: go all-in now; edge is only slightly better than random.<br><br>` +
+      `<b style="color:#00d4aa">● Overbought · pullback risk</b> / <b style="color:#ff4d6a">● Oversold · bounce chance</b><br><b>Short-term reversal alert</b> (5m/15m observation) — price has stretched too far, momentum exhausted.<br>` +
+      `✅ OK: trim longs / raise take-profit; wait for pullback to finish if flat.<br>` +
+      `❌ Don't: chase here; "overbought" is not a reason to keep buying.<br><br>` +
+      `<b style="color:#00d4aa">● Bullish trend · close pending</b> / <b style="color:#ff4d6a">● Bearish trend · close pending</b><br><b>Trend forming</b> (1h+) — direction just appeared but candle has not closed.<br>` +
+      `✅ OK: wait for the candle to close and the state to upgrade.<br>` +
+      `❌ Don't: open new positions during "close pending".<br><br>` +
+      `<b>● Wait · confirmation pending</b><br><b>No direction</b> — score between ±45, bulls and bears balanced.<br>` +
+      `✅ OK: stay flat; only manage existing positions.<br>` +
+      `❌ Don't: force a long/short interpretation.<br><br>` +
+      `<b style="color:var(--text-muted)">● Re-evaluating</b><br><b>Signal cleared</b> — previous signal hit stop or conditions failed; re-accumulating 2 candles.<br>` +
+      `✅ OK: pause new entries and wait for a fresh state.<br>` +
+      `❌ Don't: immediately flip the other way.<br><br>` +
+      `<hr style="border-color:var(--border);margin:8px 0"><b>Quick ref:</b> +score = strongest; overbought/oversold = short-term reversal alert (5m/15m); close pending = wait, don't act; trend without score = weak confirmation.<br><br>` +
+      `<small>Note: signals are derived from technical indicators (EMA/RSI/MACD/Bollinger) for observational aid only, not investment advice. Use extra caution with high leverage.</small>`,
     );
   }
   document
@@ -2141,14 +2337,20 @@ setTimeout(() => {
           cooldownMinutes: Math.max(1, Number(x.cooldownMinutes) || 5),
         }));
   } catch {}
-  const save = () => localStorage.setItem(ruleStore, JSON.stringify(rules)),
+  // Migrate any legacy plaintext once, then keep only AES-GCM ciphertext in
+  // IndexedDB.  The key is non-extractable and never written to localStorage.
+  const legacyAlertState=rules.length?rules:null,legacySendKey=localStorage.getItem(keyStore)||'';
+  if(/^SCT/i.test(legacySendKey))sessionStorage.setItem(keyStore,legacySendKey);
+  localStorage.removeItem(ruleStore);
+  localStorage.removeItem(keyStore);
+  const save = () => { window.btcSecureVault?.put('alerts',{rules,sendKey:(sessionStorage.getItem(keyStore)||'').trim()}).catch(error=>console.warn('Local encrypted save failed:',error.message)); },
     price = () => state?.ticker?.last,
     fmt = (n) =>
       Number(n).toLocaleString("en-US", { maximumFractionDigits: 2 });
   const card = document.createElement("section");
   card.id = "wechatAlertCard";
   card.className = "card wechat-alert-card";
-  card.innerHTML = `<div class="forecast-head"><div><h2>${tx("消息推送", "Message alerts")}</h2><p id="localAlertDescription">${tx("未登录时，SendKey 与规则只保存在本机浏览器；登录后可保存到云端。", "When signed out, the SendKey and rules stay in this browser; sign in to save them to the cloud.")}</p></div><span id="localAlertState" class="badge flat"></span></div><form id="localKeyForm" class="wechat-key-form"><label>${tx("Server酱 SendKey", "ServerChan SendKey")}<input name="key" type="password" autocomplete="off" placeholder="SCT…"></label><a href="https://sct.ftqq.com/sendkey" target="_blank" rel="noopener">${tx("获取 SendKey", "Get SendKey")}</a><button id="localKeySave">${tx("仅保存到本机", "Save locally only")}</button><button type="button" id="localAlertTest">${tx("测试当前市价", "Test current price")}</button><button type="button" id="localAlertClear" class="danger">${tx("清除本机 Key", "Clear local Key")}</button></form><div class="alert-rule-toolbar"><b>₿ BTCUSDT ${tx("永续", "Perpetual")}</b><div><button type="button" id="clearLocalAlerts" class="danger">${tx("批量全删", "Delete all")}</button><button type="button" id="openLocalAlert">＋ ${tx("添加预警", "Add alert")}</button></div></div><div id="localAlertList" class="wechat-alert-detail"></div><div id="localAlertModal" class="alert-composer" hidden><section><header><b>${tx("添加预警", "Add alert")}</b><button type="button" id="closeLocalAlert">×</button></header><p class="alert-symbol">₿ <b>BTCUSDT ${tx("永续", "Perpetual")}</b></p><form id="localAlertForm"><label>${tx("预警类型", "Alert type")}<select name="kind"><option value="price_reached">${tx("价格达到", "Price reached")}</option><option value="price_above">${tx("价格上涨至", "Price rises to")}</option><option value="price_below">${tx("价格下跌至", "Price falls to")}</option><option value="long_liquidation">${tx("多头爆仓价", "Long liquidation")}</option><option value="short_liquidation">${tx("空头爆仓价", "Short liquidation")}</option></select></label><label>${tx("价格", "Price")}<span class="mark-price">${tx("市价", "Mark")} <button type="button" id="useLocalMark">--</button></span><input name="target" type="number" inputmode="decimal" min="0" step="0.01" required placeholder="80000"><em>USDT</em></label><div class="frequency"><b>${tx("频率", "Frequency")}</b><div><button type="button" data-local-frequency="once" class="active">${tx("仅提醒一次", "Once")}</button><button type="button" data-local-frequency="repeat">${tx("重复提醒", "Repeat")}</button></div></div><label id="localCooldown" hidden>${tx("冷却时间（分钟）", "Cooldown (minutes)")}<input name="cooldown" type="number" inputmode="numeric" min="1" step="1" value="5"></label><label class="voice-rule-option"><input name="voiceEnabled" type="checkbox" checked>${tx("触发时语音播报", "Speak when triggered")}</label><button class="alert-submit">${tx("添加", "Add")}</button></form></section></div>`;
+  card.innerHTML = `<div class="forecast-head"><div><h2>${tx("消息推送", "Message alerts")}</h2><p id="localAlertDescription">${tx("未登录时 SendKey 仅保存在当前会话；登录后可加密保存到云端。", "When signed out, SendKey stays only in this session; sign in to encrypt it in the cloud.")}</p></div><span id="localAlertState" class="badge flat"></span></div><form id="localKeyForm" class="wechat-key-form"><label>${tx("Server酱 SendKey", "ServerChan SendKey")}<input name="key" type="password" autocomplete="off" placeholder="SCT…"></label><a href="https://sct.ftqq.com/sendkey" target="_blank" rel="noopener">${tx("获取 SendKey", "Get SendKey")}</a><button id="localKeySave">${tx("保存到当前会话", "Save for this session")}</button><button type="button" id="localAlertTest">${tx("测试当前市价", "Test current price")}</button><button type="button" id="localAlertClear" class="danger">${tx("清除本机 Key", "Clear local Key")}</button></form><div class="alert-rule-toolbar"><b>₿ BTCUSDT ${tx("永续", "Perpetual")}</b><div><button type="button" id="clearLocalAlerts" class="danger">${tx("批量全删", "Delete all")}</button><button type="button" id="openLocalAlert">＋ ${tx("添加预警", "Add alert")}</button></div></div><div id="localAlertList" class="wechat-alert-detail"></div><div id="localAlertModal" class="alert-composer" hidden><section><header><b>${tx("添加预警", "Add alert")}</b><button type="button" id="closeLocalAlert">×</button></header><p class="alert-symbol">₿ <b>BTCUSDT ${tx("永续", "Perpetual")}</b></p><form id="localAlertForm"><label>${tx("预警类型", "Alert type")}<select name="kind"><option value="price_reached">${tx("价格达到", "Price reached")}</option><option value="price_above">${tx("价格上涨至", "Price rises to")}</option><option value="price_below">${tx("价格下跌至", "Price falls to")}</option><option value="long_liquidation">${tx("多头爆仓价", "Long liquidation")}</option><option value="short_liquidation">${tx("空头爆仓价", "Short liquidation")}</option></select></label><label>${tx("价格", "Price")}<span class="mark-price">${tx("市价", "Mark")} <button type="button" id="useLocalMark">--</button></span><input name="target" type="number" inputmode="decimal" min="0" step="0.01" required placeholder="80000"><em>USDT</em></label><div class="frequency"><b>${tx("频率", "Frequency")}</b><div><button type="button" data-local-frequency="once" class="active">${tx("仅提醒一次", "Once")}</button><button type="button" data-local-frequency="repeat">${tx("重复提醒", "Repeat")}</button></div></div><label id="localCooldown" hidden>${tx("冷却时间（分钟）", "Cooldown (minutes)")}<input name="cooldown" type="number" inputmode="numeric" min="1" step="1" value="5"></label><label class="voice-rule-option"><input name="voiceEnabled" type="checkbox" checked>${tx("触发时语音播报", "Speak when triggered")}</label><button class="alert-submit">${tx("添加", "Add")}</button></form></section></div>`;
   const submitAlert = card.querySelector(".alert-submit"),
     alertActions = document.createElement("div");
   alertActions.className = "alert-actions";
@@ -2173,7 +2375,7 @@ setTimeout(() => {
     modal = $("localAlertModal"),
     form = $("localAlertForm");
   let cloudSession = { loggedIn: false, hasSendKey: false };
-  keyInput.value = localStorage.getItem(keyStore) || "";
+  keyInput.value = sessionStorage.getItem(keyStore) || "";
   const showRuleNotice = (open) => {
     notice.hidden = !open;
   };
@@ -2222,7 +2424,7 @@ setTimeout(() => {
       ? `${new Date(rule.lastTriggeredAt).toLocaleString(uiLang === "zh" ? "zh-CN" : "en-US", { hour12: false })} · ${tx("实时", "Live")} ${Number.isFinite(Number(rule.lastTriggeredPrice)) ? `${fmt(rule.lastTriggeredPrice)} USDT` : "--"}`
       : "";
   const render = () => {
-    const ready = /^SCT/i.test((localStorage.getItem(keyStore) || "").trim()),
+    const ready = /^SCT/i.test((sessionStorage.getItem(keyStore) || "").trim()),
       cloudCount = rules.filter((r) => r.cloudManaged).length,
       localCount = rules.length - cloudCount,
       cloudReady = cloudSession.loggedIn && cloudSession.hasSendKey;
@@ -2279,7 +2481,7 @@ setTimeout(() => {
       short_liquidation: `空头爆仓价 ${target} USDT`,
     })[kind] || `BTC ${target} USDT`;
   const push = async (current, rule = null) => {
-    const key = (localStorage.getItem(keyStore) || "").trim();
+    const key = (sessionStorage.getItem(keyStore) || "").trim();
     if (!/^SCT/i.test(key)) throw new Error("请先保存有效的本机 SendKey。");
     const currentText = fmt(current),
       targetText = rule ? fmt(rule.targetPrice) : currentText,
@@ -2314,7 +2516,7 @@ setTimeout(() => {
     }
   };
   const pushRuleTest = async (current, rule) => {
-    const key = (localStorage.getItem(keyStore) || "").trim();
+    const key = (sessionStorage.getItem(keyStore) || "").trim();
     if (!/^SCT/i.test(key)) throw new Error("请先保存有效的本机 SendKey。");
     const targetText = fmt(rule.targetPrice),
       currentText = fmt(current),
@@ -2404,13 +2606,16 @@ setTimeout(() => {
           throw new Error(
             (await response.json().catch(() => ({}))).error || "云端保存失败",
           );
+        sessionStorage.setItem(keyStore, key);
+        save();
         window.dispatchEvent(new Event("btc:cloud-refresh"));
         showAppDialog({
           title: "云端推送",
           message: "SendKey 已加密保存到云端。",
         });
       } else {
-        localStorage.setItem(keyStore, key);
+        sessionStorage.setItem(keyStore, key);
+        save();
         render();
       }
     } catch (error) {
@@ -2422,7 +2627,8 @@ setTimeout(() => {
       keyInput.value = "";
       return;
     }
-    localStorage.removeItem(keyStore);
+    sessionStorage.removeItem(keyStore);
+    save();
     keyInput.value = "";
     render();
   };
@@ -2548,22 +2754,7 @@ setTimeout(() => {
     show(false);
     render();
   };
-  window.addEventListener("btc:cloud-rules-synced", () => {
-    try {
-      const saved = JSON.parse(localStorage.getItem(ruleStore) || "[]");
-      if (Array.isArray(saved))
-        rules = saved
-          .filter((x) => x && x.id && Number(x.targetPrice) > 0)
-          .slice(0, 30)
-          .map((x) => ({
-            ...x,
-            kind: x.kind || "price_reached",
-            repeat: x.repeat === false ? false : true,
-            cooldownMinutes: Math.max(1, Number(x.cooldownMinutes) || 5),
-          }));
-    } catch {}
-    render();
-  });
+  window.addEventListener("btc:cloud-rules-synced", () => { window.btcSecureVault?.get('alerts').then(saved=>{if(Array.isArray(saved?.rules))rules=saved.rules;render()}).catch(()=>render()); });
   window.addEventListener("btc:account-state", (event) => {
     cloudSession = {
       loggedIn: Boolean(event.detail?.loggedIn),
@@ -2572,6 +2763,7 @@ setTimeout(() => {
     render();
   });
   render();
+  window.btcSecureVault?.get('alerts').then(saved=>{if(Array.isArray(saved?.rules))rules=saved.rules;if(/^SCT/i.test(String(saved?.sendKey||'')))sessionStorage.setItem(keyStore,saved.sendKey);if(!saved&&(legacyAlertState||/^SCT/i.test(legacySendKey)))save();render()}).catch(error=>console.warn('Local encrypted restore failed:',error.message));
 }, 0);
 
 /* Browser speech uses the device's native voice and stays entirely local. */
@@ -2857,7 +3049,7 @@ setTimeout(() => {
   trigger.className = "voice-quick-toggle";
   trigger.setAttribute("aria-haspopup", "dialog");
   trigger.setAttribute("aria-expanded", "false");
-  trigger.innerHTML = `<span class="voice-pulse voice-pulse-one" aria-hidden="true"></span><span class="voice-pulse voice-pulse-two" aria-hidden="true"></span><svg viewBox="0 0 64 64" aria-hidden="true"><path d="M8 25h13l18-14v42L21 39H8z"/><path class="voice-wave" d="M46 23c5 5 5 13 0 18M52 16c10 10 10 22 0 32"/></svg><span class="voice-quick-toggle-label" aria-hidden="true"></span>`;
+  trigger.innerHTML = `<span class="voice-pulse voice-pulse-one" aria-hidden="true"></span><span class="voice-pulse voice-pulse-two" aria-hidden="true"></span><svg viewBox="0 0 64 64" aria-hidden="true"><path d="M8 25h13l18-14v42L21 39H8z"/><path class="voice-wave" d="M46 23c5 5 5 13 0 18M52 16c10 10 10 22 0 32"/><line class="voice-mute" x1="9" y1="10" x2="55" y2="54"/></svg><span class="voice-quick-toggle-label" aria-hidden="true"></span>`;
   priceCard.append(trigger);
   setSpeaking = (playing) => {
     isSpeaking = Boolean(playing);
@@ -2884,7 +3076,7 @@ setTimeout(() => {
   const settingsBody = settingsModal.querySelector(".voice-settings-body");
   const panel = document.createElement("section");
   panel.className = "voice-alert-panel";
-  panel.innerHTML = `<div class="voice-panel-head"><div><b>${tx("语音播报", "Voice alerts")}</b><small id="voiceAlertStatus"></small></div></div><div class="voice-panel-grid"><section class="voice-panel-group voice-panel-toggles"><label class="voice-switch"><input id="voiceAlertEnabled" type="checkbox"><span>${tx("语音总开关", "Voice master")}</span></label><label class="voice-switch"><input id="voiceLivePriceEnabled" type="checkbox"><span>${tx("定时播报实时价", "Speak live price")}</span></label><label class="voice-live-interval">${tx("播报间隔", "Interval")}<select id="voiceAlertInterval"><option value="15">15 ${tx("秒", "sec")}</option><option value="30">30 ${tx("秒", "sec")}</option><option value="60">1 ${tx("分钟", "min")}</option><option value="300">5 ${tx("分钟", "min")}</option></select></label></section><section class="voice-panel-group"><label>${tx("播报引擎", "Engine")}<select id="voiceAlertEngine"><option value="edge">${tx("Edge 神经语音（免费）", "Edge neural (free)")}</option><option value="system">${tx("本机系统语音", "System voice")}</option></select></label><label>${tx("音色", "Voice")}<select id="voiceAlertEdgeVoice"><optgroup label="${tx("自然女声", "Female (natural)")}"><option value="zh-CN-XiaoxiaoNeural">${tx("小晓 · 普通话", "Xiaoxiao · Mandarin")}</option><option value="zh-CN-XiaoyiNeural">${tx("小艺 · 普通话", "Xiaoyi · Mandarin")}</option><option value="zh-CN-liaoning-XiaobeiNeural">${tx("小北 · 辽宁口音", "Xiaobei · Liaoning")}</option><option value="zh-CN-shaanxi-XiaoniNeural">${tx("小妮 · 陕西口音", "Xiaoni · Shaanxi")}</option><option value="zh-TW-HsiaoChenNeural">${tx("晓臻 · 台湾国语", "HsiaoChen · Taiwanese")}</option><option value="zh-HK-HiuGaaiNeural">${tx("晓佳 · 粤语", "HiuGaai · Cantonese")}</option></optgroup><optgroup label="${tx("自然男声", "Male (natural)")}"><option value="zh-CN-YunxiNeural">${tx("云希 · 普通话", "Yunxi · Mandarin")}</option><option value="zh-CN-YunyangNeural">${tx("云扬 · 普通话", "Yunyang · Mandarin")}</option></optgroup></select></label><label class="system-voice-label">${tx("系统回退", "System fallback")}<select id="voiceAlertVoice"><option>${tx("正在加载系统语音…", "Loading system voices…")}</option></select></label><label>${tx("提示音音量", "Chime volume")}<span class="voice-volume-row"><input id="voiceChimeVolume" type="range" min="0" max="200" step="1"><output id="voiceChimeVolumeValue"></output></span></label><label>${tx("语音音量", "Speech volume")}<span class="voice-volume-row"><input id="voiceSpeechVolume" type="range" min="0" max="100" step="1"><output id="voiceSpeechVolumeValue"></output></span></label></section><section class="voice-panel-group voice-panel-actions"><button type="button" id="voiceAlertAddRule">＋ ${tx("配置语音规则", "Voice rules")}</button><button type="button" id="voiceAlertTest">${tx("试听", "Test voice")}</button></section></div><small class="voice-rule-note">${tx("语音规则支持价格达到、上涨、下跌及爆仓价；在“添加预警”中勾选“触发时语音播报”。", "Voice rules support reached, rise, fall and liquidation prices; enable Speak when triggered in Add alert.")}</small>`;
+  panel.innerHTML = `<div class="voice-panel-head"><div><b>${tx("语音播报", "Voice alerts")}</b><small id="voiceAlertStatus"></small></div></div><div class="voice-panel-grid"><section class="voice-panel-group voice-panel-toggles"><label class="voice-switch"><input id="voiceAlertEnabled" type="checkbox"><span>${tx("语音总开关", "Voice master")}</span></label><label class="voice-switch"><input id="voiceLivePriceEnabled" type="checkbox"><span>${tx("定时播报实时价", "Speak live price")}</span></label><label class="voice-live-interval">${tx("播报间隔", "Interval")}<select id="voiceAlertInterval"><option value="15">15 ${tx("秒", "sec")}</option><option value="30">30 ${tx("秒", "sec")}</option><option value="60">1 ${tx("分钟", "min")}</option><option value="300">5 ${tx("分钟", "min")}</option></select><small id="voiceLastSpokenAt" class="voice-last-spoken"></small></label></section><section class="voice-panel-group"><label>${tx("播报引擎", "Engine")}<select id="voiceAlertEngine"><option value="edge">${tx("Edge 神经语音（免费）", "Edge neural (free)")}</option><option value="system">${tx("本机系统语音", "System voice")}</option></select></label><label>${tx("音色", "Voice")}<select id="voiceAlertEdgeVoice"><optgroup label="${tx("自然女声", "Female (natural)")}"><option value="zh-CN-XiaoxiaoNeural">${tx("小晓 · 普通话", "Xiaoxiao · Mandarin")}</option><option value="zh-CN-XiaoyiNeural">${tx("小艺 · 普通话", "Xiaoyi · Mandarin")}</option><option value="zh-CN-liaoning-XiaobeiNeural">${tx("小北 · 辽宁口音", "Xiaobei · Liaoning")}</option><option value="zh-CN-shaanxi-XiaoniNeural">${tx("小妮 · 陕西口音", "Xiaoni · Shaanxi")}</option><option value="zh-TW-HsiaoChenNeural">${tx("晓臻 · 台湾国语", "HsiaoChen · Taiwanese")}</option><option value="zh-HK-HiuGaaiNeural">${tx("晓佳 · 粤语", "HiuGaai · Cantonese")}</option></optgroup><optgroup label="${tx("自然男声", "Male (natural)")}"><option value="zh-CN-YunxiNeural">${tx("云希 · 普通话", "Yunxi · Mandarin")}</option><option value="zh-CN-YunyangNeural">${tx("云扬 · 普通话", "Yunyang · Mandarin")}</option></optgroup></select></label><label class="system-voice-label">${tx("系统回退", "System fallback")}<select id="voiceAlertVoice"><option>${tx("正在加载系统语音…", "Loading system voices…")}</option></select></label><label>${tx("提示音音量", "Chime volume")}<span class="voice-volume-row"><input id="voiceChimeVolume" type="range" min="0" max="200" step="1"><output id="voiceChimeVolumeValue"></output></span></label><label>${tx("语音音量", "Speech volume")}<span class="voice-volume-row"><input id="voiceSpeechVolume" type="range" min="0" max="100" step="1"><output id="voiceSpeechVolumeValue"></output></span></label></section><section class="voice-panel-group voice-panel-actions"><button type="button" id="voiceAlertAddRule">＋ ${tx("配置语音规则", "Voice rules")}</button><button type="button" id="voiceAlertTest">${tx("试听", "Test voice")}</button></section></div><small class="voice-rule-note">${tx("语音规则支持价格达到、上涨、下跌及爆仓价；在“添加预警”中勾选“触发时语音播报”。", "Voice rules support reached, rise, fall and liquidation prices; enable Speak when triggered in Add alert.")}</small>`;
   settingsBody.append(panel);
   const voicePanelGrid = panel.querySelector(".voice-panel-grid"),
     voicePanelToggles = panel.querySelector(".voice-panel-toggles"),
@@ -2994,6 +3186,7 @@ setTimeout(() => {
     engine = $("voiceAlertEngine"),
     edgeVoice = $("voiceAlertEdgeVoice"),
     interval = $("voiceAlertInterval"),
+    lastSpokenAtLabel = $("voiceLastSpokenAt"),
     voiceSelect = $("voiceAlertVoice"),
     chimeVolume = $("voiceChimeVolume"),
     speechVolume = $("voiceSpeechVolume"),
@@ -3089,12 +3282,34 @@ setTimeout(() => {
     }
     edgeVoice.value = settings.edgeVoice;
   };
+  const formatLastSpokenAt = (ts) => {
+    if (!ts) return tx("从未", "Never");
+    const date = new Date(ts);
+    const now = new Date();
+    const sameDay =
+      date.getFullYear() === now.getFullYear() &&
+      date.getMonth() === now.getMonth() &&
+      date.getDate() === now.getDate();
+    const timeStr = date.toLocaleTimeString(uiLang === "zh" ? "zh-CN" : "en-US", {
+      hour12: false,
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+    if (sameDay) return timeStr;
+    const dateStr = date.toLocaleDateString(uiLang === "zh" ? "zh-CN" : "en-US", {
+      month: "short",
+      day: "numeric",
+    });
+    return uiLang === "zh" ? `${dateStr} ${timeStr}` : `${dateStr}, ${timeStr}`;
+  };
   const render = () => {
     enabled.checked = Boolean(settings.enabled);
     livePriceEnabled.checked = Boolean(settings.livePriceEnabled);
     engine.value = settings.engine;
     edgeVoice.value = settings.edgeVoice;
     interval.value = String(settings.interval);
+    lastSpokenAtLabel.textContent = `${tx("上次播报：", "Last spoken: ")}${formatLastSpokenAt(settings.lastSpokenAt)}`;
     chimeType.value = settings.chimeType;
     riseChimeType.value = settings.riseChimeType;
     dropChimeType.value = settings.dropChimeType;
@@ -3162,6 +3377,7 @@ setTimeout(() => {
         settings.lastSpokenAt = now;
         lastLiveSpokenPrice = current;
         save();
+        lastSpokenAtLabel.textContent = `${tx("上次播报：", "Last spoken: ")}${formatLastSpokenAt(settings.lastSpokenAt)}`;
       }
     }
   };
@@ -3171,6 +3387,7 @@ setTimeout(() => {
     save();
     render();
     syncVoiceToServer();
+    if (settings.enabled) primeAudioContext();
   };
   livePriceEnabled.onchange = () => {
     settings.livePriceEnabled = livePriceEnabled.checked;
@@ -3178,7 +3395,10 @@ setTimeout(() => {
     save();
     render();
     syncVoiceToServer();
-    if (settings.enabled && settings.livePriceEnabled) speakPrice(true);
+    if (settings.enabled && settings.livePriceEnabled) {
+      primeAudioContext();
+      speakPrice(true);
+    }
   };
   engine.onchange = () => {
     settings.engine = engine.value;
@@ -3255,7 +3475,26 @@ setTimeout(() => {
     trigger.setAttribute("aria-expanded", String(open));
     if (open) render();
   };
+  const primeAudioContext = () => {
+    const Context = window.AudioContext || window.webkitAudioContext;
+    if (!Context) return;
+    audioContext ||= new Context();
+    audioContext.resume?.().catch(() => {});
+    const silent = audioContext.createGain();
+    silent.gain.value = 0;
+    silent.connect(audioContext.destination);
+    try {
+      const oscillator = audioContext.createOscillator();
+      oscillator.frequency.value = 1;
+      oscillator.connect(silent);
+      oscillator.start();
+      oscillator.stop(audioContext.currentTime + 0.001);
+    } catch {}
+  };
   trigger.onclick = () => {
+    // 只打开设置面板，不自动开启语音总开关；
+    // 是否启用由面板内的「语音总开关」控制。
+    primeAudioContext();
     showVoiceSettings(true);
   };
   settingsModal.querySelector("[data-close-voice-settings]").onclick = () =>
@@ -3264,6 +3503,7 @@ setTimeout(() => {
     if (event.target === settingsModal) showVoiceSettings(false);
   };
   test.onclick = () => {
+    primeAudioContext();
     // The previous check accidentally disabled the selected Edge engine on
     // browsers that lack local speechSynthesis, even though Edge TTS works
     // through our audio endpoint.  Only the system-voice option needs it.
@@ -4359,7 +4599,9 @@ function recentRuleDirections(candles) {
 function deriveStableRulePresentation() {
   const candles = fixedRuleSignal.candles;
   if (candles.length < RULE_SIGNAL_MIN_CANDLES) return null;
-  const metric = metrics(candles),
+  /* Only the headline signal takes the live quote; confirmation intervals stay
+     on closed candles so the cross-interval check is not double-corrected. */
+  const metric = metrics(candles, state.ticker?.last),
     source = fixedRuleSignal.source || state.source || "okx",
     storageKey = stableRuleStorageKey(source, fixedRuleSignal.interval),
     current = ruleDirectionForScore(metric.score),
@@ -4573,6 +4815,7 @@ function renderFixedIndicatorDetails(m) {
     if (copy) addHelp(row.querySelector("span"), copy[0], copy[1]);
   });
 }
+let lastRuleSignalState = null;
 function renderFixedRuleSignal() {
   if (fixedRuleSignal.candles.length < RULE_SIGNAL_MIN_CANDLES) return;
   const m = metrics(fixedRuleSignal.candles),
@@ -4589,8 +4832,16 @@ function renderFixedRuleSignal() {
       ? ruleDirectionForScore(m.score)
       : "flat";
   const showingTrendObservation = observedDirection !== "flat";
+  const isShortBasis =
+    fixedRuleSignal.interval === "5m" || fixedRuleSignal.interval === "15m";
+  const trendWord =
+    observedDirection === "bull" ? tx("偏多趋势", "Bullish trend") : tx("偏空趋势", "Bearish trend");
+  const reverseWord =
+    observedDirection === "bull"
+      ? tx("超买 · 回落风险", "Overbought · pullback risk")
+      : tx("超卖 · 反弹机会", "Oversold · bounce chance");
   const visibleLabel = showingTrendObservation
-    ? `${observedDirection === "bull" ? tx("偏多趋势", "Bullish trend") : tx("偏空趋势", "Bearish trend")}${tx(" · 待收盘", " · close pending")}`
+    ? `${isShortBasis ? reverseWord : trendWord}${tx(" · 待收盘", " · close pending")}`
     : label;
   const visibleCls = showingTrendObservation ? observedDirection : cls;
   if (!fixedRuleSignal.presentation) fixedRuleSignal.presentation = presentation;
@@ -4622,8 +4873,58 @@ function renderFixedRuleSignal() {
   const signalCard = $("ruleSignalCard");
   if (signalCard) signalCard.dataset.signalTone = visibleCls;
   document.documentElement.dataset.ruleSignalTone = visibleCls;
-  if (reason)
-    reason.innerHTML = `<span class="signal-summary"><b class="signal-indicator ${m.close >= m.e20 ? "bull" : "bear"}">EMA20 ${money(m.e20)}</b><i>·</i><b class="signal-indicator ${m.close >= m.e50 ? "bull" : "bear"}">EMA50 ${money(m.e50)}</b><i>·</i><b class="signal-indicator ${m.rsi >= 50 ? "bull" : "bear"}">RSI(14) ${m.rsi.toFixed(2)}</b><i>·</i><b class="signal-indicator ${m.macd >= 0 ? "bull" : "bear"}">MACD ${m.macd.toFixed(2)}</b></span>`;
+  /* 1h 主方向条：直接复用多周期确认结果（presentation.confirmations 已含 1h），
+     不再发起额外请求。1h 是趋势有效的周期，作为大周期背景供短线信号对照。 */
+  if (reason) {
+    let pt = $("primaryTrend");
+    if (!pt) {
+      pt = document.createElement("div");
+      pt.id = "primaryTrend";
+      pt.className = "primary-trend";
+      reason.after(pt);
+    }
+    const c1h = presentation?.confirmations?.find((c) => c.interval === "1h");
+    let ptHtml = "";
+    let ptShown = false;
+    if (c1h && c1h.direction !== "pending") {
+      const w = c1h.direction === "bull" ? tx("做多", "Long") : c1h.direction === "bear" ? tx("做空", "Short") : tx("观望", "Neutral");
+      const note = c1h.direction === "bull" ? tx("趋势向上 · 短线逆势回调是机会", "uptrend · counter-trend dip = entry") : c1h.direction === "bear" ? tx("趋势向下 · 短线反弹应减仓", "downtrend · bounce = trim") : tx("中性", "neutral");
+      ptHtml = `<span class="muted">1h 主方向</span><b class="signal-indicator ${c1h.direction}">${w}</b><span class="pt-note">${note}</span>`;
+      ptShown = true;
+    } else if (c1h && c1h.direction === "pending") {
+      ptHtml = `<span class="muted">1h 主方向</span><b class="signal-indicator flat">${tx("加载中", "loading")}</b>`;
+      ptShown = true;
+    }
+    if (ptShown) {
+      if (pt.dataset.lastHtml !== ptHtml) {
+        pt.innerHTML = ptHtml;
+        pt.dataset.lastHtml = ptHtml;
+      }
+      pt.style.display = "";
+    } else if (pt.style.display !== "none") {
+      pt.style.display = "none";
+      pt.dataset.lastHtml = "";
+    }
+    /* 有效期标注：短线反转信号在 60 分钟内最有效，长周期趋势信号有效期更长。 */
+    const validity = $("signalValidity");
+    if (validity) {
+      const mins = { "5m": 60, "15m": 60, "30m": 120, "1h": 1440, "3h": 4320 }[fixedRuleSignal.interval] || 60;
+      const dur = mins >= 1440 ? `${mins / 1440} 天` : mins >= 60 ? `${mins / 60} 小时` : `${mins} 分钟`;
+      const valHtml = `<span class="muted">${tx("有效至", "Valid until")}</span> ${tx("当前收盘后约", "~after this candle")} <b>${dur}</b> · <span class="muted">${tx("破位即撤销", "void if broken")}</span>`;
+      if (validity.dataset.lastHtml !== valHtml) {
+        validity.innerHTML = valHtml;
+        validity.dataset.lastHtml = valHtml;
+      }
+      validity.classList.add("is-valid");
+    }
+  }
+  if (reason) {
+    const reasonHtml = `<span class="signal-summary"><b class="signal-indicator ${m.close >= m.e20 ? "bull" : "bear"}">EMA20 ${money(m.e20)}</b><i>·</i><b class="signal-indicator ${m.close >= m.e50 ? "bull" : "bear"}">EMA50 ${money(m.e50)}</b><i>·</i><b class="signal-indicator ${m.rsi >= 50 ? "bull" : "bear"}">RSI(14) ${m.rsi.toFixed(2)}</b><i>·</i><b class="signal-indicator ${m.macd >= 0 ? "bull" : "bear"}">MACD ${m.macd.toFixed(2)}</b></span>`;
+    if (reason.dataset.lastHtml !== reasonHtml) {
+      reason.innerHTML = reasonHtml;
+      reason.dataset.lastHtml = reasonHtml;
+    }
+  }
   renderFixedIndicatorDetails(m);
   const sl = $("sl"),
     tp = $("tp");
@@ -4644,6 +4945,14 @@ function renderFixedRuleSignal() {
       : "";
     basis.textContent = `${fixedRuleBasisText()} · ${tx("最近收盘", "Last close")} ${pointTime(fixedRuleSignal.closedAt)}${confirmation ? ` · ${tx("周期校验", "Timeframes")}: ${confirmation}` : ""}`;
   }
+  /* 事件驱动高亮：仅当方向跨阈值切换时闪烁一次，避免持续状态标签造成的噪音。 */
+  const newState = ruleDirectionForScore(m.score);
+  if (lastRuleSignalState !== null && newState !== lastRuleSignalState && signalCard) {
+    signalCard.classList.remove("signal-flash");
+    void signalCard.offsetWidth;
+    signalCard.classList.add("signal-flash");
+  }
+  lastRuleSignalState = newState;
 }
 async function loadFixedRuleSignal(force = false) {
   if (fixedRuleSignal.loading) return;
@@ -4774,7 +5083,8 @@ function drawCandlestickChart() {
     P = { l: 52, r: 74, t: 15, b: 8 },
     cw = w - P.l - P.r,
     ch = h - P.t - P.b,
-    priceHeight = ch;
+    timeAxisH = 28,
+    priceHeight = Math.max(80, ch - timeAxisH);
   const closes = d.map((v) => v.close),
     ma20 = ema(closes, 20),
     ma50 = ema(closes, 50),
@@ -4841,7 +5151,51 @@ function drawCandlestickChart() {
           ? "bottom"
           : "inside",
   }));
+  /* 理论强评价线：只有持仓填入了可推算强平价的数据（保证金/持仓量+杠杆）才显示。
+     计算口径与 voice 模块的 theoreticalLiquidation 保持一致。 */
+  const liqLevelsWithPlacement = (window.btcPersonalEntries || [])
+    .filter(
+      (entry) =>
+        Number.isFinite(Number(entry?.price)) && Number(entry.price) > 0,
+    )
+    .map((entry) => {
+      const price = Number(entry.price),
+        amount = Number(entry.amount),
+        margin = Number(entry.margin),
+        leverage = Number(entry.leverage),
+        collateral =
+          Number.isFinite(margin) && margin > 0
+            ? margin
+            : Number.isFinite(amount) && amount > 0 && leverage > 0
+              ? amount / leverage
+              : null,
+        effectiveLeverage =
+          Number.isFinite(amount) && amount > 0 && collateral
+            ? amount / collateral
+            : null;
+      if (!Number.isFinite(effectiveLeverage) || effectiveLeverage <= 0)
+        return null;
+      const side = entry.side === "short" ? "short" : "long",
+        liqPrice =
+          side === "short"
+            ? price * (1 + 1 / effectiveLeverage - 0.005)
+            : price * (1 - 1 / effectiveLeverage + 0.005);
+      return {
+        price: liqPrice,
+        side,
+        placement:
+          liqPrice > marketHigh + marketSpan * 0.25
+            ? "top"
+            : liqPrice < marketLow - marketSpan * 0.25
+              ? "bottom"
+              : "inside",
+      };
+    })
+    .filter(Boolean);
   entryLevelsWithPlacement
+    .filter((entry) => entry.placement === "inside")
+    .forEach((entry) => values.push(entry.price));
+  liqLevelsWithPlacement
     .filter((entry) => entry.placement === "inside")
     .forEach((entry) => values.push(entry.price));
   let lo = Math.min(...values),
@@ -5033,6 +5387,44 @@ function drawCandlestickChart() {
     c.fillText(label, P.l + 11, labelY + 12);
     c.restore();
   });
+  /* 理论爆仓价线：做空=亮橙、做多=黄绿，均为其他线条未占用的警示色；
+     左右只画到图表主体（P.l ~ P.l+cw），不超出；
+     离图表数据很远时贴画布最上/最下边缘（第一条线紧贴边），带 ↑/↓ 箭头。 */
+  liqLevelsWithPlacement.forEach((entry, index) => {
+    const isShort = entry.side === "short",
+      color = isShort ? "#ff9d2b" : "#c0eb2a",
+      colorBg = isShort ? "rgba(255,157,43,.18)" : "rgba(192,235,42,.16)",
+      yy =
+        entry.placement === "top"
+          ? 2 + index * 18
+          : entry.placement === "bottom"
+            ? h - 26 - index * 18
+            : y(entry.price),
+      label = `${isShort ? tx("做空爆仓价", "Short liquidation") : tx("做多爆仓价", "Long liquidation")} ${money(entry.price)}${entry.placement === "top" ? " ↑" : entry.placement === "bottom" ? " ↓" : ""}`;
+    c.save();
+    c.strokeStyle = color;
+    c.lineWidth = 1.5;
+    c.setLineDash([3, 3]);
+    c.beginPath();
+    c.moveTo(P.l, yy);
+    c.lineTo(P.l + cw, yy);
+    c.stroke();
+    c.setLineDash([]);
+    c.font = "700 10px ui-sans-serif,system-ui";
+    c.textAlign = "left";
+    const width = Math.min(c.measureText(label).width + 12, cw - 10),
+      labelY =
+        entry.placement === "top"
+          ? Math.min(P.t + priceHeight - 20, yy + 5)
+          : entry.placement === "bottom"
+            ? Math.max(P.t + 3, yy - 20)
+            : Math.max(P.t + 3, Math.min(P.t + priceHeight - 20, yy + 5));
+    c.fillStyle = colorBg;
+    c.fillRect(P.l + 5, labelY, width, 17);
+    c.fillStyle = color;
+    c.fillText(label, P.l + 11, labelY + 12);
+    c.restore();
+  });
   const highValue = (v) => v.close,
     lowValue = (v) => v.close,
     hiI = d.reduce(
@@ -5130,6 +5522,35 @@ function drawCandlestickChart() {
     }
     c.restore();
   }
+  /* X 轴时间刻度：随可见 K 线范围、缩放与周期动态调整密度/格式。 */
+  c.save();
+  const spanMs = d[d.length - 1].time - d[0].time;
+  const intervalMins = intervalMinutes[state.interval] || 1;
+  const isLongTerm = intervalMins >= 240; // 4h+
+  const showDate = isLongTerm || spanMs > 86_400_000;
+  const labelMinGap = showDate ? 110 : 72;
+  const maxTimeLabels = Math.max(2, Math.floor(cw / labelMinGap));
+  const timeStep = Math.max(1, Math.ceil((d.length - 1) / (maxTimeLabels - 1)));
+  const axisY = P.t + priceHeight + 14;
+  c.strokeStyle = "rgba(144,169,199,.14)";
+  c.lineWidth = 1;
+  c.beginPath();
+  c.moveTo(P.l, axisY);
+  c.lineTo(P.l + cw, axisY);
+  c.stroke();
+  c.fillStyle = "#75849a";
+  c.font = "11px system-ui";
+  c.textAlign = "center";
+  c.textBaseline = "top";
+  for (let i = 0; i < d.length; i += timeStep) {
+    const xx = x(i);
+    c.beginPath();
+    c.moveTo(xx, axisY - 4);
+    c.lineTo(xx, axisY);
+    c.stroke();
+    c.fillText(formatTimeAxisLabel(d[i].time, showDate), xx, axisY + 3);
+  }
+  c.restore();
   renderRangeExtremaPoints();
   drawRsiChart();
 }
@@ -5381,10 +5802,34 @@ function drawRsiChart() {
     );
     cv.style.cursor = pick(event) ? "pointer" : "default";
     scheduleChartRender();
+    const tip = $("chartTooltip");
+    if (tip && hoverIndex !== null && d[hoverIndex]) {
+      const v = d[hoverIndex],
+        series = state.chartSeries || { rsi: true, volume: true },
+        showRsi = series.rsi !== false,
+        showVolume = series.volume !== false;
+      let rsiHtml = "";
+      if (showRsi) {
+        const rsiArr = rsi(d.map((x) => x.close), 14),
+          rv = rsiArr[hoverIndex];
+        if (Number.isFinite(rv)) rsiHtml = `<span>RSI(14) ${rv.toFixed(2)}</span>`;
+      }
+      const volHtml = showVolume
+        ? `<span>${tx("量", "Vol")} ${v.volume.toLocaleString("en-US", { maximumFractionDigits: 2 })}</span>`
+        : "";
+      const delta = (v.close / v.open - 1) * 100;
+      tip.innerHTML = `<b>${pointTime(v.time)}</b><span>${tx("收", "Close")} ${money(v.close)} ${pct(delta)}</span>${volHtml}${rsiHtml}`;
+      tip.style.display = "grid";
+      const boxRect = cv.closest(".chart-box")?.getBoundingClientRect() || rect;
+      tip.style.left = Math.min(event.clientX - boxRect.left + 14, boxRect.width - 185) + "px";
+      tip.style.top = Math.max(8, event.clientY - boxRect.top - 96) + "px";
+    }
   });
   cv.addEventListener("mouseleave", () => {
     hoverIndex = null;
     hoverPoint = null;
+    const tip = $("chartTooltip");
+    if (tip) tip.style.display = "none";
     scheduleChartRender();
   });
 })();
@@ -6504,7 +6949,7 @@ renderRangeExtremaPoints = function () {
   const version = document.createElement("button");
   version.type = "button";
   version.id = "appVersion";
-  version.textContent = "v2.4.1";
+  version.textContent = "v2.5.0";
   version.title = "查看更新日志";
   version.setAttribute("aria-expanded", "false");
   const sourceLabel = controls.querySelector("label");
@@ -6525,6 +6970,11 @@ renderRangeExtremaPoints = function () {
   const v23Changelog = log.innerHTML;
   const v24Changelog = `<b>v2.4.0 更新日志</b><dl><dt>语音接力播报</dt><dd>语音设置、规则、音色与持仓参考同步持久化到本机服务端；页面每 5 秒发送心跳，关闭或挂起超过 60 秒后由服务端按相同规则继续播报，期间触发记录在重新打开页面时回拉刷新。</dd><dt>信号有效区间</dt><dd>规则信号卡新增 ATR 作废／兑现参考带与现价位置刻度：价格在带内信号保持有效，越过作废边界后信号灰显并提示失效；取代原先静态的 ATR 止盈止损读数。</dd><dt>溢价指数</dt><dd>新增 OKX 永续相对现货的溢价指数（每 30 秒刷新），作为杠杆拥挤过滤进入微观结构与追单理由：明显正溢价提示多头成本偏高、负溢价提示空头拥挤。</dd><dt>美股实时状态</dt><dd>顶部时间栏新增北京时间与纽约时间及纽交所开闭市状态；美股盘中自动展示 SPY、QQQ 实时价格与涨跌，数据源不可用时整行隐藏而不渲染空行情。</dd><dt>长期图表修复</dt><dd>OKX 历史 K 线超过单页上限（300 根）时改为按页回溯拼接，1 年／6 个月等长周期不再被静默截短，图表覆盖范围与页面声明一致。</dd><dt>宏观日历增强</dt><dd>事件进入发布窗口（前后 15 分钟）时自动高频刷新；FOMC、CPI 与非农在公布后 24 小时内保持可见，非农自动回填 BLS 官方实际值。</dd><dt>盘口价差</dt><dd>订单簿快照新增买卖价差（bps）度量并纳入微观结构参考。</dd><dt>稳定性与缓存</dt><dd>未处理异常／Promise 拒绝只记录日志，不再拖垮整个行情服务；每个请求带统一兜底错误返回；Server 酱推送统一 8 秒超时避免挂起投递循环；空闲数据库连接异常受控监听；带版本号的静态资源启用一年强缓存，其余按需刷新。</dd><dt>前端架构</dt><dd>面板归属集中登记到统一注册中心（BTCPanels）；决策层、固定规则信号与指标明细改由有序增强器队列扩展，不再覆写旧渲染函数或跨模块挪动 DOM；研究型回测与联动卡不再依赖固定 DOM 锚点，改为数据就绪后动态挂载；样式按 tokens／base／layout／components／responsive／foundation 分模块渐进拆分。</dd></dl><hr>${v23Changelog}`;
   log.innerHTML = `<b>v2.4.1 更新日志</b><dl><dt>RSI × 成交量叠显</dt><dd>RSI 曲线与成交量柱改为同区域叠显：成交量柱垫底、RSI 线叠上层；点击柱状图凸显量、点 RSI 线压暗量，悬浮竖虚线贯穿主图与子图。</dd><dt>我的持仓编辑升级</dt><dd>编辑表单扩为四字段（持仓量／开仓均价／保证金／杠杆），手动杠杆优先、留空自动推导；新增保存／取消／清除三按钮与双击编辑；自动计算杠杆、未实现盈亏、收益率、保证金回报与理论强平价；两持仓槽支持拖拽互换位置。</dd><dt>图表线条配色统一</dt><dd>图例色块与线条颜色对齐：布林带保持灰、VWAP 改品红、RSI 改中性白，消除与红绿柱撞色。</dd><dt>语音播报体验</dt><dd>「播报中」标签移到按钮右侧；语音规则三栏可拖拽调宽；原生勾选改为 iOS 风格拨钮；播报优先级支持拖拽排序，标签与「播报条件」文案对齐。</dd><dt>综合信号状态说明</dt><dd>「当前规则信号」标题新增帮助按钮，展开 5 种信号状态（做多绿／做空红）的完整说明与速查口诀：带数字＝已确认最强；带「待收盘」＝观察期；带「趋势」无数字＝弱确认。</dd><dt>更新日志折叠</dt><dd>所有旧版本（含 v2.0.0）默认收起，打开日志首先看到当前版本完整变更。</dd><dt>连通性测试修复</dt><dd>顶部连通性按钮的分数不再重复显示（原 JS 文本与 CSS 伪元素各显示一次）。</dd><dt>后端数据链路</dt><dd>持仓档案同步支持持仓量／保证金／杠杆；OKX 改用 history-candles 端点并分页回溯，1 年／6 个月等长周期 K 线不再静默截短；3 小时 K 线聚合拉足量 1 小时数据以预热 EMA200；新增服务端规则评分精确复算；服务端语音接力默认关闭，播报改由浏览器接管。</dd></dl><hr>${v24Changelog}`;
+  // v2.5.0：AI 行情助手（千问）整条链路启用，并补上 API 接入中心、本机凭据加密与云端密文升级。
+  // v2.5.0 ships the Qwen assistant end to end, plus API Center, the encrypted local
+  // vault and the hardened cloud ciphertext envelope.
+  const v241Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.5.0 更新日志</b><dl><dt>AI 行情助手</dt><dd>页面右下角新增悬浮对话窗：把你正在看的数据（各周期 K 线与 EMA／MACD／RSI／布林带／ATR、资金费率与基差、持仓量、恐惧&贪婪指数、美联储与宏观日程）整理成结构化快照交给千问，回答固定按【结论】【为什么这么判断】【关键价位】【什么情况说明我判断错了】【风险提醒】五段呈现，并以打字机效果流式输出。</dd><dt>回答模式</dt><dd>可选「通俗／中等／专业」三档语气，只改讲法不改数据：通俗档完全不用术语（RSI 说成“衡量抢着买还是抢着卖的指标”，支撑叫“地板”、阻力叫“天花板”）；中等档术语首次出现配一句白话解释；专业档直接给指标读数与日线／4 小时／1 小时分周期结构，并要求给出失效条件与情景概率。与「快速／深度」互相独立，选择记在本机。</dd><dt>思考模式与模型选择</dt><dd>快速档关闭模型思考（实测约 20 秒出结果），深度档保留推理并限制长度（约 55 秒）；模型可在 Token Plan 列出的 5 个文本型号间切换，默认性价比档 qwen3.8-flash（成本约为旗舰的 1/15），图片与语音型号置灰不可选；已把旧版硬编码的旗舰默认值一次性迁移到性价比档，用户后续自选的型号不会被覆盖。</dd><dt>额度面板</dt><dd>对话窗顶部显示额度进度条、重置倒计时与最近 10 次调用明细，累计用量写入 data/ai-quota.json，重启不归零。千问兼容端点不返回实时额度响应头，面板数值为按模型换算的本地估算，精确剩余仍以控制台为准。</dd><dt>API 接入中心</dt><dd>右上角新增浮层，集中管理第三方密钥（千问为 Key＋端点＋模型三件套），支持更新、验证与清除；服务端以 AES-256-GCM 加密落盘，浏览器始终拿不到明文 Key。云端账户服务不可用时，千问这类纯本机配置仍可保存与验证，不再被登录态连坐。</dd><dt>本机凭据加密存储</dt><dd>推送 Key、提醒规则与 API 配置改由浏览器 IndexedDB 中不可导出的 AES-GCM 密钥加密，localStorage 不再存明文；退出登录时可选择“保留加密副本”或“彻底清除本机副本”。账户卡新增「一键同步全部」，把持仓资料、推送规则与本会话 SendKey 一次同步到云端。</dd><dt>云端账户加密升级</dt><dd>账户密文改为带版本前缀的认证信封，并把密文与用户、用途绑定——即使数据库行被复制到其它账户也无法解密；个人档案新增独立加密列；服务端推送任务不再携带 SendKey，改为投递前从加密记录中读取。</dd><dt>宏观与投资日历</dt><dd>新增投资日历接口，可选接入 Finnhub（共识／实际值／前值）、EIA 石油库存与 CoinGecko 增强数据，密钥只留在服务端；未配置增强源时，官方公开日历照常可用。</dd><dt>部署与生态</dt><dd>Caddy 入口新增 HSTS、X-Content-Type-Options 与 Referrer-Policy 响应头；附带 mcp-server.mjs，把价格、指标、情绪、宏观日历与完整快照暴露为 5 个 MCP 工具，供桌面端 AI 直接取数而不重复采集。</dd></dl><hr>${v241Changelog}`;
   // 旧版本默认收起，确保用户打开日志时首先看到当前版本的完整变更。
   // Older releases are collapsed by default so opening the log focuses on the current release.
   const collapseLegacyRelease = () => {
@@ -6541,6 +6991,11 @@ renderRangeExtremaPoints = function () {
     divider.replaceWith(details);
     heading.remove();
   };
+  // 每个历史版本调一次：当前为 v2.4.1 … v2.0.0，共 7 个。新增版本时必须同步加一行，
+  // 否则最旧的那版不会被折叠。
+  // One call per legacy release (currently v2.4.1 down to v2.0.0 = seven). Adding a release
+  // means adding one call here, otherwise the oldest entry stays expanded.
+  collapseLegacyRelease();
   collapseLegacyRelease();
   collapseLegacyRelease();
   collapseLegacyRelease();
@@ -7125,29 +7580,52 @@ function renderSignalProjection() {
 setTimeout(() => {
   renderSignalProjection = function () {
     const signal = $("signal"),
-      reason = $("signalReason"),
-      m = state.candles.length ? metrics(state.candles) : null;
-    if (!signal || !reason || !m) return;
-    let box = $("signalProjection");
-    if (!box) {
-      box = document.createElement("section");
-      box.id = "signalProjection";
-      box.className = "signal-projection";
-      reason.after(box);
-    }
-    const long = m.score >= 0,
-      strength = Math.abs(m.score),
-      last = state.ticker?.last || m.close,
-      move = m.atr * (1.05 + Math.min(1.25, strength / 100)),
-      target = last + (long ? move : -move),
-      duration =
-        strength >= 75
-          ? tx("约 45–90 分钟", "about 45–90 min")
-          : strength >= 50
-            ? tx("约 20–60 分钟", "about 20–60 min")
-            : tx("约 10–30 分钟", "about 10–30 min"),
-      cls = long ? "bull" : "bear",
-      tip = long
+      reason = $("signalReason");
+    if (!signal || !reason) return;
+    /* Use the same data source as the rule signal so the directional estimate
+       does not jitter on every chart-period/ticker tick. Fallback only if rule
+       candles are not ready yet. */
+    const source = fixedRuleSignal.candles.length >= RULE_SIGNAL_MIN_CANDLES
+      ? fixedRuleSignal.candles
+      : state.candles.length
+        ? state.candles
+        : null;
+    if (!source) return;
+    const m = metrics(source, state.ticker?.last);
+    if (!m) return;
+    const [label, cls] = classification(m.score);
+    const flat = cls === "flat";
+    const long = cls === "bull";
+    const strength = Math.abs(m.score);
+    const last = state.ticker?.last || m.close;
+    const move = m.atr * (1.05 + Math.min(1.25, strength / 100));
+    const target = flat
+      ? last
+      : last + (long ? move : -move);
+    const intervalMin =
+      {
+        "1m": 1,
+        "5m": 5,
+        "15m": 15,
+        "30m": 30,
+        "1h": 60,
+        "2h": 120,
+        "4h": 240,
+        "1d": 1440,
+      }[fixedRuleSignal.interval] || 5;
+    const duration = flat
+      ? tx("—", "—")
+      : strength >= 75
+        ? tx(`约 ${Math.round(45 / intervalMin)}–${Math.round(90 / intervalMin)} 根 K 线`, `about ${Math.round(45 / intervalMin)}–${Math.round(90 / intervalMin)} candles`)
+        : strength >= 50
+          ? tx(`约 ${Math.round(20 / intervalMin)}–${Math.round(60 / intervalMin)} 根 K 线`, `about ${Math.round(20 / intervalMin)}–${Math.round(60 / intervalMin)} candles`)
+          : tx(`约 ${Math.round(10 / intervalMin)}–${Math.round(30 / intervalMin)} 根 K 线`, `about ${Math.round(10 / intervalMin)}–${Math.round(30 / intervalMin)} candles`);
+    const tip = flat
+      ? tx(
+          "当前规则信号处于观望区间，方向研究估算暂时不给出目标价；等待多周期确认后再更新。",
+          "The rule signal is neutral right now, so no directional target is estimated; it will update once the multi-timeframe confirmation aligns.",
+        )
+      : long
         ? tx(
             "预计目标价表示：按当前“做多”方向与上方预计持续时长，推测价格可能上涨到的研究目标位；不是保证到达或成交的价格。",
             "Estimated target: a research level the price may rise to during the projected long duration; not a guaranteed fill or outcome.",
@@ -7156,8 +7634,23 @@ setTimeout(() => {
             "预计目标价表示：按当前“做空”方向与上方预计持续时长，推测价格可能下跌到的研究目标位；不是保证到达或成交的价格。",
             "Estimated target: a research level the price may fall to during the projected short duration; not a guaranteed fill or outcome.",
           );
+    const dirText = flat
+      ? tx("观望", "Neutral")
+      : long
+        ? tx("做多", "Long")
+        : tx("做空", "Short");
+    const basisText = fixedRuleSignal.candles.length >= RULE_SIGNAL_MIN_CANDLES
+      ? tx(`基于 ${fixedRuleSignal.interval} 已收盘 K 线`, `Based on closed ${txInterval(fixedRuleSignal.interval)} candles`)
+      : tx("基于当前图表周期", "Based on current chart interval");
+    let box = $("signalProjection");
+    if (!box) {
+      box = document.createElement("section");
+      box.id = "signalProjection";
+      box.className = "signal-projection";
+      reason.after(box);
+    }
     box.className = `signal-projection ${cls}`;
-    box.innerHTML = `<span>${tx("方向研究估算", "Directional research estimate")}</span><div><b>${long ? tx("做多", "Long") : tx("做空", "Short")}</b><em>${tx("预计持续", "Estimated duration")} ${duration}</em><strong>${tx("预计目标价", "Estimated target")} ${money(target)} <button class="help-dot" type="button" data-tip="${tip}" aria-label="${tx("预计目标价说明", "Target price explanation")}">!</button></strong></div><small>${tx("按当前 ATR 波动与规则信号强度推算；目标不保证到达。", "Derived from current ATR volatility and rule-signal strength; the target is not guaranteed.")}</small>`;
+    box.innerHTML = `<span>${tx("方向研究估算", "Directional research estimate")}<small> · ${basisText}</small></span><div><b>${dirText}</b><em>${tx("预计持续", "Estimated duration")} ${duration}</em><strong>${flat ? tx("目标价待方向确认后更新", "Target pending confirmation") : `${tx("预计目标价", "Estimated target")} ${money(target)}`} <button class="help-dot" type="button" data-tip="${tip}" aria-label="${tx("预计目标价说明", "Target price explanation")}">!</button></strong></div><small>${tx("按当前 ATR 波动与规则信号强度推算；目标不保证到达。", "Derived from current ATR volatility and rule-signal strength; the target is not guaranteed.")}</small>`;
   };
   if (state.candles.length) renderAnalysis();
 }, 0);
@@ -7997,19 +8490,6 @@ if (typeof positionState.confirmed !== "boolean")
   renderPosition();
 })();
 
-$("chart")?.addEventListener("mousemove", (event) => {
-  const cv = $("chart"),
-    tip = $("chartTooltip");
-  if (!cv || !tip || tip.style.display === "none") return;
-  const rect = cv.getBoundingClientRect(),
-    x = event.clientX - rect.left,
-    y = event.clientY - rect.top,
-    tipW = Math.min(300, tip.offsetWidth || 300),
-    tipH = tip.offsetHeight || 190;
-  tip.style.left = `${x + tipW + 24 < rect.width ? x + 24 : Math.max(10, x - tipW - 24)}px`;
-  tip.style.top = `${y - tipH - 24 > 8 ? y - tipH - 24 : Math.min(rect.height - tipH - 8, y + 24)}px`;
-});
-
 function ensureLiqProbabilityCard() {
   let card = $("liqProbabilityCard");
   if (card && card.closest(".micro-forecast")) card.remove();
@@ -8080,6 +8560,10 @@ addDecisionRenderEnhancer("liquidation-card", () => {
 });
 
 function renderRangeExtremaPoints() {
+  // 用户要求隐藏最高/最低选中价浮动标签
+  $("rangeHighPoint")?.remove();
+  $("rangeLowPoint")?.remove();
+  return;
   const box = $("chart")?.closest(".chart-box"),
     cv = $("chart"),
     d = visibleCandles();
@@ -8528,13 +9012,46 @@ $("chart")?.addEventListener("pointerleave", () => {
   const o = $("selectionOverlay");
   if (o) o.hidden = true;
 });
-$("chart")?.addEventListener("mousemove", () => {
+$("chart")?.addEventListener("mousemove", (event) => {
   const tip = $("chartTooltip"),
-    v = visibleCandles()[hoverIndex],
+    d = visibleCandles(),
+    v = d[hoverIndex],
     live = state.ticker?.last;
   if (!tip || !v || !Number.isFinite(live)) return;
-  const delta = v.close - live;
-  tip.innerHTML = `<b>${pointTime(v.time)}</b><strong class="chart-point-price">${tx("选中价", "Selected price")} ${money(v.close)}</strong><span class="chart-live-price">${tx("实时价", "Live price")} ${money(live)} <i class="${delta >= 0 ? "bull" : "bear"}">${tx("差价", "Δ")} ${delta >= 0 ? "+" : "−"}${money(Math.abs(delta))}</i></span><span>${tx("开", "Open")} ${money(v.open)}　${tx("高", "High")} ${money(v.high)}</span><span>${tx("低", "Low")} ${money(v.low)}　${tx("收", "Close")} ${money(v.close)}</span><span class="${v.close >= v.open ? "bull" : "bear"}">${tx("成交量", "Volume")} ${Number(v.volume).toLocaleString("en-US", { maximumFractionDigits: 2 })}</span>`;
+  const delta = v.close - live,
+    series = state.chartSeries || { rsi: true, volume: true },
+    showRsi = series.rsi !== false,
+    showVolume = series.volume !== false;
+  let rsiHtml = "";
+  if (showRsi) {
+    const rv = rsi(d.map((x) => x.close), 14)[hoverIndex];
+    if (Number.isFinite(rv)) {
+      const rsiClass = rv >= 70 ? "bear" : rv <= 30 ? "bull" : "";
+      rsiHtml = `<span class="${rsiClass}">RSI(14) ${rv.toFixed(2)}</span>`;
+    }
+  }
+  const volHtml = showVolume
+    ? `<span class="${v.close >= v.open ? "bull" : "bear"}">${tx("成交量", "Volume")} ${Number(v.volume).toLocaleString("en-US", { maximumFractionDigits: 2 })}</span>`
+    : "";
+  tip.innerHTML = `<b>${pointTime(v.time)}</b><strong class="chart-point-price">${tx("选中价", "Selected price")} ${money(v.close)}</strong><span class="chart-live-price">${tx("实时价", "Live price")} ${money(live)} <i class="${delta >= 0 ? "bull" : "bear"}">${tx("差价", "Δ")} ${delta >= 0 ? "+" : "−"}${money(Math.abs(delta))}</i></span><span>${tx("开", "Open")} ${money(v.open)}　${tx("高", "High")} ${money(v.high)}</span><span>${tx("低", "Low")} ${money(v.low)}　${tx("收", "Close")} ${money(v.close)}</span>${volHtml}${rsiHtml}`;
+  const rect = $("chart")?.getBoundingClientRect();
+  if (rect && event) {
+    const boxRect = $("chart")?.closest(".chart-box")?.getBoundingClientRect() || rect,
+      pad = 10,
+      gap = 20,
+      tipW = tip.offsetWidth || 220,
+      tipH = tip.offsetHeight || 150,
+      cursorX = event.clientX - boxRect.left,
+      cursorY = event.clientY - boxRect.top;
+    // 水平：默认放光标右侧（间距 20px）；放不下时整卡翻到光标左侧。
+    let left = cursorX + gap;
+    if (left + tipW > boxRect.width - pad) left = cursorX - tipW - gap;
+    // 垂直：默认放光标上方（间距 20px）；顶部放不下时翻到光标下方。
+    let top = cursorY - tipH - gap;
+    if (top < pad) top = cursorY + gap;
+    tip.style.left = Math.max(pad, Math.min(left, boxRect.width - tipW - pad)) + "px";
+    tip.style.top = Math.max(pad, Math.min(top, boxRect.height - tipH - pad)) + "px";
+  }
 });
 $("loadResonance").onclick = () => resonance(false);
 resetResonanceTimer();
@@ -8780,7 +9297,7 @@ if (zoomControls)
     if (!op) return;
     state.zoom =
       op === "in"
-        ? Math.min(5, state.zoom * 1.5)
+        ? Math.min(7, state.zoom * 1.5)
         : op === "out"
           ? Math.max(1, state.zoom / 1.5)
           : 1;
@@ -9427,6 +9944,126 @@ function ensurePersonalEntryCard() {
   else hero.append(card);
   return card;
 }
+/* 顶部三卡（价格卡 + 两个持仓卡）拖拽互换位置：顺序持久化在 localStorage。
+   持仓容器在 CSS 里 display:contents 透传，三个卡片同为 .hero 的 flex 项，用 order 排序。 */
+const heroUnitOrderKey = "btc_hero_unit_order";
+const heroUnitKeys = ["price", "slot0", "slot1"];
+let heroUnitOrder = (() => {
+  try {
+    const saved = JSON.parse(localStorage.getItem(heroUnitOrderKey) || "null");
+    if (
+      Array.isArray(saved) &&
+      saved.length === 3 &&
+      heroUnitKeys.every((key) => saved.includes(key))
+    )
+      return saved.map(String);
+  } catch {}
+  return [...heroUnitKeys];
+})();
+function saveHeroUnitOrder() {
+  localStorage.setItem(heroUnitOrderKey, JSON.stringify(heroUnitOrder));
+}
+const heroUnitDesktop = window.matchMedia("(min-width: 1200px)");
+function applyHeroUnitOrder() {
+  const hero = document.querySelector(".hero");
+  if (!hero) return;
+  const desktop = heroUnitDesktop.matches;
+  const units = [];
+  const priceDiv = hero.querySelector(":scope > div");
+  if (priceDiv) {
+    priceDiv.dataset.heroUnit = "price";
+    priceDiv.draggable = true;
+    units.push({ key: "price", el: priceDiv });
+  }
+  hero
+    .querySelectorAll("#personalEntryCard [data-entry-drag-index]")
+    .forEach((slot) => {
+      const key = `slot${slot.dataset.entryDragIndex}`;
+      slot.dataset.heroUnit = key;
+      units.push({ key, el: slot });
+    });
+  units.forEach(({ key, el }) => {
+    let order;
+    if (desktop) {
+      order = heroUnitOrder.indexOf(key);
+    } else {
+      /* 窄屏：价格卡不参与互换，仅两个持仓槽在卡内排序。 */
+      order =
+        key === "price"
+          ? 0
+          : heroUnitOrder.filter((k) => k !== "price").indexOf(key);
+    }
+    el.style.order = String(order);
+  });
+  /* 视觉上最左的单元不带左侧分隔线。 */
+  units.forEach(({ el }) => el.classList.remove("hero-unit-first"));
+  const firstKey = desktop
+    ? heroUnitOrder[0]
+    : heroUnitOrder.find((k) => k !== "price");
+  units.find(({ key }) => key === firstKey)?.el.classList.add("hero-unit-first");
+  /* 行情栏等其他子元素固定排在三个可互换单元之后，避免插进中间。 */
+  hero
+    .querySelectorAll(":scope > *:not([data-hero-unit])")
+    .forEach((el) => (el.style.order = "9"));
+}
+function bindHeroUnitDrag() {
+  const hero = document.querySelector(".hero");
+  if (!hero || hero.dataset.heroDragBound === "1") return;
+  hero.dataset.heroDragBound = "1";
+  let sourceKey = null;
+  hero.addEventListener("dragstart", (event) => {
+    const unit = event.target.closest?.("[data-hero-unit]");
+    if (!unit) return;
+    sourceKey = unit.dataset.heroUnit;
+    unit.classList.add("is-dragging");
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", sourceKey);
+  });
+  hero.addEventListener("dragend", (event) => {
+    event.target.closest?.("[data-hero-unit]")?.classList.remove("is-dragging");
+    hero
+      .querySelectorAll(".hero-unit-drag-over")
+      .forEach((el) => el.classList.remove("hero-unit-drag-over"));
+    sourceKey = null;
+  });
+  hero.addEventListener("dragover", (event) => {
+    const unit = event.target.closest?.("[data-hero-unit]");
+    if (!unit || sourceKey === null || unit.dataset.heroUnit === sourceKey)
+      return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    unit.classList.add("hero-unit-drag-over");
+  });
+  hero.addEventListener("dragleave", (event) => {
+    const unit = event.target.closest?.("[data-hero-unit]");
+    if (unit && !unit.contains(event.relatedTarget))
+      unit.classList.remove("hero-unit-drag-over");
+  });
+  hero.addEventListener("drop", (event) => {
+    event.preventDefault();
+    const unit = event.target.closest?.("[data-hero-unit]");
+    if (!unit || sourceKey === null) return;
+    const targetKey = unit.dataset.heroUnit;
+    /* 窄屏布局下价格卡不参与互换。 */
+    if (
+      !heroUnitDesktop.matches &&
+      (targetKey === "price" || sourceKey === "price")
+    ) {
+      unit.classList.remove("hero-unit-drag-over");
+      sourceKey = null;
+      return;
+    }
+    if (targetKey !== sourceKey) {
+      const a = heroUnitOrder.indexOf(sourceKey),
+        b = heroUnitOrder.indexOf(targetKey);
+      [heroUnitOrder[a], heroUnitOrder[b]] = [heroUnitOrder[b], heroUnitOrder[a]];
+      saveHeroUnitOrder();
+      applyHeroUnitOrder();
+    }
+    unit.classList.remove("hero-unit-drag-over");
+    sourceKey = null;
+  });
+}
 function personalSidePicker(index, side, configuredLeverage) {
   const leverage = configuredLeverage
     ? `<b class="personal-entry-leverage">${Math.round(configuredLeverage)}X</b>`
@@ -9443,7 +10080,7 @@ function personalEntrySlot(index, live) {
     return `<article class="personal-entry-slot ${side} editing">${personalSidePicker(index, side)}<div class="personal-entry-form"><label><small>${tx("持仓量 (USDT)", "Size (USDT)")}</small><input class="personal-entry-input" data-entry-amount="${index}" aria-label="${tx("持仓量", "Position size")}" type="number" inputmode="decimal" min="0" step="0.01" placeholder="0.00" value="${fmt(entry.amount)}"></label><label><small>${tx("开仓均价 (USDT)", "Entry price (USDT)")}</small><input class="personal-entry-input" data-entry-price="${index}" aria-label="${tx("我的买入价", "My entry price")}" type="number" inputmode="decimal" min="0" step="0.01" placeholder="0.00" value="${fmt(price)}"></label><label><small>${tx("保证金 (USDT)", "Margin (USDT)")}</small><input class="personal-entry-input" data-entry-margin="${index}" aria-label="${tx("保证金", "Margin")}" type="number" inputmode="decimal" min="0" step="0.01" placeholder="0.00" value="${fmt(entry.margin)}"></label><label><small>${tx("杠杆 (倍)", "Leverage (x)")}</small><input class="personal-entry-input" data-entry-leverage="${index}" aria-label="${tx("杠杆倍数", "Leverage")}" type="number" inputmode="decimal" min="0" step="1" placeholder="${tx("自动", "Auto")}" value="${fmt(entry.leverage, 0)}"></label></div><div class="personal-entry-actions"><button type="button" class="personal-entry-btn primary" data-entry-save="${index}">${tx("保存", "Save")}</button><button type="button" class="personal-entry-btn" data-entry-cancel="${index}">${tx("取消", "Cancel")}</button><button type="button" class="personal-entry-btn danger" data-entry-clear="${index}">${tx("清除", "Clear")}</button></div><small>${tx("Enter 保存 · Esc 取消；杠杆留空 = 持仓量÷保证金；清除 = 清空本笔持仓", "Enter to save · Esc to cancel; blank leverage = size÷margin; Clear removes the position")}</small></article>`;
   }
   if (!price)
-    return `<article class="personal-entry-slot ${side} empty" draggable="true" data-entry-drag-index="${index}">${personalSidePicker(index, side, configuredLeverage)}<button type="button" class="personal-entry-value" data-entry-value="${index}">--</button><small>${tx("双击输入杠杆、持仓量、保证金和开仓均价", "Double-click to enter leverage, size, margin and entry price")}<br>${tx("拖拽可以交换仓位位置", "Drag to swap position slots")}</small></article>`;
+    return `<article class="personal-entry-slot ${side} empty" draggable="true" data-entry-drag-index="${index}" data-hero-unit="slot${index}">${personalSidePicker(index, side, configuredLeverage)}<button type="button" class="personal-entry-value" data-entry-value="${index}">--</button><small>${tx("双击输入杠杆、持仓量、保证金和开仓均价", "Double-click to enter leverage, size, margin and entry price")}<br>${tx("拖拽可以与价格卡/另一持仓互换位置", "Drag to swap with the price card or the other position")}</small></article>`;
   const rawDelta = Number.isFinite(live) ? live - price : 0,
     delta = side === "short" ? -rawDelta : rawDelta,
     percentage = (delta / price) * 100,
@@ -9470,7 +10107,7 @@ function personalEntrySlot(index, live) {
       ? `<span class="personal-entry-liquidation${nearLiquidation ? " is-near-liquidation" : ""}">${tx("理论强平价", "Theoretical liquidation")} ${money(liquidation)}${nearLiquidation ? `<small role="alert">${tx("您的仓位即将被强平。", "Your position is close to liquidation.")}</small>` : ""}</span>`
       : "";
   const pnlSummary = `<b class="personal-entry-pnl">${signed(delta)} <em>${signedPct(percentage)}</em></b>${liquidationSummary}<span class="personal-entry-return">${tx("实时价差", "Live price difference")}${amount && roe !== null ? ` · ${tx("保证金回报", "Margin return")} ${signedPct(roe)}` : amount ? ` · ${tx("填写杠杆或保证金后计算回报与强平价", "Add leverage or margin for return and liquidation")}` : ` · ${tx("填写仓位金额后显示实际盈亏。", "Add position size to show actual PnL.")}`}</span>`;
-  return `<article class="personal-entry-slot ${side} ${profit ? "profit" : "loss"}" draggable="true" data-entry-drag-index="${index}">${personalSidePicker(index, side, configuredLeverage)}<div class="personal-entry-price-row"><button type="button" class="personal-entry-value" data-entry-value="${index}" title="${tx("双击编辑持仓", "Double-click to edit position")}">${money(price)}</button><i class="personal-entry-status">${profit ? tx("盈利中", "In profit") : tx("亏损中", "At a loss")}</i><b class="personal-entry-status-pnl">${signed(actualPnl)}</b></div><div class="personal-entry-pnl-layout"><div>${pnlSummary}</div></div><small>${amount ? `${tx("持仓", "Size")} ${money(amount)} USDT${configuredLeverage ? ` · ${tx("开仓杠杆", "Entry leverage")} ${configuredLeverage.toFixed(2)}×` : ""}${margin ? ` · ${tx("当前保证金", "Current margin")} ${money(margin)}` : ""}${leverage ? ` · ${tx("有效杠杆", "Effective leverage")} ${leverage.toFixed(2)}×` : ""} · ${tx("市价实时更新", "Live market price")}` : tx("双击价格补充杠杆、持仓量与保证金", "Double-click price to add leverage, size and margin")}</small></article>`;
+  return `<article class="personal-entry-slot ${side} ${profit ? "profit" : "loss"}" draggable="true" data-entry-drag-index="${index}" data-hero-unit="slot${index}">${personalSidePicker(index, side, configuredLeverage)}<div class="personal-entry-price-row"><button type="button" class="personal-entry-value" data-entry-value="${index}" title="${tx("双击编辑持仓", "Double-click to edit position")}">${money(price)}</button><i class="personal-entry-status">${profit ? tx("盈利中", "In profit") : tx("亏损中", "At a loss")}</i><b class="personal-entry-status-pnl">${signed(actualPnl)}</b></div><div class="personal-entry-pnl-layout"><div>${pnlSummary}</div></div><small>${amount ? `${tx("持仓", "Size")} ${money(amount)} USDT${configuredLeverage ? ` · ${tx("开仓杠杆", "Entry leverage")} ${configuredLeverage.toFixed(2)}×` : ""}${margin ? ` · ${tx("当前保证金", "Current margin")} ${money(margin)}` : ""}${leverage ? ` · ${tx("有效杠杆", "Effective leverage")} ${leverage.toFixed(2)}×` : ""} · ${tx("市价实时更新", "Live market price")}` : tx("双击价格补充杠杆、持仓量与保证金", "Double-click price to add leverage, size and margin")}</small></article>`;
 }
 function beginPersonalEntryEdit(index) {
   if (personalEntryEditingIndex !== null) return;
@@ -9565,7 +10202,19 @@ function renderPersonalEntryCard(force = false) {
     ? `<small class="personal-entry-account-sync" title="${tx("该数据已保存到当前登录账户，并会随账户恢复", "This data is stored in the signed-in account and follows it across browsers")}">${tx("已同步", "Synced")}</small>`
     : "";
   card.innerHTML =
-    sync + personalEntrySlot(0, live) + personalEntrySlot(1, live);
+    personalEntrySlot(0, live) + personalEntrySlot(1, live);
+  applyHeroUnitOrder();
+  /* 已同步徽章挂在视觉上第一个持仓槽的“我的持仓”标题旁，
+     不再绝对定位到卡片右上角（display:contents 会让它失去定位基准飞到页头）。 */
+  if (sync) {
+    const hostKey = heroUnitOrder.find((key) => key !== "price"),
+      hostIndex = Number(String(hostKey).slice(4));
+    card
+      .querySelector(
+        `[data-entry-drag-index="${hostIndex}"] .personal-entry-heading`,
+      )
+      ?.insertAdjacentHTML("beforeend", sync);
+  }
   card
     .querySelectorAll("[data-entry-value]")
     .forEach((button) =>
@@ -9583,53 +10232,14 @@ function renderPersonalEntryCard(force = false) {
       setPersonalEntrySide(index, button.dataset.entrySide);
       renderPersonalEntryCard();
     });
-    /* 拖拽互换两个持仓槽的位置。 */
-    let dragSourceIndex = null;
-    card.addEventListener("dragstart", (event) => {
-      const slot = event.target.closest("[data-entry-drag-index]");
-      if (!slot) return;
-      dragSourceIndex = Number(slot.dataset.entryDragIndex);
-      slot.classList.add("is-dragging");
-      event.dataTransfer.effectAllowed = "move";
-      event.dataTransfer.setData("text/plain", String(dragSourceIndex));
-    });
-    card.addEventListener("dragend", (event) => {
-      const slot = event.target.closest("[data-entry-drag-index]");
-      slot?.classList.remove("is-dragging");
-      card.querySelectorAll(".personal-entry-slot").forEach((s) => s.classList.remove("drag-over"));
-      dragSourceIndex = null;
-    });
-    card.addEventListener("dragover", (event) => {
-      const slot = event.target.closest("[data-entry-drag-index]");
-      if (!slot || dragSourceIndex === null) return;
-      const targetIndex = Number(slot.dataset.entryDragIndex);
-      if (targetIndex === dragSourceIndex) return;
-      event.preventDefault();
-      event.dataTransfer.dropEffect = "move";
-      slot.classList.add("drag-over");
-    });
-    card.addEventListener("dragleave", (event) => {
-      const slot = event.target.closest("[data-entry-drag-index]");
-      slot?.classList.remove("drag-over");
-    });
-    card.addEventListener("drop", (event) => {
-      event.preventDefault();
-      const slot = event.target.closest("[data-entry-drag-index]");
-      if (!slot || dragSourceIndex === null) return;
-      const targetIndex = Number(slot.dataset.entryDragIndex);
-      if (targetIndex === dragSourceIndex) return;
-      /* 交换 personalEntries 数组中两个位置的数据。 */
-      const tmp = personalEntries[dragSourceIndex];
-      personalEntries[dragSourceIndex] = personalEntries[targetIndex];
-      personalEntries[targetIndex] = tmp;
-      savePersonalEntries();
-      renderPersonalEntryCard();
-    });
   }
   renderPersonalEntryLegend();
   if (state.candles.length) draw();
 }
+bindHeroUnitDrag();
+heroUnitDesktop.addEventListener?.("change", applyHeroUnitOrder);
 renderPersonalEntryCard();
+applyHeroUnitOrder();
 window.addEventListener("btc:account-state", async (event) => {
   if (!event.detail?.loggedIn) {
     personalEntriesFollowAccount = false;
@@ -9674,12 +10284,13 @@ function macroCountdown(at) {
   const seconds = Math.max(0, Math.round((at - Date.now()) / 1000));
   const days = Math.floor(seconds / 86_400),
     hours = Math.floor((seconds % 86_400) / 3_600),
-    minutes = Math.floor((seconds % 3_600) / 60);
+    minutes = Math.floor((seconds % 3_600) / 60),
+    remainingSeconds = seconds % 60;
   return days
-    ? tx(`${days} 天 ${hours} 小时`, ` ${days}d ${hours}h`)
+    ? tx(`${days} 天 ${hours} 小时 ${minutes} 分 ${remainingSeconds} 秒`, ` ${days}d ${hours}h ${minutes}m ${remainingSeconds}s`)
     : hours
-      ? tx(`${hours} 小时 ${minutes} 分钟`, ` ${hours}h ${minutes}m`)
-      : tx(`${minutes} 分钟`, ` ${minutes}m`);
+      ? tx(`${hours} 小时 ${minutes} 分 ${remainingSeconds} 秒`, ` ${hours}h ${minutes}m ${remainingSeconds}s`)
+      : tx(`${minutes} 分 ${remainingSeconds} 秒`, ` ${minutes}m ${remainingSeconds}s`);
 }
 function macroUpdatedAgo(at, checking = false) {
   const elapsed = Math.max(0, Date.now() - Number(at || 0));
@@ -9853,6 +10464,120 @@ loadFedMonitor();
 // a release-window update (such as payrolls) appear as soon as its public source does.
 setInterval(loadFedMonitor, 60_000);
 setInterval(refreshMacroUpdateAges, 30_000);
+
+/* Investment calendar: the full table is purpose-built for BTC risk windows.
+   It uses the server-side feed so an optional Finnhub key never reaches JS. */
+let investmentCalendarData = null;
+let investmentCalendarFilter = "all";
+let investmentCalendarTimeZone = "Asia/Shanghai";
+let investmentCalendarExpanded = false;
+const calendarEscape = (value) => String(value ?? "--").replace(/[&<>\"]/g, (char) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" })[char]);
+function calendarFormat(at, options) {
+  return new Intl.DateTimeFormat(uiLang === "zh" ? "zh-CN" : "en-US", { timeZone: investmentCalendarTimeZone, ...options }).format(at);
+}
+function calendarWindow(event) {
+  const diff = Number(event.at) - Date.now();
+  const liquidity = event.category === "liquidity";
+  if (/FOMC|美联储利率决议/.test(String(event.title || ""))) return ["宏观核心", "FOMC（联邦公开市场委员会）决定政策利率并发布政策声明；BTC 通常通过美元、实际利率与风险偏好间接受影响", event.importance === "high"];
+  if (event.importance === "high" && diff > 0 && diff < 4 * 3_600_000) return [liquidity ? "流动性窗口" : "高波动窗口", liquidity ? "临近财政部操作；关注规模、期限桶及美债利率反应，不预设 BTC 方向" : "发布前 4 小时：避免追单，降低杠杆与仓位集中度", true];
+  if (event.importance === "high" && diff > 0 && diff < 24 * 3_600_000) return [liquidity ? "流动性关注" : "风险关注", liquidity ? "24 小时内财政部流动性节点；跟踪操作结果与收益率曲线反应" : "24 小时内高敏感宏观事件；等待预期差确认", true];
+  if (diff <= 0 && diff > -2 * 3_600_000) return ["数据窗口", "数据刚公布，先观察实际值相对预期的偏差", true];
+  return [event.category === "chain" || event.category === "crypto" ? "加密观察" : event.category === "liquidity" ? "流动性观察" : "常规监控", event.directional || "不单独构成方向信号", false];
+}
+function calendarEventTitle(title) {
+  const raw=String(title || "");
+  const exact={
+    "Producer Price Index":"美国生产者价格指数（PPI） · Producer Price Index",
+    "Consumer Price Index":"美国消费者价格指数（CPI） · Consumer Price Index",
+    "Employment Situation":"美国非农就业报告 · Employment Situation",
+    "U.S. Import and Export Price Indexes":"美国进出口价格指数 · U.S. Import and Export Price Indexes",
+    "Deribit BTC 期权到期":"比特币期权到期 · Deribit BTC Options Expiry",
+    "BTC 挖矿难度调整":"比特币挖矿难度调整 · Bitcoin Mining Difficulty Adjustment",
+    "EIA 美国原油库存周报":"EIA 美国原油库存周报 · EIA Weekly Petroleum Status Report",
+    "CFTC COT · 黄金/WTI 持仓":"CFTC 黄金 / WTI 原油持仓 · CFTC Commitments of Traders",
+    "FOMC 利率决议":"美国联邦公开市场委员会利率决议（FOMC） · FOMC Rate Decision",
+    "美财政部长端流动性回购上限至少翻倍":"美国财政部长端流动性回购上限至少翻倍 · Treasury Long-End Buyback Size Increase",
+    "美国 CPI":"美国消费者价格指数（CPI） · US Consumer Price Index",
+    "美国非农就业":"美国非农就业报告 · US Employment Situation",
+  };
+  if (exact[raw]) return exact[raw];
+  const auction=raw.match(/^美国\s+(.+?)\s+国债拍卖\s+·\s+(NOTE|BOND)$/i);
+  if (auction) {
+    const kind=auction[2].toUpperCase() === "NOTE" ? "中期国债 Note（2–10 年）" : "长期国债 Bond（20–30 年）";
+    return `美国 ${auction[1]} 国债拍卖（${kind}） · U.S. Treasury ${auction[1]} ${auction[2].toUpperCase()} Auction`;
+  }
+  const buyback=raw.match(/^美财政部回购\s+·\s+(.+)$/);
+  return buyback ? `美国财政部回购（${buyback[1]}） · U.S. Treasury Buyback (${buyback[1]})` : raw;
+}
+function renderInvestmentCalendar(data) {
+  investmentCalendarData = data || investmentCalendarData;
+  let card = $("investmentCalendarCard");
+  if (!card) {
+    card = document.createElement("section");
+    card.id = "investmentCalendarCard";
+    card.className = "card investment-calendar-card";
+    const fed = $("fedMonitorCard"), anchor = $("fearGreedGauge");
+    if (fed) fed.before(card); else if (anchor) anchor.after(card); else document.querySelector("main")?.append(card);
+  }
+  if (!card) return;
+  const filteredEvents = (investmentCalendarData?.events || []).filter((event) => investmentCalendarFilter === "all" || event.category === investmentCalendarFilter || (investmentCalendarFilter === "high" && event.importance === "high"));
+  const start=Date.now()-24*3_600_000, end=Date.now()+5*86_400_000;
+  const events = investmentCalendarExpanded ? filteredEvents : filteredEvents.filter(event => event.at >= start && event.at < end);
+  const hiddenCount=Math.max(0, filteredEvents.length-events.length);
+  const tzLabel = investmentCalendarTimeZone === "UTC" ? "UTC" : "北京时间 UTC+8";
+  const nearestHigh = filteredEvents.find((event) => event.importance === "high" && event.at >= Date.now());
+  const [riskLabel, riskText] = nearestHigh ? calendarWindow(nearestHigh) : ["风险平稳", "未来列表内暂无高重要性宏观事件"];
+  let previousDay = "";
+  const rows = events.map((event) => {
+    const day = calendarFormat(event.at, { year:"numeric", month:"long", day:"numeric", weekday:"short" });
+    const dateRow = day === previousDay ? "" : `<tr class="calendar-date-row"><td colspan="8">${calendarEscape(day)}</td></tr>`;
+    previousDay = day;
+    const [label, read, hot] = calendarWindow(event), stars = event.importance === "high" ? 3 : event.importance === "medium" ? 2 : 1;
+    const unavailable = (field) => {
+      if (field === "actual") return event.at > Date.now() && event.category === "macro" ? tx("待公布", "Pending") : event.category === "liquidity" ? tx("操作后公布", "After operation") : tx("不适用", "N/A");
+      if (field === "estimate") return event.category === "macro" ? tx("无免费共识", "No free consensus") : tx("不适用", "N/A");
+      return event.category === "macro" ? tx("官方日程未提供", "Not in official calendar") : tx("不适用", "N/A");
+    };
+    const val = (value, field, cls = "") => value === null || value === undefined || value === "" ? `<span class="calendar-value empty" title="${calendarEscape(unavailable(field))}">${calendarEscape(unavailable(field))}</span>` : `<span class="calendar-value ${cls}">${calendarEscape(value)}</span>`;
+    const market = event.country === "BTC" ? ["₿", "BTC", "btc"] : event.country === "OIL" ? ["OIL", tx("能源", "Energy"), "energy"] : event.country === "GLOBAL" ? ["GLB", tx("全球", "Global"), "global"] : ["US", tx("美元", "USD"), ""];
+    const eventTime = event.timePrecision === "date" ? tx("当日待定", "Time TBD") : calendarFormat(event.at,{hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false});
+    const eventCountdown = event.timePrecision === "date" ? tx("官方已给日期", "Official date") : event.at < Date.now() ? tx("已发布 / 已过期", "Released / passed") : `${tx("距今", "In ")} ${macroCountdown(event.at)}`;
+    return `${dateRow}<tr><td><div class="calendar-time">${eventTime}<small class="calendar-countdown" data-calendar-at="${Number(event.at)}" data-calendar-time-precision="${calendarEscape(event.timePrecision || "time")}">${eventCountdown}</small></div></td><td><div class="calendar-market"><span class="calendar-flag ${market[2]}">${market[0]}</span>${market[1]}</div></td><td><div class="calendar-event-title">${calendarEscape(calendarEventTitle(event.title))}${event.fallback ? "<small>节奏回退</small>" : ""}</div><small>${calendarEscape(event.source || "--")}</small></td><td><span class="calendar-impact ${event.importance}"><b>★</b><b>★</b><b>★</b></span></td><td>${val(event.actual,"actual","actual")}</td><td>${val(event.estimate,"estimate")}</td><td>${val(event.previous,"previous")}</td><td><div class="calendar-btc-read ${hot ? "high" : ""}"><b>${label}</b>${calendarEscape(read)}</div></td></tr>`;
+  }).join("");
+  const source = investmentCalendarData?.provider?.finnhubConfigured ? (investmentCalendarData.provider.finnhubAvailable ? "Finnhub 已接入" : "Finnhub 暂不可用 · 官方回退") : "官方日历 · 财政部 · EIA · Deribit";
+  card.innerHTML = `<div class="investment-calendar-head"><div><div class="investment-calendar-kicker"><i></i>BTC EVENT LAYER</div><h2>${tx("投资日历", "Investment calendar")}</h2><p>${tx("将美元流动性、宏观、能源与避险、BTC 原生事件放在同一时间轴。黄金、原油与波动率属于市场环境读数，不伪装成单一买卖建议。", "One timeline for dollar liquidity, macro, energy/risk and BTC-native events. Gold, oil and volatility remain market context—not standalone trade calls.")}</p></div><div class="investment-calendar-actions"><button data-calendar-filter="all" class="${investmentCalendarFilter === "all" ? "active" : ""}">${tx("全部", "All")}</button><button data-calendar-filter="high" class="${investmentCalendarFilter === "high" ? "active" : ""}">${tx("高重要性", "High impact")}</button><button data-calendar-filter="liquidity" class="${investmentCalendarFilter === "liquidity" ? "active" : ""}">${tx("流动性", "Liquidity")}</button><button data-calendar-filter="macro" class="${investmentCalendarFilter === "macro" ? "active" : ""}">${tx("宏观", "Macro")}</button><button data-calendar-filter="energy" class="${investmentCalendarFilter === "energy" ? "active" : ""}">${tx("原油", "Oil")}</button><button data-calendar-filter="risk" class="${investmentCalendarFilter === "risk" ? "active" : ""}">${tx("避险", "Risk")}</button><button data-calendar-filter="crypto" class="${investmentCalendarFilter === "crypto" ? "active" : ""}">${tx("加密期权", "Crypto options")}</button><button data-calendar-filter="chain" class="${investmentCalendarFilter === "chain" ? "active" : ""}">${tx("BTC 链上", "BTC chain")}</button><button data-calendar-zone="America/New_York" class="${investmentCalendarTimeZone === "America/New_York" ? "active" : ""}">ET</button><button data-calendar-zone="UTC" class="${investmentCalendarTimeZone === "UTC" ? "active" : ""}">UTC</button><span class="calendar-source">${source}</span></div></div><div class="investment-calendar-toolbar"><div class="calendar-risk-callout"><b class="${nearestHigh ? "" : "safe"}">${riskLabel}</b><span>${riskText}</span></div><span class="calendar-time-note">${tx("所有事件服务端以 UTC 存储 · 当前显示：", "Events are stored in UTC · Displaying: ")}${tzLabel}</span></div><div class="investment-calendar-scroll"><table class="investment-calendar-table"><colgroup><col style="width:12%"><col style="width:9%"><col style="width:27%"><col style="width:9%"><col style="width:10%"><col style="width:10%"><col style="width:9%"><col style="width:24%"></colgroup><thead><tr><th>${tx("时间", "Time")}</th><th>${tx("市场", "Market")}</th><th>${tx("事件", "Event")}</th><th>${tx("重要性", "Impact")}</th><th>${tx("今值", "Actual")}</th><th>${tx("预测值", "Estimate")}</th><th>${tx("前值", "Previous")}</th><th>${tx("BTC 风险读数", "BTC risk read")}</th></tr></thead><tbody>${rows || `<tr><td class="calendar-empty" colspan="8">${tx("日历暂不可用，将自动重试。", "Calendar unavailable; retrying automatically.")}</td></tr>`}</tbody></table></div><footer><span>${calendarEscape(investmentCalendarData?.disclaimer || "")}</span><span>${investmentCalendarData?.cached ? tx("缓存数据", "Cached") : tx("刚更新", "Updated")}</span></footer>`;
+  const actionBar=card.querySelector(".investment-calendar-actions");
+  const legacyZone=card.querySelector('[data-calendar-zone="America/New_York"]');
+  if (legacyZone) { legacyZone.dataset.calendarZone="Asia/Shanghai"; legacyZone.textContent=tx("北京时间", "Beijing"); legacyZone.classList.toggle("active", investmentCalendarTimeZone === "Asia/Shanghai"); }
+  const expandButton=document.createElement("button");
+  expandButton.type="button"; expandButton.className="calendar-expand";
+  expandButton.textContent=investmentCalendarExpanded ? tx("收起至近 5 天", "Show 5 days") : tx(`展开全部${hiddenCount ? `（另 ${hiddenCount} 项）` : ""}`, hiddenCount ? `Show all (${hiddenCount} more)` : "Show all");
+  actionBar?.insertBefore(expandButton, legacyZone || null);
+  const detail=document.createElement("span"); detail.className="calendar-treasury-note";
+  detail.textContent=tx("国债说明：Note 通常为 2–10 年中期国债；Bond 通常为 20–30 年长期国债。日历仅保留中长期券拍卖，已过滤高频短票 Bill。", "Treasury note: usually 2–10 years; bond: usually 20–30 years. High-frequency bills are filtered out.");
+  card.querySelector(".investment-calendar-toolbar")?.append(detail);
+  card.querySelectorAll("[data-calendar-filter]").forEach((button) => button.addEventListener("click", () => { investmentCalendarFilter = button.dataset.calendarFilter; renderInvestmentCalendar(investmentCalendarData); }));
+  card.querySelectorAll("[data-calendar-zone]").forEach((button) => button.addEventListener("click", () => { investmentCalendarTimeZone = button.dataset.calendarZone; renderInvestmentCalendar(investmentCalendarData); }));
+  expandButton.addEventListener("click", () => { investmentCalendarExpanded=!investmentCalendarExpanded; renderInvestmentCalendar(investmentCalendarData); });
+}
+function refreshInvestmentCalendarCountdowns() {
+  document.querySelectorAll(".calendar-countdown[data-calendar-at]").forEach((element) => {
+    if (element.dataset.calendarTimePrecision === "date") return;
+    const at=Number(element.dataset.calendarAt);
+    if (!Number.isFinite(at)) return;
+    element.textContent=at < Date.now() ? tx("已发布 / 已过期", "Released / passed") : `${tx("距今", "In ")} ${macroCountdown(at)}`;
+  });
+}
+async function loadInvestmentCalendar() {
+  try { const response = await apiFetch("/api/investment-calendar", 12_000), data = await response.json(); if (!response.ok) throw new Error(data.detail || data.error); renderInvestmentCalendar(data); }
+  catch { renderInvestmentCalendar(investmentCalendarData); }
+}
+loadInvestmentCalendar();
+// Several legacy cards mount asynchronously; run one settled-layout pass so
+// this independent panel is not displaced while those sections are arranging.
+window.addEventListener("load", () => setTimeout(loadInvestmentCalendar, 1_500), { once: true });
+setInterval(loadInvestmentCalendar, 5 * 60_000);
+setInterval(refreshInvestmentCalendarCountdowns, 1_000);
 
 /* 恐惧与贪婪故意采用低频更新：它是市场环境指标，不能单独作为交易信号。
    Fear & Greed is intentionally slow-moving. It is a market-environment
@@ -10538,12 +11263,15 @@ function estimatedSignalDuration(m) {
   };
 }
 
-/* This final override is intentionally placed after compatibility renderers. */
+/* This final override is intentionally placed after compatibility renderers.
+   It reuses the same closed-candle basis as the rule signal and only updates
+   the projection card when the computed markup actually changes, so live-price
+   polling no longer causes the whole card to flicker. */
 renderSignalProjection = function () {
   const signal = $("signal"),
     reason = $("signalReason"),
     m = fixedRuleSignal.candles.length
-      ? metrics(fixedRuleSignal.candles)
+      ? metrics(fixedRuleSignal.candles, state.ticker?.last)
       : state.candles.length
         ? metrics(state.candles)
         : null;
@@ -10555,23 +11283,43 @@ renderSignalProjection = function () {
     box.className = "signal-projection";
     reason.after(box);
   }
-  const long = m.score >= 0,
+  const [dirLabel, cls] = classification(m.score);
+  const long = cls === "bull",
+    flat = cls === "flat",
     last = state.ticker?.last || m.close,
     strength = Math.abs(m.score),
     move = m.atr * (1.05 + Math.min(1.25, strength / 100)),
-    target = last + (long ? move : -move),
+    target = flat ? last : last + (long ? move : -move),
     duration = estimatedSignalDuration(m),
-    tip = long
+    dirText = flat
+      ? tx("观望", "Neutral")
+      : long
+        ? tx("做多", "Long")
+        : tx("做空", "Short"),
+    targetLabel = flat
+      ? tx("目标价待方向确认后更新", "Target pending confirmation")
+      : `${tx("预计目标价", "Estimated target")} ${money(target)}`,
+    tip = flat
       ? tx(
-          "预计目标价表示：按当前做多方向、波动和预计持续时间推算的研究目标位；不保证到达或成交。",
-          "Estimated target is a research level derived from the current long direction, volatility, and estimated duration; it is not guaranteed.",
+          "当前规则信号处于观望区间，方向研究估算暂时不给出目标价；等待多周期确认后再更新。",
+          "The rule signal is neutral right now, so no directional target is estimated; it will update once the multi-timeframe confirmation aligns.",
         )
-      : tx(
-          "预计目标价表示：按当前做空方向、波动和预计持续时间推算的研究目标位；不保证到达或成交。",
-          "Estimated target is a research level derived from the current short direction, volatility, and estimated duration; it is not guaranteed.",
-        );
-  box.className = `signal-projection ${long ? "bull" : "bear"}`;
-  box.innerHTML = `<span>${tx("方向研究估算", "Directional research estimate")}</span><div><b>${long ? tx("做多", "Long") : tx("做空", "Short")}</b><em>${tx("预计持续", "Estimated duration")} <mark class="duration-estimate duration-${duration.urgency}" title="按信号强度、ATR 波动和信号基准周期动态估算">${duration.label}</mark></em><strong>${tx("预计目标价", "Estimated target")} ${money(target)} <button class="help-dot" type="button" data-tip="${tip}" aria-label="${tx("预计目标价说明", "Target price explanation")}">!</button></strong></div><small>${tx(`依据规则信号强度、ATR 波动（${duration.atrPercent.toFixed(2)}%）和 ${fixedRuleSignal.interval} 基准周期动态估算；时间越短，方向越容易失效。目标不保证到达。`, `Dynamically estimated from signal strength, ATR volatility (${duration.atrPercent.toFixed(2)}%), and the ${fixedRuleSignal.interval} basis; shorter windows can fail sooner. The target is not guaranteed.`)}</small>`;
+      : long
+        ? tx(
+            "预计目标价表示：按当前做多方向、波动和预计持续时间推算的研究目标位；不保证到达或成交。",
+            "Estimated target is a research level derived from the current long direction, volatility, and estimated duration; it is not guaranteed.",
+          )
+        : tx(
+            "预计目标价表示：按当前做空方向、波动和预计持续时间推算的研究目标位；不保证到达或成交。",
+            "Estimated target is a research level derived from the current short direction, volatility, and estimated duration; it is not guaranteed.",
+          );
+  const nextClass = `signal-projection ${cls}`;
+  if (box.className !== nextClass) box.className = nextClass;
+  const html = `<span>${tx("方向研究估算", "Directional research estimate")}</span><div><b>${dirText}</b><em>${tx("预计持续", "Estimated duration")} <mark class="duration-estimate duration-${duration.urgency}" title="按信号强度、ATR 波动和信号基准周期动态估算">${duration.label}</mark></em><strong>${targetLabel} <button class="help-dot" type="button" data-tip="${tip}" aria-label="${tx("预计目标价说明", "Target price explanation")}">!</button></strong></div><small>${tx(`依据规则信号强度、ATR 波动（${duration.atrPercent.toFixed(2)}%）和 ${fixedRuleSignal.interval} 基准周期动态估算；时间越短，方向越容易失效。目标不保证到达。`, `Dynamically estimated from signal strength, ATR volatility (${duration.atrPercent.toFixed(2)}%), and the ${fixedRuleSignal.interval} basis; shorter windows can fail sooner. The target is not guaranteed.`)}</small>`;
+  if (box.dataset.lastHtml !== html) {
+    box.innerHTML = html;
+    box.dataset.lastHtml = html;
+  }
 };
 if (state.candles.length) renderSignalProjection();
 /* A legacy timeout above replaces the renderer once during boot.  Reinstall
@@ -11382,6 +12130,7 @@ $("appVersion")?.addEventListener("click", () => {
   if (!main) return;
   const sendKeyStorage = "btc_local_serverchan_sendkey_v1",
     rulesStorage = "btc_local_notification_rules_v1";
+  localStorage.removeItem(sendKeyStorage);
   let lastPrice = null,
     rules = [];
   try {
@@ -11408,7 +12157,7 @@ $("appVersion")?.addEventListener("click", () => {
     stateEl = $("wechatAlertState"),
     detail = $("wechatAlertDetail"),
     keyInput = keyForm.elements.sendKey;
-  keyInput.value = localStorage.getItem(sendKeyStorage) || "";
+  keyInput.value = sessionStorage.getItem(sendKeyStorage) || "";
   const kindName = (kind) =>
     ({
       price_above: tx("上涨到指定价", "Rises to target"),
@@ -11417,7 +12166,7 @@ $("appVersion")?.addEventListener("click", () => {
       short_liquidation: tx("空头爆仓价", "Short liquidation"),
     })[kind] || kind;
   const render = () => {
-    const sendKey = (localStorage.getItem(sendKeyStorage) || "").trim(),
+    const sendKey = (sessionStorage.getItem(sendKeyStorage) || "").trim(),
       ready = /^SCT/i.test(sendKey);
     stateEl.className = `badge ${ready ? "bull" : "flat"}`;
     stateEl.textContent = ready
@@ -11435,7 +12184,7 @@ $("appVersion")?.addEventListener("click", () => {
     );
   };
   const send = async (rule, price, { test = false } = {}) => {
-    const key = (localStorage.getItem(sendKeyStorage) || "").trim();
+    const key = (sessionStorage.getItem(sendKeyStorage) || "").trim();
     if (!/^SCT/i.test(key))
       throw new Error(
         tx("请先保存有效的本机 SendKey。", "Save a valid local SendKey first."),
@@ -11502,12 +12251,12 @@ $("appVersion")?.addEventListener("click", () => {
       );
       return;
     }
-    if (key) localStorage.setItem(sendKeyStorage, key);
-    else localStorage.removeItem(sendKeyStorage);
+    if (key) sessionStorage.setItem(sendKeyStorage, key);
+    else sessionStorage.removeItem(sendKeyStorage);
     render();
   });
   $("clearLocalSendKey").addEventListener("click", () => {
-    localStorage.removeItem(sendKeyStorage);
+    sessionStorage.removeItem(sendKeyStorage);
     keyInput.value = "";
     render();
   });
@@ -11730,6 +12479,12 @@ BTCPanels.register({
   id: "macro",
   tier: "research",
   selector: "#fedMonitorCard",
+  defaultOpen: true,
+});
+BTCPanels.register({
+  id: "investment-calendar",
+  tier: "research",
+  selector: "#investmentCalendarCard",
   defaultOpen: true,
 });
 BTCPanels.register({
