@@ -79,4 +79,9 @@ for attempt in $(seq 1 24); do
 done
 
 echo 'Timed out waiting for app and alert worker health checks.' >&2
+# A plain `exit 1` does NOT fire the ERR trap, so the replaced (broken) release
+# would stay live with no rollback. Restore the snapshot explicitly, then fail
+# the step so the workflow surfaces the error.
+trap - ERR
+rollback
 exit 1

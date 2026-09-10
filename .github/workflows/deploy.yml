@@ -141,6 +141,7 @@ jobs:
             '
 
       - name: Build, deploy and verify local health
+        id: deploy_app
         if: steps.ssh.outputs.ready == 'true' && (github.event_name == 'push' || inputs.mode == 'deploy')
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
@@ -150,12 +151,16 @@ jobs:
 
       - name: Verify production
         id: verify_production
-        if: steps.ssh.outputs.ready == 'true' && (github.event_name == 'push' || inputs.mode == 'deploy')
+        if: steps.deploy_app.outcome == 'success'
         continue-on-error: true
         run: curl --fail --silent --show-error --retry 12 --retry-delay 5 --retry-all-errors --max-time 15 https://renjiahang1201.xyz/api/status
 
-      - name: Roll back after failed public verification
-        if: always() && steps.ssh.outputs.ready == 'true' && (github.event_name == 'push' || inputs.mode == 'deploy') && steps.verify_production.outcome == 'failure'
+      - name: Roll back after a failed deploy or verification
+        # A failed build/deploy step previously left the broken release live,
+        # because this step only looked at the skipped verification outcome.
+        # Roll back on either failure; the script is idempotent (it always
+        # restores the same pre-deploy snapshot).
+        if: always() && steps.ssh.outputs.ready == 'true' && (github.event_name == 'push' || inputs.mode == 'deploy') && (steps.deploy_app.outcome == 'failure' || steps.verify_production.outcome == 'failure')
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}

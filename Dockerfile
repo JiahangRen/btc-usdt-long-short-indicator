@@ -3,7 +3,10 @@
 FROM node:22-alpine
 
 WORKDIR /app
-COPY --chown=node:node package.json package-lock.json server.mjs alert-store.mjs alert-worker.mjs ./
+# Keep this list in sync with the relative imports in server.mjs and
+# alert-worker.mjs. A missing module here makes the container exit at start-up
+# and the deploy health check times out.
+COPY --chown=node:node package.json package-lock.json server.mjs ai-chat.mjs alert-store.mjs alert-worker.mjs ./
 RUN npm ci --omit=dev
 COPY --chown=node:node public ./public
 

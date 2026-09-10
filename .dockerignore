@@ -5,3 +5,8 @@ data
 node_modules
 .releases
 .rollback-current
+# Local-only artifacts: keep them out of the build context sent to the daemon.
+.workbuddy
+.backup-*
+screenshot-*.png
+tools
