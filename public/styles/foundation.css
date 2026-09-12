@@ -116,7 +116,7 @@ body {
 }
 .toolbar #intervals .interval-wheel::-webkit-scrollbar { display: none; }
 .toolbar #intervals .interval-wheel button { flex: 0 0 auto; scroll-snap-align: center; }
-.toolbar .range-options { display: flex; flex-wrap: wrap; gap: 6px; width: min(470px, calc(100vw - 66px)); }
+.toolbar .range-options { display: flex; flex-wrap: wrap; gap: 6px; width: min(540px, calc(100vw - 66px)); }
 @media (prefers-reduced-motion: reduce) {
   .toolbar .range-picker .control-popover-panel { transition: none; }
 }

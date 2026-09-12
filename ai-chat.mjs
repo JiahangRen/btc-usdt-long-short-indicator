@@ -281,6 +281,276 @@ export function normalizeStyle(style) {
   return ANSWER_STYLES.some(s => s.id === wanted) ? wanted : DEFAULT_STYLE;
 }
 
+// ---------- 联网检索 / Web research ----------
+// 让模型「本地快照数据 + 外部网络信息」综合回答：服务端先按用户问题去公开新闻源检索
+// 最近的相关报道与分析，作为额外的 system 消息注入提示词；模型必须标注来源与时间，
+// 与快照冲突时要明确指出来。
+// Server-side web research: search public news feeds for the user's question, inject the
+// results as an extra system message, and require the model to cite source + time.
+//
+// 为什么不用模型自带的联网插件（enable_search）：本地快照已经覆盖价格、衍生品与宏观
+// 日历，外部信息的作用主要是解释「为什么」和「接下来有什么催化剂」。用可缓存、可审计、
+// 零额外费用的 RSS 检索更可控，也不会因为某个端点不支持 enable_search 而整条链路失败。
+// We deliberately use cacheable, auditable, zero-cost RSS retrieval instead of the model's
+// own search plugin, so the pipeline never hinges on one endpoint supporting enable_search.
+const WEB_TTL = 10 * 60_000;   // 同一问题 10 分钟内复用检索结果 / reuse results for 10 min
+const WEB_ITEM_LIMIT = 12;     // 注入提示词的最大条数（控制 token 预算）/ cap injected rows
+const WEB_FETCH_TIMEOUT = 9_000;
+const WEB_UA = 'Mozilla/5.0 (compatible; BTC-Indicator-AI/1.0; +local research assistant)';
+const webCache = new Map();
+
+function decodeXmlEntities(value) {
+  return String(value)
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&#0?39;|&apos;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&#(\d{1,6});/g, (whole, code) => {
+      const point = Number(code);
+      return point >= 32 && point <= 0x10ffff ? String.fromCodePoint(point) : whole;
+    })
+    .replace(/&amp;/g, '&');
+}
+function stripXml(value) {
+  return decodeXmlEntities(String(value).replace(/<[^>]*>/g, ' ')).replace(/\s+/g, ' ').trim();
+}
+function xmlTag(block, tag) {
+  const match = block.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)</${tag}>`, 'i'));
+  return match ? stripXml(match[1]) : null;
+}
+// RSS 2.0：title / link / description / pubDate，来源名在 <source url="...">媒体</source>。
+// RSS 2.0 items: title, link, description, pubDate; the outlet name lives in <source>.
+function parseRssItems(xml, limit = 30) {
+  const items = [];
+  const re = /<item[\s>][\s\S]*?<\/item>/gi;
+  let match;
+  while ((match = re.exec(xml)) && items.length < limit) {
+    const block = match[0];
+    const title = xmlTag(block, 'title');
+    if (!title) continue;
+    const sourceMatch = block.match(/<source[^>]*>([\s\S]*?)<\/source>/i);
+    const pub = xmlTag(block, 'pubDate') || xmlTag(block, 'dc:date');
+    const at = pub ? Date.parse(pub) : NaN;
+    const summary = xmlTag(block, 'description');
+    items.push({
+      title:title.slice(0, 200),
+      source:sourceMatch ? stripXml(sourceMatch[1]).slice(0, 60) : null,
+      url:(xmlTag(block, 'link') || '').slice(0, 400) || null,
+      summary:summary ? summary.slice(0, 260) : null,
+      publishedAt:Number.isFinite(at) ? at : null
+    });
+  }
+  return items;
+}
+// 中文虚词与口语词不适合做检索词，直接丢掉，避免把「未来 24 小时怎么走」原样丢给搜索。
+// Drop Chinese function words and filler so "how will the next 24h go" becomes real keywords.
+const QUERY_STOPWORDS = new Set([
+  '现在','未来','怎么','怎样','如何','什么','多少','哪个','哪些','请问','帮我','一下','时候','今天','明天','后天',
+  '目前','还能','可以','是不是','是否','的话','这个','那个','以及','还有','就是','一般','大概','可能','应该',
+  '要不要','能不能','会不会','为什么','讲解','分析下','说下','讲讲','吗','呢','吧','的','了','会','要','在','有',
+  '和','与','或','对','给','我','你','他','这','那','个','下','上','里','中','时','日','月','年','点','个点',
+  // 时间与口语化的行情说法：这些词丢给搜索只会拉回无关结果。
+  // Time spans and colloquial market talk: searching these returns mostly noise.
+  '小时','分钟','天','周','周内','走','怎么走','走向','走势如何','接下来','后市','动向','动静','情况','是怎么',
+  '追多','追空','加仓','减仓','上车','下车','入场','出场','点位','看法','意见','建议'
+]);
+// 主题线索 → 检索词：把「资金费率」这类话题翻成新闻源真正会用的关键词。
+// Topic hints: translate a topic like "资金费率" into words news feeds actually contain.
+const TOPIC_HINTS = [
+  { test:/cpi|pce|ppi|通胀|物价/i, zh:'比特币 通胀 CPI PPI', en:'Bitcoin inflation CPI PPI' },
+  { test:/非农|就业|失业|jobless|nonfarm|payroll/i, zh:'比特币 非农 就业数据', en:'Bitcoin nonfarm payrolls jobs' },
+  { test:/美联储|降息|加息|议息|利率|fomc|鲍威尔|fed/i, zh:'比特币 美联储 利率', en:'Bitcoin Federal Reserve rate decision' },
+  { test:/etf|灰度|贝莱德|blackrock|机构资金/i, zh:'比特币 ETF 资金流入', en:'Bitcoin ETF flows' },
+  { test:/监管|法案|sec|合规|政策|立法/i, zh:'比特币 监管 政策', en:'Bitcoin regulation policy' },
+  { test:/流动性|缩表|放水|qe|qt|资产负债表|逆回购/i, zh:'比特币 流动性 央行', en:'Bitcoin liquidity central bank' },
+  { test:/技术分析|指标|均线|支撑|阻力|背离|rsi|macd|布林|趋势/i, zh:'比特币 技术分析 支撑 阻力', en:'Bitcoin technical analysis support resistance' },
+  { test:/资金费率|合约|爆仓|多空|持仓量|基差|杠杆|清算/i, zh:'比特币 合约 资金费率 爆仓', en:'Bitcoin funding rate liquidations futures' },
+  { test:/巨鲸|链上|交易所|资金流|on-?chain|whale/i, zh:'比特币 链上数据 巨鲸', en:'Bitcoin on-chain whale flows' },
+  { test:/预测|走势|行情|方向|目标价|forecast|outlook|price|涨|跌|走|后市|接下来|动向|追多|追空/i, zh:'比特币 行情 走势 预测', en:'Bitcoin price forecast outlook' }
+];
+// 与比特币（或其交易生态）有关的信号词：用来把山寨币 SEO 稿、预测软文排到后面。
+// Bitcoin-adjacency signals: used to push altcoin SEO pieces and evergreen promo posts down.
+const BITCOIN_RE = /bitcoin|\bbtc\b|比特币|比特幣|加密|数字货币|加密貨幣|币安|binance|okx|coinbase|crypto market|现货 etf/i;
+const ALTCOIN_ONLY_RE = /ethereum|\beth\b|\bxrp\b|solana|\bsol\b|dogecoin|\bdoge\b|cardano|\bada\b|shiba|\bpepe\b|mars.?cat|memecoin|altcoin|polygon|\bton\b|avalanche|chainlink|\btron\b|bnb|hyperliquid|sui\b/i;
+// 宏观事件词：用户问「接下来怎么走」时，宏观催化剂比价格预测软文更有价值。
+// Macro catalyst words: far more useful than evergreen price-prediction filler.
+const MACRO_EVENT_RE = /cpi|ppi|pce|通胀|非农|就业|失业|美联储|fed\b|fomc|利率|降息|加息|鲍威尔|国债|经济数据|etf|监管|法案/i;
+// 相关性打分：比特币权重最高，其次是与问题关键词的重合，山寨币软文扣分。
+// Relevance score: Bitcoin mentions weigh most, then question-keyword overlap; altcoin filler is penalised.
+function relevanceScore(item, keywords, hints) {
+  const text = `${item.title} ${item.summary || ''}`.toLowerCase();
+  let score = 0;
+  const hasBitcoin = BITCOIN_RE.test(text);
+  if (hasBitcoin) score += 4;
+  if (ALTCOIN_ONLY_RE.test(text) && !hasBitcoin) score -= 5;
+  if (MACRO_EVENT_RE.test(text)) score += 1.5;
+  for (const keyword of keywords) {
+    const probe = String(keyword).toLowerCase();
+    if (probe.length >= 2 && text.includes(probe)) score += 1.5;
+  }
+  for (const hint of hints) {
+    for (const part of hint.en.toLowerCase().split(/\s+/)) {
+      if (part.length > 3 && text.includes(part)) score += 0.8;
+    }
+  }
+  // 越新越靠前：12 小时内 +2，36 小时内 +1，5 天内 +0.4。
+  // Recency bonus: +2 within 12h, +1 within 36h, +0.4 within 5 days.
+  const age = item.publishedAt ? Date.now() - item.publishedAt : Infinity;
+  if (age <= 12 * 3_600_000) score += 2;
+  else if (age <= 36 * 3_600_000) score += 1;
+  else if (age <= 5 * 86_400_000) score += 0.4;
+  return score;
+}
+function questionKeywords(question) {
+  return String(question || '')
+    .replace(/[，。！？、；：,.!?;:()（）"“”'’\[\]【】]/g, ' ')
+    .split(/\s+/)
+    .map(token => token.trim())
+    .filter(token => token && !QUERY_STOPWORDS.has(token) && token.length <= 14)
+    .slice(0, 6);
+}
+// 一次提问最多 3 条检索：中文主题 + 英文主题 + 大盘基线，覆盖「新闻 + 分析 + 评论」。
+// Up to three queries per question: Chinese topic, English topic, and a market baseline.
+function buildSearchQueries(question, lang) {
+  const hints = TOPIC_HINTS.filter(hint => hint.test.test(String(question || ''))).slice(0, 2);
+  const words = questionKeywords(question);
+  // 主题线索里已经含「比特币 / Bitcoin」，只在退回原始关键词时才补主语，
+  // 否则会出现「比特币 美联储 利率 比特币」这种重复词。
+  // Topic hints already carry the subject token, so only raw keyword fallbacks need it.
+  const zhParts = hints.map(hint => hint.zh);
+  if (!zhParts.length && words.length) zhParts.push(`${words.join(' ')} 比特币`);
+  if (!zhParts.length) zhParts.push('比特币 行情 走势');
+  const enParts = hints.map(hint => hint.en.replace(/^Bitcoin\s+/i, ''));
+  const queries = [];
+  queries.push({ id:'zh', label:'Google News · 中文', query:`${zhParts.join(' ')} when:3d`, locale:'zh' });
+  if (enParts.length) queries.push({ id:'en', label:'Google News · English', query:`Bitcoin ${enParts.join(' ')} when:3d`, locale:'en' });
+  else if (words.length) queries.push({ id:'en', label:'Google News · English', query:`Bitcoin ${words.join(' ')} when:3d`, locale:'en' });
+  queries.push({ id:'base', label:'Google News · Market', query:'Bitcoin price analysis when:2d', locale:'en' });
+  return { queries, hints, words };
+}
+function googleNewsUrl(query, locale) {
+  const params = locale === 'en'
+    ? 'hl=en-US&gl=US&ceid=US:en'
+    : 'hl=zh-CN&gl=CN&ceid=CN:zh-Hans';
+  return `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&${params}`;
+}
+async function fetchNewsFeed({ label, url, signal }) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), WEB_FETCH_TIMEOUT);
+  let composite = controller.signal;
+  try {
+    // 与外层取消信号合并：用户关掉窗口时立刻停掉检索，不空转。
+    // Merge with the caller's signal so closing the panel cancels the search immediately.
+    if (signal && typeof AbortSignal !== 'undefined' && typeof AbortSignal.any === 'function') composite = AbortSignal.any([signal, controller.signal]);
+    const response = await fetch(url, {
+      signal:composite,
+      headers:{ accept:'application/rss+xml,application/xml,text/xml;q=0.9,*/*;q=0.8', 'user-agent':WEB_UA }
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const xml = (await response.text()).slice(0, 400_000);
+    return parseRssItems(xml, 24).map(item => ({ ...item, feed:label }));
+  } finally {
+    clearTimeout(timer);
+  }
+}
+// 同一标题被多家媒体转载是常态：按规范化标题去重，再按时间倒序，最后只留最近的。
+// Cross-posted headlines are the norm: dedupe by normalised title, then newest first.
+function dedupeNews(items) {
+  const seen = new Set();
+  const out = [];
+  for (const item of [...items].sort((a, b) => (b.publishedAt || 0) - (a.publishedAt || 0))) {
+    const norm = item.title.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]+/g, '').slice(0, 52);
+    if (!norm || seen.has(norm)) continue;
+    seen.add(norm);
+    out.push(item);
+  }
+  return out;
+}
+// 检索一次外部信息。失败不算致命：返回 attempted=true、items=[]，提示词照常构建。
+// A failed search is never fatal: it returns attempted=true with no items.
+async function webSearch(question, { lang = 'zh', signal } = {}) {
+  const built = buildSearchQueries(question, lang);
+  const queries = built.queries;
+  const cacheKey = queries.map(q => q.query).join('|');
+  const hit = webCache.get(cacheKey);
+  const now = Date.now();
+  if (hit && now - hit.at < WEB_TTL) return { ...hit.value, cached:true, cacheAgeMs:now - hit.at };
+  const startedAt = Date.now();
+  const settled = await Promise.allSettled(queries.map(entry => fetchNewsFeed({ label:entry.label, url:googleNewsUrl(entry.query, entry.locale), signal })));
+  const feeds = settled.map((result, index) => ({
+    label:queries[index].label,
+    query:queries[index].query,
+    ok:result.status === 'fulfilled',
+    reason:result.status === 'rejected' ? String(result.reason?.message || result.reason).slice(0, 120) : null,
+    count:result.status === 'fulfilled' ? result.value.length : 0
+  }));
+  const raw = settled.flatMap(result => (result.status === 'fulfilled' ? result.value : []));
+  // 相关性优先：先剔掉山寨币软文与纯 SEO 稿，再按分数 + 时间排序。
+  // Relevance first: drop altcoin/SEO filler, then rank by score plus recency.
+  const scored = raw.map(item => ({ ...item, score:relevanceScore(item, built.words, built.hints) }));
+  const relevant = dedupeNews(scored.filter(item => item.score > 0));
+  const merged = relevant.length >= 6 ? relevant : dedupeNews(scored);
+  const ranked = merged
+    .sort((a, b) => (b.score || 0) - (a.score || 0) || (b.publishedAt || 0) - (a.publishedAt || 0))
+    .slice(0, WEB_ITEM_LIMIT);
+  const value = {
+    items:ranked,
+    attempted:true,
+    feeds,
+    sources:[...new Set(ranked.map(item => item.source).filter(Boolean))].slice(0, 8),
+    fetchedAt:new Date(now).toISOString(),
+    elapsedMs:Date.now() - startedAt,
+    cached:false,
+    cacheAgeMs:0,
+    ttlMs:WEB_TTL
+  };
+  webCache.set(cacheKey, { at:now, value });
+  // 缓存别无限增长：超过 60 条就丢掉最旧的。
+  // Keep the cache bounded: drop the oldest entries past 60.
+  if (webCache.size > 60) for (const key of [...webCache.keys()].slice(0, webCache.size - 60)) webCache.delete(key);
+  return value;
+}
+function beijingStamp(iso) {
+  try {
+    return new Date(iso).toLocaleString('zh-CN', { timeZone:'Asia/Shanghai', hour12:false, month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' });
+  } catch { return iso; }
+}
+// 把毫秒时间戳格式成「北京时间」YYYY-MM-DD HH:MM。快照里所有日历时间都按北京时间呈现，
+// 与提示词中「以快照里 investmentCalendar 的北京时间为准」一致；之前误用 toISOString()（UTC），会整体偏早 8 小时。
+// Render an epoch as Beijing (Asia/Shanghai) time. The snapshot promises Beijing time to the model,
+// but the old code used toISOString() (UTC), shifting every event 8 hours early.
+function beijingDateTime(ms) {
+  try {
+    const parts = new Intl.DateTimeFormat('zh-CN', { timeZone:'Asia/Shanghai', hour12:false, year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' }).formatToParts(new Date(ms));
+    const m = {}; for (const p of parts) m[p.type] = p.value;
+    const hour = m.hour === '24' ? '00' : m.hour;
+    return `${m.year}-${m.month}-${m.day} ${hour}:${m.minute}`;
+  } catch { return new Date(ms).toISOString().slice(0, 16).replace('T', ' '); }
+}
+// 把检索结果写成一段可核对的上下文；条数与来源都在，模型不能凭空编造。
+// Render the results as checkable context: counts and outlets are explicit so nothing is invented.
+function formatWebContext(web) {
+  const okFeeds = web.feeds.filter(feed => feed.ok).length;
+  const head = `以下是服务端刚刚从公开互联网检索到的最新信息（检索时间 ${beijingStamp(web.fetchedAt)} 北京时间，命中 ${web.items.length} 条，成功源 ${okFeeds}/${web.feeds.length}）。这是**外部公开信息**，不是本站快照数据。`;
+  const rows = web.items.map((item, index) => {
+    const when = item.publishedAt ? beijingStamp(new Date(item.publishedAt).toISOString()) : '时间未知';
+    const outlet = item.source || '未知来源';
+    const body = item.summary && item.summary !== item.title ? `\n   摘要：${item.summary}` : '';
+    return `${index + 1}. [${outlet} · ${when}] ${item.title}${body}`;
+  }).join('\n');
+  const rules = [
+    '使用规则（必须遵守）：',
+    '1. 以本站快照数据为判断主体，外部信息只用来解释「为什么现在是这样」以及「接下来有什么催化剂」，不要让新闻标题盖过真实价格与指标。',
+    '2. 引用外部信息必须写明来源与时间（例如「据 CoinDesk 09-11 报道」），不得编造上面没有出现的新闻、数字或机构观点。',
+    '3. 如果外部信息与快照数据矛盾（例如新闻说大涨但价格在跌），必须明确点出这个矛盾，并说明你更相信哪一个、为什么。',
+    '4. 如果这些外部信息与用户的问题无关、或不足以支撑结论，就直接说「最新公开消息里没有能解释这件事的内容」，不要硬凑。',
+    '5. 不要输出网址，也不要罗列全部条目；只挑与问题直接相关的 2-4 条来讲。',
+    '6. 涉及宏观数据的公布时间，一律以快照里 investmentCalendar 的北京时间为准；外部新闻里的时间多为当地时区，不要直接当成北京时间照抄。'
+  ].join('\n');
+  return `${head}\n\n${rows}\n\n${rules}`;
+}
+const WEB_EMPTY_HINT = '本次已尝试联网检索，但没有取到可用的最新公开信息（可能是网络受限或源暂时不可用）。不要编造网络消息或新闻标题，只依据快照数据分析，并明确告诉用户「这次没取到最新外部消息」。';
+
 // 简易令牌桶：本地服务也要防止误触造成的密钥烧钱。
 // A small token bucket: even a local service must protect the key from accidental floods.
 const RATE_LIMIT = { capacity:12, refillMs:5_000 };
@@ -414,24 +684,59 @@ function pickCalendarRows(payload) {
 function shortDate(value) {
   if (value === null || value === undefined || value === '') return null;
   const numeric = Number(value);
-  if (Number.isFinite(numeric) && numeric > 1e11) return new Date(numeric).toISOString().slice(0, 16).replace('T', ' ');
+  if (Number.isFinite(numeric) && numeric > 1e11) return beijingDateTime(numeric);
   return String(value).slice(0, 40);
+}
+// 日历负载里的时间可能是「毫秒时间戳」也可能是「已格式化字符串」；只有前者才能算倒计时。
+// Calendar payloads carry either epoch milliseconds or an already formatted string; only the former can be counted down.
+function epochMs(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric > 1e11 ? numeric : null;
+}
+// 事件时间相对「现在」的倒计时：服务端算好，模型直接照抄，不再自行换算时区或猜「还有多久」。
+// Countdown relative to `now`, computed server-side so the model copies it instead of converting time zones or guessing.
+function humanCountdown(atMs, now = Date.now()) {
+  if (!Number.isFinite(atMs)) return null;
+  const diffMs = atMs - now, past = diffMs < 0, abs = Math.abs(diffMs);
+  const minutes = Math.round(diffMs / 60_000) || 0;
+  const span = (amount, unit) => (past ? `已公布约 ${amount} ${unit}前` : `约 ${amount} ${unit}后公布`);
+  if (abs < 45_000) return { countdown:past ? '刚刚公布' : '正在公布（不到 1 分钟）', minutesUntil:0 };
+  if (abs < 60 * 60_000) return { countdown:span(Math.round(abs / 60_000), '分钟'), minutesUntil:minutes };
+  if (abs < 10 * 3_600_000) return { countdown:span((abs / 3_600_000).toFixed(1), '小时'), minutesUntil:minutes };
+  if (abs < 48 * 3_600_000) return { countdown:span(Math.round(abs / 3_600_000), '小时'), minutesUntil:minutes };
+  if (abs < 10 * 86_400_000) return { countdown:span((abs / 86_400_000).toFixed(1), '天'), minutesUntil:minutes };
+  return { countdown:span(Math.round(abs / 86_400_000), '天'), minutesUntil:minutes };
 }
 // 从任意日历负载里安全地摘出前几条事件，字段未知也不会报错。
 // Safely pluck the first few events from any calendar payload with unknown shape.
-function summarizeCalendar(payload, limit = 5) {
+function summarizeCalendar(payload, limit = 5, now = Date.now()) {
   const rows = pickCalendarRows(payload);
   if (!rows.length) return null;
   return rows.slice(0, limit).map(row => {
     if (!row || typeof row !== 'object') return null;
     const title = row.title || row.event || row.name || row.label || null;
-    const date = row.date || row.time || row.datetime || row.at || row.scheduledAt || row.start || null;
+    const raw = row.date || row.time || row.datetime || row.at || row.scheduledAt || row.start || null;
+    const atMs = epochMs(raw);
     const importance = row.importance || row.impact || row.level || null;
-    return title ? { title:String(title).slice(0, 120), date:shortDate(date), importance:importance ? String(importance) : null } : null;
+    const base = title ? { title:String(title).slice(0, 120), date:shortDate(raw), importance:importance ? String(importance) : null } : null;
+    if (!base) return null;
+    // 只有拿到毫秒时间戳才附倒计时；字符串时间无法可靠换算，就保持原样不编造。
+    // Only attach a countdown when an epoch is available; never invent one from a formatted string.
+    return atMs === null ? base : { ...base, atMs, ...(humanCountdown(atMs, now) || {}) };
   }).filter(Boolean);
 }
+// 快照有 20 秒缓存；重新生成（暂停/终止后继续、已发送消息被编辑后重发）时必须按最新时钟重算倒计时。
+// The snapshot is cached for 20s, so refresh countdowns against the latest clock on every (re)build.
+function refreshMacroCountdown(macro, now = Date.now()) {
+  if (!macro || typeof macro !== 'object') return macro;
+  const refreshRows = rows => Array.isArray(rows)
+    ? rows.map(row => (row && typeof row === 'object' && Number.isFinite(row.atMs) ? { ...row, ...(humanCountdown(row.atMs, now) || {}) } : row))
+    : rows;
+  return { ...macro, federalReserve:refreshRows(macro.federalReserve), economicCalendar:refreshRows(macro.economicCalendar) };
+}
 
-export function createAiChat({ market, liveQuote, marketContext, fearGreedSentiment, fedMonitor, investmentCalendar, getCredential, setModel }) {
+export function createAiChat({ market, liveQuote, marketContext, fearGreedSentiment, fedMonitor, investmentCalendar, getCredential, getVerification, setModel }) {
   getCredentialFn = getCredential || null;
   setModelFn = typeof setModel === 'function' ? setModel : null;
   let snapshotCache = { at:0, source:null, value:null, promise:null };
@@ -452,12 +757,16 @@ export function createAiChat({ market, liveQuote, marketContext, fearGreedSentim
         market('1d', 240, source),
         market('4h', 240, source),
         market('1h', 240, source),
+        market('5m', 240, source),
         marketContext(source),
         fearGreedSentiment({}),
         fedMonitor(),
         investmentCalendar()
       ]);
-      const [quote, daily, fourHour, hourly, context, sentiment, fed, calendar] = settled.map(r => (r.status === 'fulfilled' ? r.value : null));
+      // 追加新数据源时只在数组末尾加，前面的槽位序号被 failures 引用，不能挪。
+      // Append new sources at the end; earlier slot indexes are referenced by `failures`.
+      // 注意：解构顺序必须与上面数组逐位对应（5m 插在 1h 之后）。
+      const [quote, daily, fourHour, hourly, fiveMin, context, sentiment, fed, calendar] = settled.map(r => (r.status === 'fulfilled' ? r.value : null));
       const failures = settled.map((r, i) => (r.status === 'rejected' ? { slot:i, reason:String(r.reason?.message || r.reason) } : null)).filter(Boolean);
 
       const quoteTicker = quote?.ticker || daily?.ticker || null;
@@ -476,7 +785,8 @@ export function createAiChat({ market, liveQuote, marketContext, fearGreedSentim
         timeframes:{
           '1d':timeframeProfile(dailyCandles, 45),
           '4h':timeframeProfile(fourHour?.candles, 36),
-          '1h':timeframeProfile(hourly?.candles, 18)
+          '1h':timeframeProfile(hourly?.candles, 18),
+          '5m':timeframeProfile(fiveMin?.candles, 30)
         },
         derivatives:context ? {
           fundingRatePct:round(Number(context.fundingRate) * 100, 4),
@@ -628,12 +938,129 @@ export function createAiChat({ market, liveQuote, marketContext, fearGreedSentim
 - 你是做数据分析的，不是给投资建议，不要承诺收益。`
   };
 
+  // 排版约定：前端会把纯文本渲染成富文本（方向词着色、价格/百分比高亮、
+  // 列表、Markdown 表格）。引导模型在合适场景结构化输出，让回答更清晰。
+  // Formatting contract: the frontend renders plain text as rich HTML. Nudge the
+  // model to emit structured output (lists / Markdown tables) where it helps.
+  const FORMAT_HINT = `
+
+## 排版格式（让回答清晰、好扫读）
+你的回答会被前端渲染成富文本（标题区块、着色、数字高亮、列表、表格、图表），请遵守下面的约定：
+
+### 1. 罗列优先，不要写大段文字
+- 【为什么这么判断】必须用 \`- \` 无序列表分行列出，**每条一行，一条一个依据**，不要挤成一段话。
+- 【关键价位】用列表或表格给出，不要写成连续叙述。
+- 【结论】保持 1-2 句，不要铺开。
+- 并列的要点、条件、情形，一律分行；能用列表就不用段落。
+
+### 2. 重点数据要突出
+- 具体价格、百分比、指标读数务必如实写出（如 77,155.30、−65.3%、RSI14 为 38.2），前端会自动加粗/着色/加底。
+- 结论性的关键数字（现价、强平价、关键支撑阻力位）建议用 \`**加粗**\` 包一层，读者一眼能抓住。
+- 方向词（上涨/下跌、看多/看空、支撑/阻力）前端会自动着色，正常书写即可。
+
+### 3. 表格只用于真正的横向对比
+- 适合用 Markdown 表格的场景：多周期（日线 / 4 小时 / 1 小时 / 5 分钟）方向与关键读数对比；支撑阻力价位清单（价格 | 距现价 | 来源 | 强度）；持仓指标（开仓价 | 现价 | 强平价 | ROE | 距强平）；外部信息对照（来源 | 时间 | 内容要点）。
+- 表头用中文。只有 2 列且行数少于 3 行时不要用表格，直接列表更清楚。
+
+### 4. 图表：只在图比文字更简明时才加
+- 判断标准：当你要比较**同一类数值**在 3 个以上对象上的大小（例如各周期 RSI、各情景概率、各价位强度），用图比表格更直观；数据只有一两个、或信息本身是文字与方向，就**不要**加图。
+- 加图时插入一个 chart 代码块，格式如下（标签与数值各占一行，数值必须是快照或检索结果里的真实数值，不得编造）：
+
+\`\`\`chart
+type: bar
+title: 各周期 RSI14 对比
+日线: 38.2
+4小时: 45.1
+1小时: 52.7
+\`\`\`
+
+- \`type\` 可写 \`bar\`（横向条形，适合比大小）或 \`line\`（折线，适合按时间排列的变化）。
+- \`title\` 可省略。数值后面可以带 \`%\`，前端会照原样显示。
+- 一个回答最多 1 张图；图放在对应段落内部，不要另起一段堆在末尾。
+
+### 5. 结构不变
+仍然严格保留五段固定标题，顺序不能改，标题必须逐字照抄。表格、列表、图表都放在对应段落内部。`;
+
   // 按档位取提示词；未知档位落回默认，防止提示词为空。
   function buildSystemPrompt(style) {
-    return STYLE_PROMPTS[normalizeStyle(style)];
+    return STYLE_PROMPTS[normalizeStyle(style)] + FORMAT_HINT;
   }
 
-  function buildMessages(snapshot, history, lang, thinking, style) {
+  // ---------- 用户上下文 / Personal context ----------
+  // 前端随提问附带「我的持仓 + 页面信号面板」。浏览器来的数据不可信：
+  // 只接受白名单里的有限数字/枚举，字符串一律压空白并截断。
+  // Browser-supplied data is untrusted: whitelist a few numeric fields, clip strings.
+  const POSITION_MMR = 0.005; // 与页面持仓卡相同的维持保证金率假设 / same assumption as the on-page card
+
+  const finitePositive = (value, max) => {
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 && n < max ? n : null;
+  };
+  const clippedText = (value, max) => {
+    if (typeof value !== 'string') return null;
+    const text = value.replace(/\s+/g, ' ').trim();
+    return text ? text.slice(0, max) : null;
+  };
+
+  function sanitizeContext(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const positions = (Array.isArray(raw.positions) ? raw.positions : [])
+      .slice(0, 2)
+      .map(p => ({
+        side: p && p.side === 'short' ? 'short' : 'long',
+        entryPrice: finitePositive(p?.entryPrice, 10_000_000),
+        sizeUsd: finitePositive(p?.sizeUsd, 1_000_000_000),
+        marginUsd: finitePositive(p?.marginUsd, 1_000_000_000),
+        leverage: finitePositive(p?.leverage, 500)
+      }))
+      .filter(p => p.entryPrice);
+    let pageSignals = null;
+    if (raw.pageSignals && typeof raw.pageSignals === 'object') {
+      const ruleSignal = clippedText(raw.pageSignals.ruleSignal, 600);
+      const directionalEstimate = clippedText(raw.pageSignals.directionalEstimate, 400);
+      if (ruleSignal || directionalEstimate) pageSignals = { ruleSignal, directionalEstimate };
+    }
+    if (!positions.length && !pageSignals) return null;
+    return { positions: positions.length ? positions : null, pageSignals };
+  }
+
+  // 用快照现价把持仓推算成结论级数值（浮动盈亏 / 回报 / 理论强平价），
+  // 模型不需要自己算术，也就不会算错。
+  // Pre-compute position metrics from the snapshot price so the model never does arithmetic.
+  function derivePositionMetrics(positions, lastPrice) {
+    if (!Array.isArray(positions) || !positions.length || !Number.isFinite(lastPrice)) return positions;
+    return positions.map(p => {
+      const leverage = p.leverage || (p.sizeUsd && p.marginUsd ? p.sizeUsd / p.marginUsd : null);
+      // 强平价必须用「有效杠杆」（仓位 / 当前保证金，含追加保证金），与页面持仓卡一致：
+      // 用开仓杠杆会在追加保证金后把强平价算得偏近（虚惊一场）。ROE 的保证金口径本就取 marginUsd。
+      // Liquidation must use effective leverage (size / current margin, including top-ups), matching
+      // the on-page card; open leverage makes liq look closer than it really is after a top-up.
+      const effectiveLeverage = p.sizeUsd && p.marginUsd ? p.sizeUsd / p.marginUsd : leverage;
+      const diffPct = ((lastPrice - p.entryPrice) / p.entryPrice) * 100 * (p.side === 'short' ? -1 : 1);
+      const pnl = p.sizeUsd != null ? p.sizeUsd * (diffPct / 100) : null;
+      const margin = p.marginUsd || (p.sizeUsd && leverage ? p.sizeUsd / leverage : null);
+      const roePct = pnl != null && margin ? (pnl / margin) * 100 : null;
+      const liquidation = effectiveLeverage
+        ? p.side === 'short'
+          ? p.entryPrice * (1 + 1 / effectiveLeverage - POSITION_MMR)
+          : p.entryPrice * (1 - 1 / effectiveLeverage + POSITION_MMR)
+        : null;
+      const liqDistancePct = liquidation ? ((liquidation - lastPrice) / lastPrice) * 100 : null;
+      return {
+        ...p,
+        leverage: leverage ? round(leverage, 2) : null,
+        effectiveLeverage: effectiveLeverage ? round(effectiveLeverage, 2) : null,
+        priceDiffPct: round(diffPct, 2),
+        pnlUsd: pnl != null ? round(pnl, 2) : null,
+        marginUsd: margin,
+        roePct: roePct != null ? round(roePct, 2) : null,
+        liquidationPrice: liquidation ? round(liquidation, 2) : null,
+        liquidationDistancePct: liqDistancePct != null ? round(liqDistancePct, 2) : null
+      };
+    });
+  }
+
+  function buildMessages(snapshot, history, lang, thinking, style, web) {
     const language = lang === 'en' ? 'en' : 'zh';
     const deepMode = thinking === 'deep';
     const messages = [];
@@ -645,22 +1072,56 @@ export function createAiChat({ market, liveQuote, marketContext, fearGreedSentim
         ? buildSystemPrompt(style) + '\n\nWrite the answer in English. Translate the five fixed section labels into English: Conclusion, Why I think so, Key price levels, What would prove me wrong, Risk.'
         : buildSystemPrompt(style)
     });
+    // 「现在」每次请求都重新取值：暂停/终止后继续、已发送消息被编辑后重发，都拿最新北京时间。
+    // Re-read the clock on every request so resumed, stopped or re-edited generations use the latest Beijing time.
+    const nowMs = Date.now();
+    const nowBeijing = beijingDateTime(nowMs);
+    const payload = { ...snapshot, macro:refreshMacroCountdown(snapshot.macro, nowMs) };
     messages.push({
       role:'system',
-      content:`以下是生成于 ${snapshot.generatedAt} 的实时市场快照（数据源 ${snapshot.source}，快照缓存 ${snapshot.cacheAgeMs || 0} 毫秒）。这是原始数据，字段名仅供你参考，不要出现在回答里：\n\n${JSON.stringify(snapshot)}`
+      content:`以下是生成于 ${snapshot.generatedAt} 的实时市场快照（数据源 ${snapshot.source}，快照缓存 ${snapshot.cacheAgeMs || 0} 毫秒）。这是原始数据，字段名仅供你参考，不要出现在回答里：\n\n${JSON.stringify(payload)}\n\n当前北京时间 ${nowBeijing}；快照中所有日历时间均为北京时间。日历条目里的 countdown / minutesUntil 是服务端按上面的北京时间算好的，直接照抄即可；不要自行换算时区，也不要把外部新闻里的当地时间当成北京时间。`
     });
+    // 联网检索结果：紧跟快照注入，模型才能做「本地数据 × 外部信息」的交叉验证。
+    // Web results follow the snapshot so the model can cross-check one against the other.
+    if (web && web.items && web.items.length) {
+      messages.push({
+        role:'system',
+        content:language === 'en'
+          ? `${formatWebContext(web)}\n\nWrite this section's citations in English.`
+          : formatWebContext(web)
+      });
+    } else if (web && web.attempted) {
+      messages.push({ role:'system', content:WEB_EMPTY_HINT });
+    }
+    if (snapshot.userContext) {
+      messages.push({
+        role:'system',
+        content:'快照里的 userContext 是用户自己的数据，必须优先考虑：\n1. positions 是用户手填的持仓（已按快照现价推算出浮动盈亏 pnlUsd、保证金回报 roePct、理论强平价 liquidationPrice 及其距现价百分比 liquidationDistancePct）。只要存在持仓，回答必须把仓位状况纳入：信号方向与持仓方向是否相反、离强平还有多远；若信号与持仓方向相反，必须直说风险，但不替用户做平仓决定。\n2. pageSignals 是页面自身规则模块的输出原文（规则信号分数、信号有效期/有效区间、方向研究估算）。可以引用，但要与快照数据交叉验证，发现矛盾就指出来。\n3. userContext 为 null 表示用户没填持仓，此时不要虚构任何仓位信息。\n4. 表达方式仍严格遵循所选回答模式的要求。'
+      });
+    }
     if (deepMode) {
       messages.push({
         role:'system',
         content:'本次是「深度分析」模式：请更充分地权衡多空双方的理由，结论可以更谨慎、更保守，但表达方式仍严格遵循上面所选回答模式的要求。'
       });
     }
-    // 只带最近 8 轮，且剔除内部上下文字段，避免上下文无限膨胀。
+    // 只带最近若干轮，且剔除内部上下文字段，避免上下文无限膨胀。
     // Keep only the latest turns so the context cannot grow without bound.
     const trimmed = (Array.isArray(history) ? history : [])
       .filter(m => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
-      .slice(-8)
+      .slice(-12)
       .map(({ role, content }) => ({ role, content:content.slice(0, 2_000) }));
+    // 多轮提示：明确告诉模型「这是同一场对话的延续」，否则它容易把追问当新问题重头讲。
+    // Multi-turn hint: state that the turns below are the same conversation, otherwise the model
+    // tends to treat a follow-up as a brand-new question and restarts from scratch.
+    if (trimmed.length) {
+      messages.push({
+        role:'system',
+        content: language === 'en'
+          ? 'This is a multi-turn conversation. The user/assistant messages below are earlier turns of the same chat. Keep continuity: when the user says "it", "and that one", "go on", "why" or "the previous one", they refer to the preceding turn. Do not restart from scratch, and do not repeat a conclusion you already gave unless the data changed.'
+          : '这是一场多轮对话：下面 user / assistant 消息是同一场对话的历史，回答必须延续上下文。用户说「它」「那这个呢」「继续」「为什么」「刚才那个」时，指的就是上一轮的内容；不要把追问当成全新问题从头讲一遍，也不要重复已经给过的结论，除非数据变了。'
+      });
+    }
     messages.push(...trimmed);
     return messages;
   }
@@ -750,22 +1211,32 @@ export function createAiChat({ market, liveQuote, marketContext, fearGreedSentim
     return { ok:true, content, usage, model, deepMode:Boolean(result.deepMode) };
   }
 
-  // 流式：把上游 SSE 增量原样转写给浏览器。Streaming: relay upstream SSE deltas.
-  async function streamToClient({ credential, messages, res, signal, thinking }) {
+  // 先把 SSE 响应头与「已连上」事件发出去，前端才能立刻显示「正在联网检索」这类进度，
+  // 而不用干等整个检索 + 模型首 token。
+  // Send the SSE headers (and a started event) first so the UI can show live progress
+  // instead of sitting silent through the search plus the model's first token.
+  function startSse(res, { model, deepMode }) {
+    if (res.writableEnded) return false;
+    if (!res.headersSent) {
+      res.writeHead(200, {
+        'content-type':'text/event-stream; charset=utf-8',
+        'cache-control':'no-store, no-transform',
+        connection:'keep-alive',
+        'x-accel-buffering':'no',
+        'x-content-type-options':'nosniff'
+      });
+    }
+    sendSse(res, { started:true, model:model || DEFAULT_MODEL, deepMode:Boolean(deepMode) });
+    return true;
+  }
+
+  // 流式：把上游 SSE 增量原样转写给浏览器（响应头已由 startSse 写出）。
+  // Streaming: relay upstream SSE deltas (headers already sent by startSse).
+  async function relayQwenStream({ credential, messages, res, signal, thinking }) {
     const result = await callQwen({ credential, messages, stream:true, signal, thinking });
     if (!result.ok) { sendSse(res, { error:friendlyError(result.error, result.status, credential) }); return { ok:false }; }
-    res.writeHead(200, {
-      'content-type':'text/event-stream; charset=utf-8',
-      'cache-control':'no-store, no-transform',
-      connection:'keep-alive',
-      'x-accel-buffering':'no',
-      'x-content-type-options':'nosniff'
-    });
     const reader = result.response.body?.getReader();
     if (!reader) { sendSse(res, { error:'千问返回的响应无法流式读取，请关闭流式重试。' }); return { ok:false }; }
-    // 连接建立后立刻告知前端「已连上模型」，避免用户盯着空白气泡不知道在发生什么。
-    // Tell the client we're connected immediately, so the empty bubble doesn't look frozen.
-    sendSse(res, { started:true, model:credential.model || DEFAULT_MODEL, deepMode:Boolean(result.deepMode) });
     const decoder = new TextDecoder();
     let buffer = '', full = '', usage = null, model = null, reasoningChars = 0;
     try {
@@ -811,9 +1282,12 @@ export function createAiChat({ market, liveQuote, marketContext, fearGreedSentim
   async function handle({ req, res, url, readJsonBody, json, clientKey }) {
     if (url.pathname === '/api/ai/config') {
     const credential = getCredential('qwen') || {};
+    const verified = Boolean(getVerification?.('qwen'));
     const resolvedBaseUrl = credential.baseUrl || inferBaseUrl(credential.key);
     json(res, 200, {
       configured:Boolean(credential.key),
+      verified,
+      available:Boolean(credential.key) && verified,
       model:credential.model || DEFAULT_MODEL,
       baseUrl:resolvedBaseUrl,
       // 端点与 Key 前缀是否一致（保存时留空会自动匹配，故通常一致）
@@ -840,6 +1314,16 @@ export function createAiChat({ market, liveQuote, marketContext, fearGreedSentim
       // Answer styles (register): orthogonal to thinking modes; the UI renders the picker from this.
       answerStyles:ANSWER_STYLES,
       defaultStyle:DEFAULT_STYLE,
+      // 联网检索：前端据此渲染「联网 / 离线」开关与文案。
+      // Web research: the UI renders its on/off chip and copy from this block.
+      webSearch:{
+        available:true,
+        defaultEnabled:true,
+        ttlMs:WEB_TTL,
+        maxItems:WEB_ITEM_LIMIT,
+        providers:['Google News RSS（中文）','Google News RSS（English）'],
+        note:'服务端按你的问题去公开新闻源检索最近报道与分析，与本站快照数据一起交给模型；关闭后只读本地数据。'
+      },
       snapshotTtlMs:SNAPSHOT_TTL
     });
       return true;
@@ -867,6 +1351,7 @@ export function createAiChat({ market, liveQuote, marketContext, fearGreedSentim
       if (!entry.usable) { json(res, 400, { error:`${entry.label} 属于${entry.kind === 'image' ? '图片生成' : '语音识别'}模型，不能用于行情问答。` }); return true; }
       const credential = getCredential('qwen') || {};
       if (!credential.key) { json(res, 503, { error:'尚未配置千问 API Key。请先到「API 接入中心」保存 Key。' }); return true; }
+      if (!getVerification?.('qwen')) { json(res, 503, { error:'千问 API Key 尚未验证或验证已失效。请先到「API 接入中心」验证 Key。' }); return true; }
       if (!setModelFn) { json(res, 503, { error:'服务端未启用模型切换。' }); return true; }
       const result = setModelFn(entry.id) || {};
       if (!result.ok) { json(res, 400, { error:result.error || '切换模型失败。' }); return true; }
@@ -879,10 +1364,13 @@ export function createAiChat({ market, liveQuote, marketContext, fearGreedSentim
       catch (error) { json(res, error.statusCode || 400, { error:error.message }); return true; }
       const credential = getCredential('qwen');
       if (!credential?.key) { json(res, 503, { error:'尚未配置千问 API Key。请打开右上角「API 接入中心」保存 Key 后再提问。' }); return true; }
+      if (!getVerification?.('qwen')) { json(res, 503, { error:'千问 API Key 尚未验证或验证已失效。请打开右上角「API 接入中心」验证 Key 后再提问。' }); return true; }
       if (!rateAllow(clientKey)) { json(res, 429, { error:'提问过于频繁，请稍等几秒再试。' }); return true; }
       const question = String(payload.question || '').trim().slice(0, 2_000);
       if (!question) { json(res, 400, { error:'请输入问题。' }); return true; }
-      const history = Array.isArray(payload.history) ? payload.history.slice(-8) : [];
+      // 多轮上下文：前端把整段对话带上来（含失败的提问已剔除），这里再按条数兜一次底。
+      // Multi-turn context: the client sends the whole conversation; cap it again here as a backstop.
+      const history = Array.isArray(payload.history) ? payload.history.slice(-12) : [];
       const wantStream = payload.stream !== false;
       // 默认快速模式（关闭思考）；只有显式传 deep 才启用推理。
       // Fast mode (no reasoning) by default; deep mode only when explicitly requested.
@@ -890,26 +1378,84 @@ export function createAiChat({ market, liveQuote, marketContext, fearGreedSentim
       // 回答模式：白名单校验，非法值落回「通俗」。
       // Answer style: whitelisted, anything unknown falls back to plain.
       const style = normalizeStyle(payload.style);
+      // 联网检索：默认开启，前端可显式关掉（payload.search === false）。
+      // Web research is on by default; the client can switch it off explicitly.
+      const wantSearch = payload.search !== false;
 
       let snapshot;
       try { snapshot = await buildSnapshot(payload.source || 'okx'); }
       catch (error) { json(res, 503, { error:'市场快照获取失败，暂时无法分析。', detail:error.message }); return true; }
 
-      const messages = buildMessages(snapshot, [...history, { role:'user', content:question }], payload.lang, thinking, style);
+      // 用户上下文（持仓 + 页面信号面板）：白名单清洗后，用快照现价推算出盈亏与强平价。
+      // Personal context (positions + on-page signals): sanitized, then enriched with the snapshot price.
+      const context = sanitizeContext(payload.context);
+      const snapshotWithContext = context
+        ? {
+            ...snapshot,
+            userContext:{
+              positions: derivePositionMetrics(context.positions, snapshot.price?.last),
+              pageSignals: context.pageSignals
+            }
+          }
+        : snapshot;
+
       // 思考型模型（qwen3.8 系列）会先产出大段推理再出结论，30 秒远远不够。
       // Thinking models emit a long reasoning trace first, so 30s is far too tight.
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), QWEN_TIMEOUT_MS);
       req.on('close', () => controller.abort());
-      try {
-        if (wantStream) {
-          const outcome = await streamToClient({ credential, messages, res, signal:controller.signal, thinking });
+
+      if (wantStream) {
+        // 先把响应头写好，前端可以立刻显示「正在联网检索」，不用干等。
+        // Write the headers first so the UI can show the search phase immediately.
+        if (!startSse(res, { model:credential.model || DEFAULT_MODEL, deepMode:thinking === 'deep' })) return true;
+        try {
+          const web = wantSearch ? await webSearch(question, { lang:payload.lang, signal:controller.signal }) : null;
+          if (res.writableEnded) return true;
+          // 检索回执：条数、来源、耗时都推给前端，界面上可核对，也方便排查源是否被墙。
+          // Search receipt: count, outlets and latency go to the client for transparency.
+          sendSse(res, {
+            search:{
+              enabled:wantSearch,
+              count:web ? web.items.length : 0,
+              attempted:Boolean(web),
+              sources:web ? web.sources : [],
+              feeds:web ? web.feeds : [],
+              headlines:web ? web.items.slice(0, 4).map(item => `${item.source ? item.source + ' · ' : ''}${item.title}`) : [],
+              fetchedAt:web ? web.fetchedAt : null,
+              cached:web ? web.cached : false,
+              elapsedMs:web ? web.elapsedMs : 0
+            }
+          });
+          const messages = buildMessages(snapshotWithContext, [...history, { role:'user', content:question }], payload.lang, thinking, style, web);
+          const outcome = await relayQwenStream({ credential, messages, res, signal:controller.signal, thinking });
           if (!outcome.ok && !res.writableEnded) json(res, 502, { error:'千问响应失败', detail:outcome.error });
           return true;
-        }
+        } catch (error) {
+          const message = error.name === 'AbortError' ? `调用千问超时（${QWEN_TIMEOUT_MS / 1000} 秒），请稍后重试或改用「快速」模式。` : `调用千问失败：${error.message}`;
+          if (!res.headersSent) json(res, 502, { error:message });
+          else sendSse(res, { error:message });
+          return true;
+        } finally { clearTimeout(timer); }
+      }
+
+      let web = null;
+      if (wantSearch) {
+        try { web = await webSearch(question, { lang:payload.lang, signal:controller.signal }); }
+        catch { web = null; }
+      }
+      const messages = buildMessages(snapshotWithContext, [...history, { role:'user', content:question }], payload.lang, thinking, style, web);
+      try {
         const outcome = await complete({ credential, messages, signal:controller.signal, thinking });
         if (!outcome.ok) { json(res, 502, { error:friendlyError(outcome.error, outcome.status, credential) }); return true; }
-        json(res, 200, { content:outcome.content, usage:outcome.usage, model:outcome.model, deepMode:outcome.deepMode, snapshot:{ generatedAt:snapshot.generatedAt, source:snapshot.source, price:snapshot.price } });
+        json(res, 200, {
+          content:outcome.content,
+          usage:outcome.usage,
+          model:outcome.model,
+          deepMode:outcome.deepMode,
+          search:web ? { enabled:true, count:web.items.length, sources:web.sources, fetchedAt:web.fetchedAt, cached:web.cached } : { enabled:false, count:0 },
+          snapshot:{ generatedAt:snapshot.generatedAt, source:snapshot.source, price:snapshot.price }
+        });
         return true;
       } catch (error) {
         const message = error.name === 'AbortError' ? `调用千问超时（${QWEN_TIMEOUT_MS / 1000} 秒），请稍后重试或改用「快速」模式。` : `调用千问失败：${error.message}`;
@@ -920,5 +1466,7 @@ export function createAiChat({ market, liveQuote, marketContext, fearGreedSentim
     return false;
   }
 
-  return { handle, buildSnapshot, QWEN_MODELS, getQuotaState };
+  // webSearch 一并导出，便于本地自检与后续复用（不依赖 HTTP 层）。
+  // webSearch is exposed too, so it can be exercised without going through HTTP.
+  return { handle, buildSnapshot, webSearch, QWEN_MODELS, getQuotaState };
 }

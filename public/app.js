@@ -105,13 +105,24 @@ const time = (ms) =>
     hour: "2-digit",
     minute: "2-digit",
   }).format(ms);
-/* 主图 X 轴时间标签格式化；短周期显示 HH:mm，跨天或长周期追加 MM-DD。 */
-function formatTimeAxisLabel(ms, showDate) {
+/* 主图 X 轴时间标签格式化；短周期显示 HH:mm，跨天或长周期追加 MM-DD，
+   跨度跨年时再追加年份（1Y 这类范围内 MM-DD 会指代不明）。 */
+function formatTimeAxisLabel(ms, showDate, showYear) {
   const d = new Date(ms);
   const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
   if (!showDate) return hm;
-  return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${hm}`;
+  const md = `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  return showYear ? `${d.getFullYear()}-${md} ${hm}` : `${md} ${hm}`;
 }
+/* 覆盖信息里的完整时间（含年份），用于跨度跨年的范围。 */
+const timeFull = (ms) =>
+  new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(ms);
 async function apiFetch(url, timeout = 8_000) {
   const controller = new AbortController(),
     timer = setTimeout(() => controller.abort(), timeout);
@@ -554,7 +565,7 @@ function visibleCandles() {
         ),
       );
       hoverIndex = null;
-      chartSelection = null;
+      clearChartSelection();
       draw();
     },
     { passive: false },
@@ -581,7 +592,10 @@ function visibleCandles() {
   changes.className = "card change-card chart-periods";
   changes.id = "periodChangeCard";
   changes.innerHTML = '<h2>周期涨幅</h2><div id="changeTags"></div>';
-  side.append(changes);
+  // 周期涨幅放在主 K 线卡片内，紧跟 OKX 微观结构卡片，避免被右侧 side-stack 高度推下去。
+  // Keep period returns inside the main chart column, directly after the OKX microstructure card,
+  // so the right column's height never creates an empty gap in the chart column.
+  chartCard.append(changes);
   layout.append(chartCard, side);
   main.insertBefore(layout, grid);
   grid.remove();
@@ -601,22 +615,31 @@ function visibleCandles() {
       chart = $("mainChartCard"),
       signal = $("ruleSignalCard"),
       indicators = $("indicatorDetailsCard"),
-      changes = $("periodChangeCard");
+      changes = $("periodChangeCard"),
+      sentiment = $("fearGreedGauge");
     if (!layout || !side || !chart || !signal || !indicators || !changes)
       return;
     if (query.matches) {
       layout.classList.add("mobile-reading-layout");
       layout.replaceChildren(signal, chart, changes, side);
       side.hidden = true;
+      // 移动端：宏观与情绪不能留在 hidden 的 side-stack 里，否则会被隐藏。
+      // 把它放到 terminal-layout 之后、indicatorDetailsCard 之前。
+      if (sentiment && side.contains(sentiment)) layout.after(sentiment);
       layout.after(indicators);
     } else {
       side.hidden = false;
       side.replaceChildren(signal, indicators);
+      // 桌面端：宏观与情绪固定在右侧 side-stack 的 indicatorDetailsCard 下方。
+      if (sentiment && !side.contains(sentiment)) side.append(sentiment);
       layout.classList.remove("mobile-reading-layout");
-      layout.replaceChildren(chart, side, changes);
+      layout.replaceChildren(chart, side);
+      // 周期涨幅固定在主 K 线卡片内（紧跟 OKX 微观结构），不让右列高度把它推下去。
+      if (changes && !chart.contains(changes)) chart.append(changes);
     }
     draw();
   }
+  window.arrangeTerminalLayout = arrange;
   query.addEventListener("change", arrange);
   setTimeout(arrange, 0);
   setTimeout(arrange, 80);
@@ -680,7 +703,7 @@ function buttons() {
     if (!op) return;
     state.zoom =
       op === "in"
-        ? Math.min(8, state.zoom * 1.5)
+        ? Math.min(7, state.zoom * 1.5)
         : op === "out"
           ? Math.max(1, state.zoom / 1.5)
           : 1;
@@ -1236,6 +1259,7 @@ function updateClocks() {
   };
   const renderApiCenter=async()=>{
     let credentials={},verification={},coinGeckoUsage=null; try { const payload=await apiCenterRequest('/api/api-center'); credentials=payload.credentials||{}; verification=payload.verification||{}; coinGeckoUsage=payload.coinGeckoUsage||null; } catch {}
+    window.dispatchEvent(new CustomEvent('btc:ai-credential-changed', { detail:{ available:Boolean(credentials.qwen && verification.qwen) } }));
     const free=apiCenterFree.map(([group,name,note])=>`<article class="api-center-row free"><div><b>${group}</b><span>${name}</span></div><em>${note}</em></article>`).join('');
     // 千问配置需要模型列表与当前选择，单独从 AI 配置接口取。
     // The Qwen card needs the model list and current choice, fetched from the AI config endpoint.
@@ -1271,7 +1295,7 @@ function updateClocks() {
     const qwenKeyInput=apiCenterModal.querySelector('form[data-api-provider="qwen"] input[name="key"]');
     if(qwenKeyInput&&qwenEndpointSelect){const tokenPlanOption=[...qwenEndpointSelect.options].find(option=>option.value.includes('token-plan'));if(tokenPlanOption)qwenKeyInput.oninput=()=>{qwenEndpointSelect.value=/^sk-sp-/i.test(qwenKeyInput.value.trim())?tokenPlanOption.value:'';};}
     const qwenVerifyButton=apiCenterModal.querySelector('.api-verify-qwen');
-    if(qwenVerifyButton)qwenVerifyButton.onclick=async()=>{const form=apiCenterModal.querySelector('form[data-api-provider="qwen"]');const key=(form?.elements.key?.value||'').trim(),model=(form?.elements.model?.value||'').trim(),url=(form?.elements.url?.value||'').trim();if(!key&&!credentials.qwen){showAppDialog({title:'千问 API Key 验证',message:'请先填写 API Key 再验证。'});return;}qwenVerifyButton.disabled=true;qwenVerifyButton.textContent='验证中…';try{if(key){await apiCenterRequest('/api/api-center',{method:'PUT',body:JSON.stringify({provider:'qwen',key,url,model})});}const result=await apiCenterRequest('/api/api-center/verify',{method:'POST',body:JSON.stringify({provider:'qwen'})});if(result.valid)await renderApiCenter();showAppDialog({title:'千问 API Key 验证',message:result.message});}catch(error){showAppDialog({title:'千问 API Key 验证',message:error.message});}finally{qwenVerifyButton.disabled=false;qwenVerifyButton.textContent='验证 Key';}};
+    if(qwenVerifyButton)qwenVerifyButton.onclick=async()=>{const form=apiCenterModal.querySelector('form[data-api-provider="qwen"]');const key=(form?.elements.key?.value||'').trim(),model=(form?.elements.model?.value||'').trim(),url=(form?.elements.url?.value||'').trim();if(!key&&!credentials.qwen){showAppDialog({title:'千问 API Key 验证',message:'请先填写 API Key 再验证。'});return;}qwenVerifyButton.disabled=true;qwenVerifyButton.textContent='验证中…';try{if(key){await apiCenterRequest('/api/api-center',{method:'PUT',body:JSON.stringify({provider:'qwen',key,url,model})});window.dispatchEvent(new CustomEvent('btc:ai-credential-changed',{detail:{available:false}}));}const result=await apiCenterRequest('/api/api-center/verify',{method:'POST',body:JSON.stringify({provider:'qwen'})});await renderApiCenter();showAppDialog({title:'千问 API Key 验证',message:result.message});}catch(error){await renderApiCenter();showAppDialog({title:'千问 API Key 验证',message:error.message});}finally{qwenVerifyButton.disabled=false;qwenVerifyButton.textContent='验证 Key';}};
 
     // 千问额度小卡渲染：与右下角对话窗同源（同一接口），数据保留 60s。
     // Mini Qwen quota card: same endpoint as the chat panel; data cached for 60s.
@@ -1843,7 +1867,7 @@ buttons = function () {
         state.interval = b.dataset.i;
         state.limit = 300;
         state.range = null;
-        chartSelection = null;
+        clearChartSelection();
         loadCurrent();
       }),
   );
@@ -1854,7 +1878,7 @@ buttons = function () {
         state.interval = i;
         state.limit = l;
         state.range = b.dataset.r;
-        chartSelection = null;
+        clearChartSelection();
         loadCurrent();
       }),
   );
@@ -1947,15 +1971,10 @@ function draw() { if (chartPaused) return; renderChart(); }
       cv.releasePointerCapture(e.pointerId);
     stats();
   });
+  /* 双击 = 显式清除框选：状态、浮层、底部提示一起收敛（均由 clearChartSelection 处理）。 */
   cv.addEventListener("dblclick", () => {
-    chartSelection = null;
-    const el = $("selectionStats");
-    if (el)
-      el.textContent = tx(
-        "拖拽图表可框选区段，显示最高、最低及涨跌幅。",
-        "Drag on chart to select a period: high, low and return.",
-      );
-    draw();
+    clearChartSelection();
+    drawLive();
   });
 })();
 ensureInteractionUI();
@@ -2279,17 +2298,15 @@ const drawLive = () => renderChart({ immediate: true });
   if (periods) {
     periods.classList.add("chart-periods");
   }
+  /* 只清理“悬停”态（十字线 / 悬浮卡 / 冻结的 K 线），**绝不**清掉框选态。
+     框选数据（已选区段·最高·最低·涨跌）必须在松手后留在屏幕上供阅读，
+     只有显式清除（双击图表、切换周期/范围/数据源、平移）才消失。
+     历史 bug：这里曾一并清空 chartSelection 并重置提示文字；而松手时
+     「重大事件」浮层恰好弹在光标下 → #chart 触发 pointerleave → 选区被秒清。 */
   const clearHover = () => {
     chartPaused = false;
     frozenCandles = null;
     hoverIndex = null;
-    chartSelection = null;
-    const stat = $("selectionStats");
-    if (stat)
-      stat.textContent = tx(
-        "拖拽图表可框选区段，显示时间段、最高、最低及涨跌幅。",
-        "Drag on chart to select a time span, high, low and return.",
-      );
     const tip = $("chartTooltip");
     if (tip) tip.style.display = "none";
     drawLive();
@@ -2347,7 +2364,11 @@ setTimeout(() => {
     price = () => state?.ticker?.last,
     fmt = (n) =>
       Number(n).toLocaleString("en-US", { maximumFractionDigits: 2 });
-  const card = document.createElement("section");
+  const card = document.createElement("section"),
+    details = document.createElement("details");
+  details.id = "wechatAlertDetails";
+  details.className = "position-details alert-details";
+  details.innerHTML = `<summary>${tx("消息推送", "Message alerts")}</summary>`;
   card.id = "wechatAlertCard";
   card.className = "card wechat-alert-card";
   card.innerHTML = `<div class="forecast-head"><div><h2>${tx("消息推送", "Message alerts")}</h2><p id="localAlertDescription">${tx("未登录时 SendKey 仅保存在当前会话；登录后可加密保存到云端。", "When signed out, SendKey stays only in this session; sign in to encrypt it in the cloud.")}</p></div><span id="localAlertState" class="badge flat"></span></div><form id="localKeyForm" class="wechat-key-form"><label>${tx("Server酱 SendKey", "ServerChan SendKey")}<input name="key" type="password" autocomplete="off" placeholder="SCT…"></label><a href="https://sct.ftqq.com/sendkey" target="_blank" rel="noopener">${tx("获取 SendKey", "Get SendKey")}</a><button id="localKeySave">${tx("保存到当前会话", "Save for this session")}</button><button type="button" id="localAlertTest">${tx("测试当前市价", "Test current price")}</button><button type="button" id="localAlertClear" class="danger">${tx("清除本机 Key", "Clear local Key")}</button></form><div class="alert-rule-toolbar"><b>₿ BTCUSDT ${tx("永续", "Perpetual")}</b><div><button type="button" id="clearLocalAlerts" class="danger">${tx("批量全删", "Delete all")}</button><button type="button" id="openLocalAlert">＋ ${tx("添加预警", "Add alert")}</button></div></div><div id="localAlertList" class="wechat-alert-detail"></div><div id="localAlertModal" class="alert-composer" hidden><section><header><b>${tx("添加预警", "Add alert")}</b><button type="button" id="closeLocalAlert">×</button></header><p class="alert-symbol">₿ <b>BTCUSDT ${tx("永续", "Perpetual")}</b></p><form id="localAlertForm"><label>${tx("预警类型", "Alert type")}<select name="kind"><option value="price_reached">${tx("价格达到", "Price reached")}</option><option value="price_above">${tx("价格上涨至", "Price rises to")}</option><option value="price_below">${tx("价格下跌至", "Price falls to")}</option><option value="long_liquidation">${tx("多头爆仓价", "Long liquidation")}</option><option value="short_liquidation">${tx("空头爆仓价", "Short liquidation")}</option></select></label><label>${tx("价格", "Price")}<span class="mark-price">${tx("市价", "Mark")} <button type="button" id="useLocalMark">--</button></span><input name="target" type="number" inputmode="decimal" min="0" step="0.01" required placeholder="80000"><em>USDT</em></label><div class="frequency"><b>${tx("频率", "Frequency")}</b><div><button type="button" data-local-frequency="once" class="active">${tx("仅提醒一次", "Once")}</button><button type="button" data-local-frequency="repeat">${tx("重复提醒", "Repeat")}</button></div></div><label id="localCooldown" hidden>${tx("冷却时间（分钟）", "Cooldown (minutes)")}<input name="cooldown" type="number" inputmode="numeric" min="1" step="1" value="5"></label><label class="voice-rule-option"><input name="voiceEnabled" type="checkbox" checked>${tx("触发时语音播报", "Speak when triggered")}</label><button class="alert-submit">${tx("添加", "Add")}</button></form></section></div>`;
@@ -2363,7 +2384,8 @@ setTimeout(() => {
   notice.hidden = true;
   notice.innerHTML = `<section role="dialog" aria-modal="true" aria-labelledby="localRuleNoticeTitle"><header><b id="localRuleNoticeTitle">${tx("规则测试已发送", "Rule test sent")}</b><button type="button" id="closeLocalRuleNotice" aria-label="${tx("关闭", "Close")}">×</button></header><div class="notice-body"><span>✓</span><p>${tx("当前规则测试请求已发送。通知标题会标注“【测试】”，该规则不会被保存，也不会影响已有规则的冷却时间。", "The current-rule test was sent. Its notification is labeled “Test”; this rule is not saved and does not affect existing cooldowns.")}</p></div><button type="button" id="confirmLocalRuleNotice" class="alert-submit">${tx("我知道了", "Got it")}</button></section>`;
   document.body.append(notice);
-  (main.querySelector("footer") || main.lastElementChild).before(card);
+  details.append(card);
+  (main.querySelector("footer") || main.lastElementChild).before(details);
   const keyForm = $("localKeyForm"),
     keyInput = keyForm.elements.key,
     stateEl = $("localAlertState"),
@@ -5066,6 +5088,17 @@ function traceSmoothChartLine(c, values, x, y) {
   }
 }
 
+/* 主图绘图区几何：renderChart 与十字线 syncHoverPoint 必须共用同一套数值。
+   成交量和 RSI 已经在独立画布（#chartRsi）里，主图画布只到时间轴上方，
+   所以不能再沿用「扣掉副图高度」的旧公式，否则定位点会提前卡在半空。 */
+const CHART_PAD = { l: 52, r: 74, t: 15, b: 8 },
+  CHART_TIME_AXIS_H = 28;
+function chartPlotGeom(rect) {
+  const cw = rect.width - CHART_PAD.l - CHART_PAD.r,
+    ch = rect.height - CHART_PAD.t - CHART_PAD.b;
+  return { cw, ch, priceHeight: Math.max(80, ch - CHART_TIME_AXIS_H) };
+}
+
 function drawCandlestickChart() {
   const cv = $("chart"),
     rect = cv?.getBoundingClientRect(),
@@ -5080,10 +5113,10 @@ function drawCandlestickChart() {
   if (cv.width !== nextW) cv.width = nextW;
   if (cv.height !== nextH) cv.height = nextH;
   const     c = cv.getContext("2d"),
-    P = { l: 52, r: 74, t: 15, b: 8 },
+    P = CHART_PAD,
     cw = w - P.l - P.r,
     ch = h - P.t - P.b,
-    timeAxisH = 28,
+    timeAxisH = CHART_TIME_AXIS_H,
     priceHeight = Math.max(80, ch - timeAxisH);
   const closes = d.map((v) => v.close),
     ma20 = ema(closes, 20),
@@ -5528,7 +5561,10 @@ function drawCandlestickChart() {
   const intervalMins = intervalMinutes[state.interval] || 1;
   const isLongTerm = intervalMins >= 240; // 4h+
   const showDate = isLongTerm || spanMs > 86_400_000;
-  const labelMinGap = showDate ? 110 : 72;
+  const showYear =
+    showDate &&
+    new Date(d[0].time).getFullYear() !== new Date(d[d.length - 1].time).getFullYear();
+  const labelMinGap = showYear ? 150 : showDate ? 110 : 72;
   const maxTimeLabels = Math.max(2, Math.floor(cw / labelMinGap));
   const timeStep = Math.max(1, Math.ceil((d.length - 1) / (maxTimeLabels - 1)));
   const axisY = P.t + priceHeight + 14;
@@ -5548,7 +5584,7 @@ function drawCandlestickChart() {
     c.moveTo(xx, axisY - 4);
     c.lineTo(xx, axisY);
     c.stroke();
-    c.fillText(formatTimeAxisLabel(d[i].time, showDate), xx, axisY + 3);
+    c.fillText(formatTimeAxisLabel(d[i].time, showDate, showYear), xx, axisY + 3);
   }
   c.restore();
   renderRangeExtremaPoints();
@@ -5559,22 +5595,21 @@ const syncHoverPoint = (event) => {
     rect = cv?.getBoundingClientRect(),
     d = visibleCandles();
   if (!cv || !rect || d.length < 2) return;
-  const P = { l: 52, r: 74, t: 15, b: 30 },
-    cw = rect.width - P.l - P.r,
-    ch = rect.height - P.t - P.b,
-    priceHeight = ch - Math.max(42, Math.round(ch * 0.24)) - 8,
+  /* 钳制范围必须与 drawCandlestickChart 完全一致（共用 chartPlotGeom），
+     否则十字定位点会在到达图表底部之前就卡住不动。 */
+  const { cw, priceHeight } = chartPlotGeom(rect),
     rawX = event.clientX - rect.left,
     rawY = event.clientY - rect.top;
   hoverPoint = {
-    x: Math.max(P.l, Math.min(P.l + cw, rawX)),
-    y: Math.max(P.t, Math.min(P.t + priceHeight, rawY)),
+    x: Math.max(CHART_PAD.l, Math.min(CHART_PAD.l + cw, rawX)),
+    y: Math.max(CHART_PAD.t, Math.min(CHART_PAD.t + priceHeight, rawY)),
     sub: false,
   };
   hoverIndex = Math.max(
     0,
     Math.min(
       d.length - 1,
-      Math.round(((hoverPoint.x - P.l) / cw) * (d.length - 1)),
+      Math.round(((hoverPoint.x - CHART_PAD.l) / cw) * (d.length - 1)),
     ),
   );
 };
@@ -5608,12 +5643,17 @@ function drawRsiChart() {
   c.clearRect(0, 0, w, h);
   const showRsi = series.rsi !== false;
   const showVolume = series.volume !== false;
-  /* 同区域叠显：成交量柱铺满整个子图高度垫底，RSI 曲线叠加在上层。
-     聚焦状态（点击切换）：volume=柱凸显；rsi=RSI 凸显、柱压暗后推。 */
-  const volumeFocus = showVolume && (rsiPaneFocus === "volume" || !showRsi);
-  const rsiFocused = showRsi && (rsiPaneFocus === "rsi" || !showVolume);
+  /* 同区域叠显（回归原始设计）：成交量柱铺满整个副图高度垫底，RSI 曲线叠加在上层。
+     仅当可见时间跨度 > 12 小时（长周期 / 多日）才对成交量启用 0.55 次幂压缩，
+     消除个别巨量柱对其他柱子的压制；短周期盯盘（如 6h/3h/1h 区间，跨度 ≤ 12h）
+     保持线性缩放，对交易量的细微变化保持敏感，便于第一时间察觉异动巨量。 */
+  const spanMs = Number(d[d.length - 1].time) - Number(d[0].time);
+  const useVolumePower = spanMs > 12 * 3600 * 1000;
   const x = (i) => P.l + (i / Math.max(1, d.length - 1)) * cw;
   const y = (v) => P.t + (1 - v / 100) * ch;
+  /* 聚焦状态（点击切换）：volume=柱凸显；rsi=RSI 凸显、柱压暗后推。 */
+  const volumeFocus = showVolume && (rsiPaneFocus === "volume" || !showRsi);
+  const rsiFocused = showRsi && (rsiPaneFocus === "rsi" || !showVolume);
   /* 超买(>70)/超卖(<30) 浅色背景区 + 参考线（垫在柱与线之下）。 */
   if (showRsi) {
     c.fillStyle = "rgba(239,77,120,.08)";
@@ -5639,14 +5679,20 @@ function drawRsiChart() {
     c.stroke();
     c.setLineDash([]);
   }
-  /* 成交量柱：铺满整个子图高度（同区域叠显），红绿按 K 线涨跌着色。 */
+  /* 成交量柱：铺满整个副图高度（同区域叠显），红绿按 K 线涨跌着色。
+     长周期时按 0.55 次幂缩放抑制巨量柱，短周期线性保留敏感度。 */
   if (showVolume) {
     const maxVolume = Math.max(1, ...d.map((v) => Number(v.volume) || 0));
     const candleWidth = Math.max(2, Math.min(14, (cw / d.length) * 0.64));
     const volAlpha = rsiFocused ? 0.1 : volumeFocus ? 0.8 : 0.34;
+    const volHeight = (raw) => {
+      const ratio = Math.max(0, raw) / maxVolume;
+      const scaled = useVolumePower ? Math.pow(ratio, 0.55) : ratio;
+      return scaled * ch * 0.94;
+    };
     c.save();
     d.forEach((v, i) => {
-      const height = ((Number(v.volume) || 0) / maxVolume) * ch * 0.94;
+      const height = volHeight(Number(v.volume) || 0);
       if (height < 1) return;
       c.fillStyle = v.close >= v.open ? "#28c76f" : "#ef4d78";
       c.globalAlpha = volAlpha;
@@ -5659,7 +5705,7 @@ function drawRsiChart() {
     });
     if (!rsiFocused && Number.isInteger(hoverIndex) && d[hoverIndex]) {
       const selected = d[hoverIndex],
-        height = ((Number(selected.volume) || 0) / maxVolume) * ch * 0.94;
+        height = volHeight(Number(selected.volume) || 0);
       if (height >= 1) {
         const barWidth = Math.max(2, candleWidth + 2);
         const barX = Math.round(x(hoverIndex) - barWidth / 2);
@@ -5677,7 +5723,7 @@ function drawRsiChart() {
     c.restore();
   }
   if (!showRsi) return;
-  /* RSI 曲线（叠在成交量柱上层；聚焦时加粗发光，柱聚焦时略退后）。 */
+  /* RSI 曲线（在 RSI 区域绘制；聚焦时加粗发光，柱聚焦时略退后）。 */
   const closes = d.map((v) => v.close),
     rsiArr = rsi(closes, 14),
     /* RSI 用中性白（亮色主题用石板灰）：与红绿成交量柱、各指标线色差都最大。 */
@@ -5773,6 +5819,7 @@ function drawRsiChart() {
     if ((state.chartSeries || {}).rsi !== false) {
       const val = rsi(d.map((v) => v.close), 14)[idx];
       if (Number.isFinite(val)) {
+        /* 与 drawRsiChart 一致：RSI 曲线铺满整个副图高度（同区域叠显）。 */
         const yy = P.t + (1 - val / 100) * ch;
         if (Math.abs(py - yy) <= 14) return "rsi";
       }
@@ -6621,35 +6668,144 @@ setTimeout(() => {
       detail: `${events.length} ${tx("个日历事件", "calendar events")} · ${available}/${signals.length} ${tx("项环境数据", "market signals")} · ${providers.join(" / ") || "--"}`,
     };
   };
+  // 数据链路按职责分组：行情与衍生品 / 概率与跨市场 / 宏观与日历 /
+  // 情绪与新闻 / AI 与服务。每组可独立折叠，面板随 API 增多也能保持可读。
+  // Data paths are grouped by responsibility so the panel stays legible as the
+  // number of connected APIs grows. Each group collapses independently.
+  const CATS = [
+    { id: "market", label: () => tx("行情与衍生品", "Market & derivatives") },
+    { id: "signal", label: () => tx("概率与跨市场", "Probability & cross-market") },
+    { id: "macro", label: () => tx("宏观与日历", "Macro & calendar") },
+    { id: "news", label: () => tx("情绪与新闻", "Sentiment & news") },
+    { id: "service", label: () => tx("AI 与服务", "AI & services") },
+  ];
   const checks = () => [
-    webSocketCheck,
-    backendCheck,
-    marketCheck("okx", "OKX", "BTC-USDT-SWAP"),
-    marketCheck("coinbase", "Coinbase", "BTC-PERP"),
-    marketCheck("gate", "Gate", "BTC_USDT"),
-    marketCheck("binance", "Binance", "BTCUSDT"),
-    async () => {
-      const result = await timedFetch("/api/forecast-history"),
-        { data } = result;
-      return {
-        ...result,
-        name: tx("概率历史样本", "Forecast history"),
-        contract: "/api/forecast-history",
-        detail: `${data.source} · 15m ${data.intraday.length} / 1d ${data.daily.length} · ${data.cached ? tx("缓存", "cached") : tx("实时", "live")}`,
-      };
-    },
-    async () => {
-      const result = await timedFetch("/api/correlation-history"),
-        { data } = result;
-      return {
-        ...result,
-        name: tx("美股联动样本", "US equities history"),
-        contract: "/api/correlation-history",
-        detail: `BTC ${data.btc.length} · SPY ${data.spy.length} · QQQ ${data.qqq.length} · ${data.cached ? tx("缓存", "cached") : tx("实时", "live")}`,
-      };
-    },
-    sentimentCheck,
-    macroCheck,
+    { cat: "market", name: tx("OKX WebSocket（优先）", "OKX WebSocket (preferred)"), contract: "wss://ws.okx.com:8443/ws/v5/public", run: webSocketCheck },
+    { cat: "market", name: tx("本站后端", "Site backend"), contract: "/api/status", run: backendCheck },
+    { cat: "market", name: "OKX", contract: "BTC-USDT-SWAP", run: marketCheck("okx", "OKX", "BTC-USDT-SWAP") },
+    { cat: "market", name: "Coinbase", contract: "BTC-PERP", run: marketCheck("coinbase", "Coinbase", "BTC-PERP") },
+    { cat: "market", name: "Gate", contract: "BTC_USDT", run: marketCheck("gate", "Gate", "BTC_USDT") },
+    { cat: "market", name: "Binance", contract: "BTCUSDT", run: marketCheck("binance", "Binance", "BTCUSDT") },
+    { cat: "market", name: tx("衍生品上下文", "Derivatives context"), contract: "/api/market-context · OKX", run: async () => {
+        const result = await timedFetch("/api/market-context?source=okx"),
+          { data } = result;
+        const fr = data.fundingRate, oi = data.oi;
+        return {
+          ...result,
+          name: tx("衍生品上下文", "Derivatives context"),
+          contract: "/api/market-context · OKX",
+          detail: `资金费率 ${Number.isFinite(fr) ? (fr * 100).toFixed(4) + "%" : "--"} · OI ${Number.isFinite(oi) ? (oi / 1e8).toFixed(2) + " 亿" : "--"} · ${data.source || "--"}`,
+        };
+      } },
+    { cat: "signal", name: tx("概率历史样本", "Forecast history"), contract: "/api/forecast-history", run: async () => {
+        const result = await timedFetch("/api/forecast-history"),
+          { data } = result;
+        return {
+          ...result,
+          name: tx("概率历史样本", "Forecast history"),
+          contract: "/api/forecast-history",
+          detail: `${data.source} · 15m ${data.intraday.length} / 1d ${data.daily.length} · ${data.cached ? tx("缓存", "cached") : tx("实时", "live")}`,
+        };
+      } },
+    { cat: "signal", name: tx("美股联动样本", "US equities history"), contract: "/api/correlation-history", run: async () => {
+        const result = await timedFetch("/api/correlation-history"),
+          { data } = result;
+        return {
+          ...result,
+          name: tx("美股联动样本", "US equities history"),
+          contract: "/api/correlation-history",
+          detail: `BTC ${data.btc.length} · SPY ${data.spy.length} · QQQ ${data.qqq.length} · ${data.cached ? tx("缓存", "cached") : tx("实时", "live")}`,
+        };
+      } },
+    { cat: "signal", name: tx("美股实时报价", "US equity quotes"), contract: "Yahoo Finance · /api/us-equity-quotes", run: async () => {
+        const result = await timedFetch("/api/us-equity-quotes"),
+          { data } = result;
+        const spy = (data.quotes || []).find((q) => q.symbol === "SPY"),
+          qqq = (data.quotes || []).find((q) => q.symbol === "QQQ");
+        return {
+          ...result,
+          name: tx("美股实时报价", "US equity quotes"),
+          contract: "Yahoo Finance · /api/us-equity-quotes",
+          detail: `SPY ${money(spy?.last)} · QQQ ${money(qqq?.last)} · ${data.source || "--"}`,
+        };
+      } },
+    { cat: "macro", name: tx("宏观日历与市场环境", "Macro calendar & market context"), contract: "/api/fed-calendar", run: macroCheck },
+    { cat: "macro", name: tx("投资日历", "Investment calendar"), contract: "/api/investment-calendar", run: async () => {
+        const result = await timedFetch("/api/investment-calendar"),
+          { data } = result;
+        const events = data.events || [];
+        const sources = [...new Set(events.map((e) => e.source).filter(Boolean))];
+        return {
+          ...result,
+          name: tx("投资日历", "Investment calendar"),
+          contract: "/api/investment-calendar",
+          detail: `${events.length} ${tx("个事件", "events")} · ${(sources.join(" / ") || "--").slice(0, 48)}`,
+        };
+      } },
+    { cat: "news", name: tx("恐惧&贪婪指数", "Fear & Greed Index"), contract: "Alternative.me · /api/sentiment", run: sentimentCheck },
+    { cat: "news", name: tx("新闻流", "News feed"), contract: "Google News · /api/news", run: async () => {
+        const result = await timedFetch("/api/news"),
+          { data } = result;
+        const items = data.items || [];
+        return {
+          ...result,
+          name: tx("新闻流", "News feed"),
+          contract: "Google News · /api/news",
+          detail: `${items.length} ${tx("条", "items")} · ${data.source || "--"}`,
+        };
+      } },
+    { cat: "service", name: tx("AI 助手与密钥", "AI assistant & keys"), contract: "/api/api-center", run: async () => {
+        const result = await timedFetch("/api/api-center"),
+          { data } = result;
+        const c = data.credentials || {};
+        const on = Object.entries(c).filter(([, v]) => v).map(([k]) => k);
+        return {
+          ...result,
+          name: tx("AI 助手与密钥", "AI assistant & keys"),
+          contract: "/api/api-center",
+          detail: `${tx("已配置", "configured")}: ${on.length ? on.join(", ") : tx("无", "none")}`,
+        };
+      } },
+    { cat: "service", name: tx("语音播报", "Voice (Edge TTS)"), contract: "Microsoft Edge TTS · /api/voice/edge", run: async () => {
+        const started = performance.now(),
+          controller = new AbortController(),
+          timer = setTimeout(() => controller.abort(), 20_000);
+        try {
+          const response = await fetch("/api/voice/edge", {
+              method: "POST",
+              cache: "no-store",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ text: "。", voice: "zh-CN-XiaoxiaoNeural" }),
+              signal: controller.signal,
+            }),
+            buf = await response.arrayBuffer();
+          if (!response.ok || buf.byteLength === 0) throw new Error(`HTTP ${response.status}`);
+          const elapsed = Math.round(performance.now() - started);
+          return {
+            ms: elapsed,
+            siteMs: elapsed,
+            upstreamMs: 0,
+            upstreamCalls: 0,
+            name: tx("语音播报", "Voice (Edge TTS)"),
+            contract: "Microsoft Edge TTS · /api/voice/edge",
+            detail: `${tx("合成成功", "synthesized")} · ${(buf.byteLength / 1024).toFixed(1)} KB`,
+          };
+        } catch (error) {
+          throw new Error(error.name === "AbortError" ? tx("请求超时", "Request timed out") : error.message);
+        } finally {
+          clearTimeout(timer);
+        }
+      } },
+    { cat: "service", name: tx("预警推送", "Price alerts"), contract: "ServerChan · /api/alerts/health", run: async () => {
+        const result = await timedFetch("/api/alerts/health"),
+          { data } = result;
+        return {
+          ...result,
+          name: tx("预警推送", "Price alerts"),
+          contract: "ServerChan · /api/alerts/health",
+          detail: data.enabled ? tx("已启用", "enabled") : (data.reason || tx("未启用", "disabled")),
+        };
+      } },
   ];
   const row = (index, name, contract) => {
     const el = document.createElement("article");
@@ -6668,39 +6824,50 @@ setTimeout(() => {
     running = true;
     copy();
     toggle.classList.add("testing");
+    const all = checks(),
+      total = all.length;
     summary.className = "connectivity-summary testing";
     summary.textContent = tx(
-      "正在并行检测 10 项数据链路（优先 OKX WebSocket）…",
-      "Testing 10 data paths, prioritizing OKX WebSocket…",
+      `正在并行检测 ${total} 项数据链路（优先 OKX WebSocket）…`,
+      `Testing ${total} data paths, prioritizing OKX WebSocket…`,
     );
-    const definitions = [
-      [
-        tx("OKX WebSocket（优先）", "OKX WebSocket (preferred)"),
-        "wss://ws.okx.com:8443/ws/v5/public",
-      ],
-      [tx("本站后端", "Site backend"), "/api/status"],
-      ["OKX", "BTC-USDT-SWAP"],
-      ["Coinbase", "BTC-PERP"],
-      ["Gate", "BTC_USDT"],
-      ["Binance", "BTCUSDT"],
-      [tx("概率历史样本", "Forecast history"), "/api/forecast-history"],
-      [tx("美股联动样本", "US equities history"), "/api/correlation-history"],
-      [
-        tx("恐惧&贪婪指数", "Fear & Greed Index"),
-        "Alternative.me · /api/sentiment",
-      ],
-      [
-        tx("宏观日历与市场环境", "Macro calendar & market context"),
-        "/api/fed-calendar",
-      ],
-    ];
-    rows.replaceChildren(
-      ...definitions.map((item, index) => row(index, ...item)),
-    );
+    rows.replaceChildren();
+    const groupState = {};
+    for (const cat of CATS) {
+      const section = document.createElement("section");
+      section.className = "connectivity-group";
+      section.dataset.cat = cat.id;
+      const head = document.createElement("button");
+      head.type = "button";
+      head.className = "connectivity-group-head";
+      head.innerHTML =
+        '<span class="connectivity-group-title"></span><span class="connectivity-group-badge"></span>';
+      head.querySelector(".connectivity-group-title").textContent = cat.label();
+      const body = document.createElement("div");
+      body.className = "connectivity-group-body";
+      section.append(head, body);
+      rows.append(section);
+      groupState[cat.id] = {
+        section,
+        body,
+        badge: head.querySelector(".connectivity-group-badge"),
+        passed: 0,
+        total: 0,
+      };
+      head.onclick = (event) => {
+        event.stopPropagation();
+        section.classList.toggle("collapsed");
+      };
+    }
+    all.forEach((check, index) => {
+      const g = groupState[check.cat];
+      g.body.append(row(index, check.name, check.contract));
+      g.total++;
+    });
     const results = await Promise.all(
-      checks().map(async (check, index) => {
+      all.map(async (check, index) => {
         try {
-          return { ok: true, ...(await check()), index };
+          return { ok: true, index, ...(await check.run()) };
         } catch (error) {
           return {
             ok: false,
@@ -6715,10 +6882,13 @@ setTimeout(() => {
     );
     let passed = 0;
     for (const result of results) {
-      const el = rows.querySelector(`[data-check="${result.index}"]`);
+      const check = all[result.index],
+        g = groupState[check.cat],
+        el = rows.querySelector(`[data-check="${result.index}"]`);
       el.classList.remove("testing");
       if (result.ok) {
         passed++;
+        g.passed++;
         const level =
           result.siteMs > 1_800 ? "bad" : result.siteMs > 800 ? "warn" : "good";
         el.classList.add(level);
@@ -6735,15 +6905,22 @@ setTimeout(() => {
         el.querySelector("strong span").textContent = tx("失败", "Failed");
       }
     }
-    const all = passed === results.length;
-    summary.className = `connectivity-summary ${all ? "good" : passed ? "warn" : "bad"}`;
+    for (const cat of CATS) {
+      const g = groupState[cat.id],
+        cls = g.passed === g.total ? "good" : g.passed ? "warn" : "bad";
+      g.badge.textContent = `${g.passed}/${g.total}`;
+      g.badge.className = `connectivity-group-badge ${cls}`;
+      g.section.classList.toggle("has-error", g.passed < g.total);
+    }
+    const allOk = passed === total;
+    summary.className = `connectivity-summary ${allOk ? "good" : passed ? "warn" : "bad"}`;
     summary.textContent = tx(
-      `检测完成：${passed}/${results.length} 项可用 · ${new Date().toLocaleTimeString("zh-CN")}`,
-      `Completed: ${passed}/${results.length} available · ${new Date().toLocaleTimeString("en-US")}`,
+      `检测完成：${passed}/${total} 项可用 · ${new Date().toLocaleTimeString("zh-CN")}`,
+      `Completed: ${passed}/${total} available · ${new Date().toLocaleTimeString("en-US")}`,
     );
     toggle.classList.remove("testing");
-    toggle.classList.toggle("has-error", !all);
-    toggle.dataset.result = `${passed}/${results.length}`;
+    toggle.classList.toggle("has-error", !allOk);
+    toggle.dataset.result = `${passed}/${total}`;
     copy();
     running = false;
     hasRun = true;
@@ -6818,14 +6995,8 @@ $("chart")?.addEventListener("mousemove", () => {
     `<div class="range-extrema-tooltip-note ${kind}">${label}</div>`,
   );
 });
-setTimeout(() => {
-  const hint = $("panLabel")?.querySelector("small");
-  if (hint)
-    hint.textContent = tx(
-      "按住 ⌘ / Ctrl + 滚轮缩放",
-      "Hold ⌘ / Ctrl + scroll to zoom",
-    );
-}, 25);
+/* 提示文字由「横向移动」工具（#panTools / updatePanControls）统一维护，
+   这里不再二次改写，避免出现「提示写横向移动、实际却在缩放」的不一致。 */
 
 /* Pan the actual displayed slice.  The older compatibility renderer reset it
    to the newest candles, which made ⌘/Ctrl + wheel appear to do nothing. */
@@ -6858,6 +7029,9 @@ function updatePanAvailability() {
     .querySelector('[data-pan="forward"]')
     ?.toggleAttribute("disabled", offset === 0);
 }
+/* ⌘ / Ctrl + 滚轮 = 横向移动（与工具栏「横向移动」提示一致）。
+   缩放不再绑定任何鼠标快捷键，只在工具栏的 − / + / 重置 按钮上触发，
+   避免误触改变缩放级别。 */
 $("chart")
   ?.closest(".chart-box")
   ?.addEventListener(
@@ -6866,16 +7040,27 @@ $("chart")
       if (!event.metaKey && !event.ctrlKey) return;
       event.preventDefault();
       event.stopPropagation();
-      const factor = event.deltaY < 0 ? 1.2 : 1 / 1.2,
-        next = Math.max(1, Math.min(5, state.zoom * factor));
-      if (next === state.zoom) return;
-      state.zoom = next;
-      state.panOffset = 0;
+      const data = frozenCandles || state.candles;
+      if (data.length < 2) return;
+      const count = state.viewPoints
+          ? Math.max(2, Math.ceil(state.viewPoints / state.zoom))
+          : Math.max(30, Math.ceil(data.length / state.zoom)),
+        n = Math.min(data.length, count),
+        max = Math.max(0, data.length - n),
+        step = Math.max(1, Math.round(n * 0.1)),
+        dx = event.deltaX || 0,
+        dy = event.deltaY || 0,
+        /* 触控板横滑给 deltaX，鼠标纵向滚轮给 deltaY，取主导分量。 */
+        delta = Math.abs(dx) > Math.abs(dy) ? dx : dy;
+      if (!delta) return;
+      state.panOffset = Math.max(
+        0,
+        Math.min(max, (state.panOffset || 0) + (delta > 0 ? step : -step)),
+      );
       hoverIndex = null;
-      chartSelection = null;
-      const label = $("zoomLabel");
-      if (label) label.textContent = `${Math.round(state.zoom * 100)}%`;
+      clearChartSelection();
       draw();
+      updatePanControls();
       updatePanAvailability();
     },
     { capture: true, passive: false },
@@ -6949,7 +7134,7 @@ renderRangeExtremaPoints = function () {
   const version = document.createElement("button");
   version.type = "button";
   version.id = "appVersion";
-  version.textContent = "v2.5.0";
+  version.textContent = "v2.10.18";
   version.title = "查看更新日志";
   version.setAttribute("aria-expanded", "false");
   const sourceLabel = controls.querySelector("label");
@@ -6973,8 +7158,96 @@ renderRangeExtremaPoints = function () {
   // v2.5.0：AI 行情助手（千问）整条链路启用，并补上 API 接入中心、本机凭据加密与云端密文升级。
   // v2.5.0 ships the Qwen assistant end to end, plus API Center, the encrypted local
   // vault and the hardened cloud ciphertext envelope.
-  const v241Changelog = log.innerHTML;
-  log.innerHTML = `<b>v2.5.0 更新日志</b><dl><dt>AI 行情助手</dt><dd>页面右下角新增悬浮对话窗：把你正在看的数据（各周期 K 线与 EMA／MACD／RSI／布林带／ATR、资金费率与基差、持仓量、恐惧&贪婪指数、美联储与宏观日程）整理成结构化快照交给千问，回答固定按【结论】【为什么这么判断】【关键价位】【什么情况说明我判断错了】【风险提醒】五段呈现，并以打字机效果流式输出。</dd><dt>回答模式</dt><dd>可选「通俗／中等／专业」三档语气，只改讲法不改数据：通俗档完全不用术语（RSI 说成“衡量抢着买还是抢着卖的指标”，支撑叫“地板”、阻力叫“天花板”）；中等档术语首次出现配一句白话解释；专业档直接给指标读数与日线／4 小时／1 小时分周期结构，并要求给出失效条件与情景概率。与「快速／深度」互相独立，选择记在本机。</dd><dt>思考模式与模型选择</dt><dd>快速档关闭模型思考（实测约 20 秒出结果），深度档保留推理并限制长度（约 55 秒）；模型可在 Token Plan 列出的 5 个文本型号间切换，默认性价比档 qwen3.8-flash（成本约为旗舰的 1/15），图片与语音型号置灰不可选；已把旧版硬编码的旗舰默认值一次性迁移到性价比档，用户后续自选的型号不会被覆盖。</dd><dt>额度面板</dt><dd>对话窗顶部显示额度进度条、重置倒计时与最近 10 次调用明细，累计用量写入 data/ai-quota.json，重启不归零。千问兼容端点不返回实时额度响应头，面板数值为按模型换算的本地估算，精确剩余仍以控制台为准。</dd><dt>API 接入中心</dt><dd>右上角新增浮层，集中管理第三方密钥（千问为 Key＋端点＋模型三件套），支持更新、验证与清除；服务端以 AES-256-GCM 加密落盘，浏览器始终拿不到明文 Key。云端账户服务不可用时，千问这类纯本机配置仍可保存与验证，不再被登录态连坐。</dd><dt>本机凭据加密存储</dt><dd>推送 Key、提醒规则与 API 配置改由浏览器 IndexedDB 中不可导出的 AES-GCM 密钥加密，localStorage 不再存明文；退出登录时可选择“保留加密副本”或“彻底清除本机副本”。账户卡新增「一键同步全部」，把持仓资料、推送规则与本会话 SendKey 一次同步到云端。</dd><dt>云端账户加密升级</dt><dd>账户密文改为带版本前缀的认证信封，并把密文与用户、用途绑定——即使数据库行被复制到其它账户也无法解密；个人档案新增独立加密列；服务端推送任务不再携带 SendKey，改为投递前从加密记录中读取。</dd><dt>宏观与投资日历</dt><dd>新增投资日历接口，可选接入 Finnhub（共识／实际值／前值）、EIA 石油库存与 CoinGecko 增强数据，密钥只留在服务端；未配置增强源时，官方公开日历照常可用。</dd><dt>部署与生态</dt><dd>Caddy 入口新增 HSTS、X-Content-Type-Options 与 Referrer-Policy 响应头；附带 mcp-server.mjs，把价格、指标、情绪、宏观日历与完整快照暴露为 5 个 MCP 工具，供桌面端 AI 直接取数而不重复采集。</dd></dl><hr>${v241Changelog}`;
+  const v25Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.8.4 更新日志</b><dl><dt>投资日历勾选联动未来的宏观日历</dt><dd>「投资日历」每条事件右上角新增「关注」勾选；勾选后的事件会显示在「宏观与情绪」卡右侧「未来的宏观日历」里，最多 3 个，最近事件大字、其余两个紧凑小字。</dd><dt>恐惧贪婪下方实时回填</dt><dd>左侧恐惧贪婪小卡片下方新增「关注事件 · 实时数据」：已勾选事件中最近的一个，一旦公布就自动回填实际值并显示「利好 BTC / 利空 BTC / 符合预期」标签；未公布时显示倒计时与预期／前值。</dd><dt>判断逻辑</dt><dd>按「公布值 vs 预期」的预期差推断方向（通胀／利率高于预期 → 利空 BTC 等），并给出简要说明；属经验规律，非确定性结论。事件公布时自动重取投资日历刷新实际值。</dd></dl><hr>` + `<b>v2.8.3 更新日志</b><dl><dt>重大事件卡片移入投资日历</dt><dd>把「重大事件」卡片从 K 线图框选悬浮层迁移到投资日历模块内部常驻显示，夹在筛选器与时钟/风险条之间，无需框选即可直接看到高影响事件。</dd><dt>内容展示</dt><dd>小卡片显示事件名称、重要性点、影响权重、北京时间、事件当地时间、倒计时；数值类事件给出预期／前值；并给出利好 BTC / 利空 BTC / 中性的编辑性预判，以及「公布值 vs 预期」预期差推断的说明，属非确定性结论。</dd><dt>数据源</dt><dd>手工维护的 MAJOR_EVENTS（如美国《清晰法案》投票、战略比特币储备等定性／政策事件）与投资日历里 importance=high 的宏观／加密事件自动合并去重；手工事件优先展示，避免被近端宏观数据挤出。</dd><dt>样式</dt><dd>采用卡片式横幅，最多 4 个小卡片横向排列，带彩色左边框（利好青绿／利空红／中性灰），小屏幕自动改为单列。</dd></dl><hr>` + `<b>v2.8.2 更新日志</b><dl><dt>重大事件卡片</dt><dd>框选图表时，在两条框选线之间浮现「重大事件」卡片，只列对比特币影响权重高的事件：手工维护的 MAJOR_EVENTS（如美国《清晰法案》投票等定性／政策事件）与投资日历里 importance=high 的宏观／加密事件（含预期／前值，自动合并去重）。</dd><dt>内容展示</dt><dd>每条显示事件名称、北京时间、事件当地时间与倒计时；数值类事件给出预期／前值；并给出编辑性预判与「公布值 vs 预期」预期差推断的利好／利空／中性标签，以及「预计高于／低于预期」的判断说明，属非确定性结论。</dd><dt>筛选与定位</dt><dd>仅在框选区间命中时显示对应事件；若区间内无重大事件则回退展示近期即将发生的重大事件并标注提示。卡片夹在两条框选线中间、顶部对齐，超出图表左右边界时自动夹紧。</dd></dl><hr>` + `<b>v2.8.1 更新日志</b><dl><dt>宏观与情绪三区分栏</dt><dd>「宏观与情绪」卡改为三块布局：左上恐惧贪婪（进一步缩小）、左下「已公布数据」（实际值公布后实时回填）、右侧整块承载「未来的宏观日历」（倒计时＋预期／前值／实际）与「实时数据·利好利空」（高重要性事件对 BTC／原油／美股／黄金的方向）。</dd><dt>重要性筛选点标注</dt><dd>投资日历筛选菜单内的重要性红点／黄点补上颜色与「高／重要／低」文字标签，不再只是无名圆点。</dd><dt>热点新闻面板移除</dt><dd>应要求从「宏观与情绪」卡移除「热点新闻」面板（含下方标签）；/api/news 接口与渲染函数保留备用，不再自动拉取。</dd><dt>倒计时与实时回填</dt><dd>宏观事件进入发布窗口时倒计时归零，并自动重取投资日历、回填实际值、重新计算利空／利好标签；倒计时每 30 秒刷新。</dd><dt>十字定位与框选体验</dt><dd>修复放大后十字定位点提前钳制「卡在一条线」的问题：绘图区与十字线共用 chartPlotGeom 几何，可一路跟到价格区底部；框选遮罩由 blur(12px)/0.72 调浅为 blur(4px)/0.45，不再盖住成交量柱。</dd></dl><hr>` + `<b>v2.8.0 更新日志</b><dl><dt>时间筛选与默认折叠</dt><dd>投资日历新增时间范围筛选：昨天／今天／明天／本周／下周／自定义日期／全部，默认停在「今天」，只展示最近的事件，不再一次性铺开全部条目；自定义区间可选起止日期（按北京日计算）。</dd><dt>筛选器整合</dt><dd>把原先混在一起的「全部／高重要／宏观／流动性…」胶囊拆分为三个多选筛选器——国家及地区、类别领域、重要性，与财经日历一致：支持搜索、全选与全部清除，选项按当前时间窗统计条数并可叠加使用；筛选器可一键隐藏。</dd><dt>时间与排序</dt><dd>统一按北京时间排序与分组，主时间显示北京的几号几点，下方小字注明事件发生的当地时间（可切换当地／美东／UTC）；副信息条新增实时北京时间。为让「昨天／本周」有数据，服务端历史窗口由仅未来扩展为保留近 4 天并放宽条数上限。</dd><dt>数据列加宽</dt><dd>今值／预期／前值拆为三列独立对齐（每条各占一列，表头对齐），列宽大幅增加并允许两行显示，不再出现数值被裁切隐藏；同时把末尾「影响（流动性观察）」列收窄。</dd><dt>数据公布影响预测</dt><dd>日历末尾新增「数据公布影响预测」板块：取未来两周最重要且带方向映射的数据（通胀、利率、失业率、就业、增长、原油库存），用「高于预期／低于预期」两种情景列出比特币、原油、美股、黄金的利好／利空／中性；已公布的事件按实际值与预期的偏差高亮命中的那一行。属宏观常识映射，非确定性结论。</dd><dt>界面风格</dt><dd>事件行加入国家旗帜标识与彩色领域标签（宏观／流动性／能源／避险／加密期权／BTC 链上），新增列标题行；卡片配色改为卡片级变量锁定，不再受外层明暗主题影响。</dd></dl><hr>` + `<b>v2.7.2 更新日志</b><dl><dt>宏观与情绪重构</dt><dd>「近期宏观日历」与投资日历联动：按相关性取近期最重要的事件，逐条显示预期值与前值，公布后自动回填实际值，并给出利空／利好 BTC 的方向标签（按公布值相对预期的偏差推断，非确定性判断）。</dd><dt>恐惧贪婪瘦身</dt><dd>恐惧贪婪改为紧凑小卡，并加入 0–100 情绪刻度条；腾出的空间用于宏观数据对比与热点新闻。</dd><dt>热点新闻</dt><dd>新增「热点新闻」面板，展示可能影响 BTC 走势的实时头条（Google News RSS），按利好／利空／中性标注，并显示来源与发布时间；新增 /api/news 接口。</dd></dl><hr>` + `<b>v2.7.1 更新日志</b><dl><dt>时间显示本地化</dt><dd>投资日历主时间固定显示为北京时间（日期＋几点钟），并新增小字参考行显示事件发生的当地时间；可通过顶部「当地／美东／UTC」切换参考时区，默认「当地」。</dd><dt>修复 9/11 美国 CPI 漏显</dt><dd>数据原本存在于东方财富与 FinanceCalendar 源中，但因服务端硬切片 48 条且未来事件未优先，导致同日关键发布被挤掉。已提升上限、未来事件优先排序，并把 CPI／PPI／非农等同一发布的多个指标变体合并为单一 recognizable 标题。</dd><dt>界面留白优化</dt><dd>投资日历卡片、标题区、工具栏、事件行与页脚的 padding 与间距整体加大，避免文字贴边。</dd></dl><hr>` + `<b>v2.7.0 更新日志</b><dl><dt>投资日历国家筛选</dt><dd>顶部新增国家／地区下拉筛选，选项按当前事件动态生成（美国、中国、欧元区、日本、英国等），与分类筛选、时区切换相互独立、可叠加使用。</dd><dt>新增免费数据源</dt><dd>东方财富主源之外接入 TradingView 与 FinanceCalendar 两个免 Key 全球宏观日历：前者回填实际值／预期／前值并补充个别未覆盖的发布，后者补充美联储／央行决议与关键数据；跨源按「国家＋指标＋日期」签名去重，避免重复事件。</dd></dl><hr>` + `<b>v2.6.0 更新日志</b><dl><dt>投资日历数据源</dt><dd>数据源替换为东方财富（数据研究中心）免费公开接口，覆盖全球主要经济体数据发布、央行决议与重要会议，无需 API Key、调用稳定；美联储／BLS 官方日程作为补充并回填已公布数值，财政部、EIA、Deribit、mempool 等原有源全部保留。原 Finnhub 付费增强路径下线（其密钥仍用于 AI 助手）。</dd><dt>投资日历界面</dt><dd>从默认表格重做为按日分组的卡片列表：新增国家／地区色标、重要性圆点、今值／预期／前值指标块、实时倒计时胶囊与风险窗口提醒；筛选胶囊与时间轴（北京时间／美东／UTC）重新排布，移动端自适应折叠。</dd><dt>重要性重算</dt><dd>东方财富原始“重要”标签偏向会议论坛，已改为按 BTC 宏观相关性重排：CPI、非农、失业率、PCE、GDP、零售销售、央行利率决议等标记为高重要，真正驱动风险窗口的事件才会进入高重要筛选与风险提醒。</dd></dl><hr>` + `<b>v2.5.0 更新日志</b><dl><dt>AI 行情助手</dt><dd>页面右下角新增悬浮对话窗：把你正在看的数据（各周期 K 线与 EMA／MACD／RSI／布林带／ATR、资金费率与基差、持仓量、恐惧&贪婪指数、美联储与宏观日程）整理成结构化快照交给千问，回答固定按【结论】【为什么这么判断】【关键价位】【什么情况说明我判断错了】【风险提醒】五段呈现，并以打字机效果流式输出。</dd><dt>回答模式</dt><dd>可选「通俗／中等／专业」三档语气，只改讲法不改数据：通俗档完全不用术语（RSI 说成“衡量抢着买还是抢着卖的指标”，支撑叫“地板”、阻力叫“天花板”）；中等档术语首次出现配一句白话解释；专业档直接给指标读数与日线／4 小时／1 小时分周期结构，并要求给出失效条件与情景概率。与「快速／深度」互相独立，选择记在本机。</dd><dt>思考模式与模型选择</dt><dd>快速档关闭模型思考（实测约 20 秒出结果），深度档保留推理并限制长度（约 55 秒）；模型可在 Token Plan 列出的 5 个文本型号间切换，默认性价比档 qwen3.8-flash（成本约为旗舰的 1/15），图片与语音型号置灰不可选；已把旧版硬编码的旗舰默认值一次性迁移到性价比档，用户后续自选的型号不会被覆盖。</dd><dt>额度面板</dt><dd>对话窗顶部显示额度进度条、重置倒计时与最近 10 次调用明细，累计用量写入 data/ai-quota.json，重启不归零。千问兼容端点不返回实时额度响应头，面板数值为按模型换算的本地估算，精确剩余仍以控制台为准。</dd><dt>API 接入中心</dt><dd>右上角新增浮层，集中管理第三方密钥（千问为 Key＋端点＋模型三件套），支持更新、验证与清除；服务端以 AES-256-GCM 加密落盘，浏览器始终拿不到明文 Key。云端账户服务不可用时，千问这类纯本机配置仍可保存与验证，不再被登录态连坐。</dd><dt>本机凭据加密存储</dt><dd>推送 Key、提醒规则与 API 配置改由浏览器 IndexedDB 中不可导出的 AES-GCM 密钥加密，localStorage 不再存明文；退出登录时可选择“保留加密副本”或“彻底清除本机副本”。账户卡新增「一键同步全部」，把持仓资料、推送规则与本会话 SendKey 一次同步到云端。</dd><dt>云端账户加密升级</dt><dd>账户密文改为带版本前缀的认证信封，并把密文与用户、用途绑定——即使数据库行被复制到其它账户也无法解密；个人档案新增独立加密列；服务端推送任务不再携带 SendKey，改为投递前从加密记录中读取。</dd><dt>宏观与投资日历</dt><dd>新增投资日历接口，可选接入 Finnhub（共识／实际值／前值）、EIA 石油库存与 CoinGecko 增强数据，密钥只留在服务端；未配置增强源时，官方公开日历照常可用。</dd><dt>部署与生态</dt><dd>Caddy 入口新增 HSTS、X-Content-Type-Options 与 Referrer-Policy 响应头；附带 mcp-server.mjs，把价格、指标、情绪、宏观日历与完整快照暴露为 5 个 MCP 工具，供桌面端 AI 直接取数而不重复采集。</dd></dl><hr>${v25Changelog}`;
+  // v2.8.5：悬浮按钮动效 + 聊天窗口跟随打开/八向缩放 + 联网检索 + 信息展示优化。
+  const v284Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.8.5 更新日志</b><dl><dt>悬浮按钮动效</dt><dd>AI 助手悬浮按钮新增外发光脉冲与双层波纹扩散光效，未打开前持续吸引注意；首次打开后自动收起为柔和微光并隐藏提示气泡。</dd><dt>聊天窗口跟随打开</dt><dd>点击悬浮按钮时聊天窗口跟随按钮当前位置弹出（按屏幕半区上下翻转、贴边夹取），不再固定右下角。</dd><dt>八向缩放</dt><dd>聊天窗口支持拖动四条边框单独拉伸宽／高、拖动四个角同时改变宽高，最小 320×340，尺寸记忆在本机。</dd><dt>联网检索</dt><dd>提问时一并搜索公开新闻与分析（Google News RSS，按比特币相关度与时效打分去重），回答末尾展示来源清单、条数与耗时，可一键开／关，关闭后仅用本站实时数据。</dd><dt>信息展示优化</dt><dd>重点数据加粗与高亮，回答以清晰罗列排版；图表仅在能更简明解释时才生成（最多一张柱状／折线），不强制每次使用。</dd><dt>框选数据常驻</dt><dd>拖拽框选后「框选时间段 · 最高 · 最低 · 区间涨跌」不再因鼠标移出图表而消失：移出只收起十字线与「重大事件」浮层，数据卡与底部提示保留在屏幕上，只有双击图表、切换周期／范围／数据源或平移时才清除；实时价缺失时退回最后一根收盘计算，避免整卡凭空消失。</dd></dl><hr>` + v284Changelog;
+  // v2.8.6：投资日历勾选联动优化，未勾选时不自动填充未来的宏观日历。
+  const v285Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.8.6 更新日志</b><dl><dt>未来的宏观日历只显示勾选事件</dt><dd>未在投资日历勾选任何事件时，「宏观与情绪」卡右侧「未来的宏观日历」不再自动用高重要性宏观事件填充，保持空白并提示用户去投资日历勾选；只有勾选的未来事件才会出现在这里。</dd><dt>恐惧贪婪下方只显示最近勾选事件</dt><dd>左侧恐惧贪婪小卡片下方的「关注事件 · 实时数据」同样只在有勾选事件时显示内容；未勾选时仅显示引导提示，不展示任何未来或已公布数据。</dd><dt>排序与显示规则不变</dt><dd>勾选后仍最多显示 3 个，最近时间的未来事件大字置顶，其余小字紧凑排列；已公布的最近勾选事件会自动回填实际值并显示利好／利空标签。</dd></dl><hr>` + v285Changelog;
+  // v2.8.7：修复聊天窗口打开位置不跟随主按钮、悬浮按钮动效过弱两个问题。
+  const v286Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.8.7 更新日志</b><dl><dt>聊天窗口紧贴按钮</dt><dd>修复「按钮在左上、聊天框却弹在右下」的问题：打开聊天窗时按按钮当前位置实时定位，优先贴在按钮正上／正下方并与按钮左缘或右缘对齐；纵向放不下时改为贴着按钮左右并排，都放不下才夹进视口。按钮被拖走后已打开的窗口会立即跟着贴过去，浏览器窗口尺寸变化时也会重新贴合，不再固定右下角。</dd><dt>悬浮按钮动效增强</dt><dd>按钮动效改为持续可见：外发光在紫／青之间呼吸并大幅提高亮度，双圈波纹改为发光圆环向外扩散，圆点做变色跳动；首次打开后只收敛一档（波纹更慢更淡），不再完全关闭动效，确保按钮始终能引起注意。</dd><dt>点击不再被手抖吞掉</dt><dd>原先指针只要挪动 1 像素就被判定为拖动，导致随后 350 毫秒内的点击不生效、按钮点不开。改为位移超过 4 像素才算拖动，正常点击稳定开合，拖动时也不再无谓打断动效。</dd></dl><hr>` + v286Changelog;
+  // v2.8.8：修正重大事件《清晰法案》投票院别与日期；并修复 AI 助手提问气泡文字配色、隐藏右下角缩放角标。
+  const v287Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.8.8 更新日志</b><dl><dt>重大事件数据修正</dt><dd>修正美国《清晰法案》(CLARITY Act) 事件描述：由众议院投票改为参议院先投票，日期由 9 月 25 日更新为 9 月 15 日；确保投资日历「重大事件」与投资日历/宏观情绪模块正确显示最近优先级。</dd><dt>提问气泡文字清晰可见</dt><dd>修复自己发出的提问在气泡里几乎看不清的问题：站点全局的段落配色会盖掉气泡继承的深色文字，现对气泡内的段落、加粗、数字等元素显式指定深色字色，数字标签底色一并加深，在浅紫底上对比清晰。</dd><dt>隐藏右下角缩放角标</dt><dd>聊天窗口右下角那个可见的缩放「小角」标记已隐藏，只保留透明拖拽热区；按住右下角仍可同时调整宽高，四条边框缩放不受影响。</dd></dl><hr>` + v287Changelog;
+  // v2.8.9：修正 OKX 市场微观结构卡「偏多／偏空」标签与大数值的涨跌配色。
+  const v288Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.8.9 更新日志</b><dl><dt>微观结构涨跌配色修正</dt><dd>OKX 市场微观结构卡里「偏多 / 偏空」标签及右侧大数值的颜色此前标反了（偏多显示为红、偏空显示为绿）。现统一为全站口径：偏多用绿、偏空用红，并与本卡下方进度条、顶部「短线研究偏多 / 偏空」结论条保持一致。</dd></dl><hr>` + v288Changelog;
+  // v2.9.0：宏观与情绪模块拆分，已公布数据独立成卡，移除实时利好利空。
+  const v289Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.9.0 更新日志</b><dl><dt>已公布数据独立成卡</dt><dd>将「宏观与情绪」卡左下角的「已公布数据」模块拆出，成为紧跟其后的独立卡片；桌面端以两列网格展示，移动端单列，空间更充裕，便于浏览近期已公布实际值。</dd><dt>移除实时数据·利好利空</dt><dd>从「宏观与情绪」卡右下角移除「实时数据 · 利好利空」模块及其说明注脚，减少右侧信息堆叠。</dd><dt>宏观与情绪保留内容</dt><dd>该卡现在只保留左侧「恐惧贪婪」+「关注事件 · 实时数据（最近勾选）」，右侧「未来的宏观日历」。</dd></dl><hr>` + v289Changelog;
+  // v2.9.1：宏观经济数据卡片重命名并调整位置到「BTC 多因子研究」与「投资日历」之间。
+  const v290Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.9.1 更新日志</b><dl><dt>宏观经济数据重命名与定位</dt><dd>将「已公布数据」卡片重命名为「宏观经济数据」，并移动到「BTC 多因子研究」与「投资日历」之间；空态提示同步更新，阅读顺序更符合逻辑。</dd></dl><hr>` + v290Changelog;
+  // v2.9.2：修复「宏观与情绪」卡片反复闪烁（被 responsive arrange 反复清出/插回）。
+  const v291Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.9.2 更新日志</b><dl><dt>修复宏观与情绪卡片闪烁</dt><dd>「宏观与情绪」卡此前会周期性消失再出现：定位逻辑把卡片误移入右侧 side-stack，而 responsive arrange() 每次都会用 replaceChildren 清空 side-stack，导致卡片被反复移除又重建。现统一把该卡固定到主流程（投资日历之后），确保不会被 side-stack 清空。</dd></dl><hr>` + v291Changelog;
+  // v2.9.3：AI 助手四项能力 + 长截图导出修复。
+  const v292Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.9.3 更新日志</b><dl><dt>AI 助手：对话管理 / 历史 / 上下文 / 字号 / 长截图</dt><dd>新增「新建对话」（自动归档上一段）、「历史对话」浮层（可切回任意历史对话并带回上下文）、多轮上下文记忆（追问不断联）、正文字号缩放（A−/A＋，本地记忆），以及「长截图」导出整段对话为 PNG（含复制到剪贴板）。修复长截图在 Chromium 下因 foreignObject 污染画布导致导出失败的问题，改用 html2canvas 逐节点重绘（画布不再被判定为污染）。</dd><dt>提问气泡美化 + 字号缩放范围扩大</dt><dd>我发出的提问气泡改为紫罗兰渐变 + 白字 + 右下小圆角（含柔和投影），字号比回答小一档（12px），气泡内不再多留空白；发送键同款配色。字号缩放范围由 85%–160% 扩大到 50%–200%，缩小档位更密（每次 10%），并把范围写进按钮提示。</dd></dl><hr>` + v292Changelog;
+  // v2.9.5：框选 K 线时「重大事件」浮层改为默认关闭，并可在图表设置里手动开启。
+  const v293Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.9.5 更新日志</b><dl><dt>框选重大事件可开关</dt><dd>顶部「图表」设置面板新增「框选重大事件」开关，默认关闭；关闭后拖拽框选 K 线时不再弹出「重大事件」浮层，避免遮挡走势。需要查看框选区间事件时可手动打开。</dd></dl><hr>` + v293Changelog;
+  // v2.9.6：把「宏观与情绪」卡片放回右侧 side-stack，并修复反复闪烁。
+  const v294Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.9.6 更新日志</b><dl><dt>宏观与情绪回归右侧栏</dt><dd>「宏观与情绪」卡片现在重新显示在桌面端右侧边栏（当前规则信号下方），而不是被挤到主流程底部；右侧空白区域不再丢失该模块。</dd><dt>修复闪烁与消失</dt><dd>彻底解决刷新后卡片「闪一下又消失」的问题：responsive arrange() 现在会主动保留 side-stack 中的宏观与情绪卡片，移动端则自动把它移出隐藏的 side-stack 并放在终端布局之后，避免被隐藏或反复移除。</dd><dt>窄栏自适应单列</dt><dd>当宏观与情绪位于右侧窄栏时，内部自动切换为单列竖排（恐惧贪婪 → 关注事件 → 未来日历），避免两列在窄栏里被压成不可读的小块。</dd></dl><hr>` + v294Changelog;
+  // v2.10.0：把「数据公布影响预测」小卡片移入「宏观经济数据」，矩阵保留 BTC、加密货币、美股、黄金并突出 BTC 字体。
+  const v295Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.10.0 更新日志</b><dl><dt>数据公布影响预测移入宏观经济数据</dt><dd>把「投资日历」底部的「数据公布影响预测」小卡片移到「宏观经济数据」卡片内，统一浏览入口；移除投资日历底部的该模块。</dd><dt>重要等级显示</dt><dd>影响预测卡片与已公布实际值卡片均显示事件的重要等级（高/中/低）。</dd><dt>矩阵去原油、加加密货币、突出比特币</dt><dd>影响矩阵的情景列只保留比特币、加密货币、美股、黄金，移除原油；比特币列字号放大、其他列字号缩小，优先阅读 BTC 方向。</dd></dl><hr>` + v295Changelog;
+  // v2.10.1：修复「历史对话」点了没反应（点击冒泡到全局收起浮层）；历史列表补可点提示。
+  const v296Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.10.1 更新日志</b><dl><dt>历史对话可以点开继续问了</dt><dd>修复「历史对话」按钮点了没反应的 bug：按钮自身的点击会继续冒泡到页面级的「点别处收起浮层」监听，导致刚打开的历史列表被立刻关掉（历史条数角标在涨、列表却打不开）。现在按钮点击不再冒泡，列表正常展开。</dd><dt>列表每行补上可点提示</dt><dd>历史列表里每一段对话右侧新增「›」箭头，悬浮按钮时高亮，并提示「切回这段对话，接着提问」；点进去会完整回放当时的问答（含联网来源回执），上下文一并带回，可以直接接着追问，不会另起一段。</dd><dt>切回提示更明确</dt><dd>切回历史对话后的提示改为「已切回历史对话（N 条消息），可以直接接着提问」。</dd></dl><hr>` + v296Changelog;
+  // v2.10.2：彻底移除 K 线图框选「重大事件」浮层，简化图表交互。
+  const v2101Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.10.2 更新日志</b><dl><dt>移除框选重大事件浮层</dt><dd>删除 K 线框选时浮现的「重大事件」卡片及顶部「图表」设置中的开关；框选只保留时间段、最高、最低与区间涨跌提示，避免遮挡走势，简化交互。</dd></dl><hr>` + v2101Changelog;
+  // v2.10.3：RSI 副图动态分区，成交量柱按 K 线密度放大，长周期更易看清涨跌量对比。
+  const v2102Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.10.3 更新日志</b><dl><dt>RSI 副图动态分区</dt><dd>根据可见 K 线数量动态划分 RSI 副图：K 线越多，底部成交量区域占比越大（40%→65%），上部 RSI 区域相应压缩，避免长周期下红绿柱被压成细线。</dd><dt>成交量非线性缩放</dt><dd>对成交量柱使用 0.55 次幂缩放，弱化个别巨量柱对整体比例的压制，让多数柱子的涨跌对比更清晰。</dd><dt>主图不变</dt><dd>仅调整底部 RSI 副图内部比例，上方 K 线/指标区域完全不受影响。</dd></dl><hr>` + v2102Changelog;
+  const v2103Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.10.4 更新日志</b><dl><dt>周期涨幅桌面单排</dt><dd>OKX 微观结构内的周期涨幅在电脑端始终保持 10 个柱子在同一排，随容器宽度动态缩放；仅在 680px 以下才折为两排（每排 5 个）。</dd><dt>宏观经济数据空状态</dt><dd>当宏观经济数据卡片暂无事件时，空提示居中并增大可读性，避免看起来像一块空白区域。</dd></dl><hr>` + v2103Changelog;
+  // v2.10.5：撤销上版的 RSI 副图上下分块，恢复与成交量同区域叠显；0.55 次幂压缩改为仅长周期生效。
+  const v2104Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.10.6 更新日志</b><dl><dt>宏观经济数据空态不再留白</dt><dd>当宏观经济数据卡片当前没有任何影响预测或已公布实际值时，卡片不再渲染空 body，只保留标题行；周期涨幅卡片因此紧贴「OKX 市场微观结构」下方，不再出现空白区域。</dd></dl><hr>` + v2104Changelog;
+  const v2105Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.10.5 更新日志</b><dl><dt>RSI × 成交量恢复叠显</dt><dd>撤销 v2.10.3 的上下分块，改回原始「同区域叠显」：成交量柱铺满整个副图高度垫底，RSI 曲线叠加在上层，互不遮挡；点击柱状图凸显量、点 RSI 线压暗量，悬浮竖虚线贯穿主图与子图。</dd><dt>幂次压缩按时间跨度区分</dt><dd>0.55 次幂缩放成交量仅在「可见时间跨度大于 12 小时」（长周期／多日）时生效，用于消除个别巨量柱对其他柱子的压制；跨度 12 小时以内（如盯盘用的 6h/3h/1h 区间）保持线性缩放，对交易量的细微变化保持敏感，便于第一时间察觉异动巨量。</dd><dt>主图不变</dt><dd>仅调整底部 RSI 副图内部比例与缩放逻辑，上方 K 线／指标区域完全不受影响。</dd></dl><hr>` + v2105Changelog;
+  // v2.10.7：把周期涨幅卡片固定到主 K 线卡片内、紧跟 OKX 微观结构，彻底消除两者之间的空白。
+  const v2106Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.10.7 更新日志</b><dl><dt>周期涨幅紧贴 OKX 市场微观结构</dt><dd>把「周期涨幅」卡片从 terminal-layout 的跨行元素改为主 K 线卡片（#mainChartCard）的内部元素，紧跟「OKX 市场微观结构」卡片；避免右侧「宏观与情绪」栏更高时把周期涨幅推下去、在 OKX 下方留下大块空白。现在两者无缝相接。</dd><dt>桌面端始终单排 10 柱</dt><dd>电脑端继续显示 10 个周期柱在同一排，随容器宽度动态缩放；仅当屏幕宽度 ≤680px 时才折为两排（每排 5 个）。</dd></dl><hr>` + v2106Changelog;
+  // v2.10.8：宏观经济数据卡片新增筛选器 + 重大事件卡片按日期最近排序。
+  const v2107Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.10.8 更新日志</b><dl><dt>宏观经济数据卡片新增筛选器</dt><dd>为「宏观经济数据」卡片增加与投资日历同款的筛选器，支持国家及地区、类别领域、重要性三维度过滤；重要性默认只勾选「高」，默认只显示高重要性事件预测；已公布实际值置顶，下方再接后续公布预测。</dd><dt>重大事件按日期最近排序</dt><dd>投资日历顶部「重大事件」卡片不再把手动维护项整体排在自动提取项前面，而是统一按事件时间升序，让最近即将发生的事件出现在最前面。</dd></dl><hr>` + v2107Changelog;
+  // v2.10.9：恐惧贪婪只显示数字+文字；宏观与情绪卡片移除未来的宏观日历。
+  const v2108Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.10.9 更新日志</b><dl><dt>恐惧贪婪改为纯数字+文字</dt><dd>「宏观与情绪」卡片顶部的恐惧贪婪指数不再显示刻度条/滑块指示器，只保留数值与情绪标签（如 56 · 贪婪），让卡片更紧凑。</dd><dt>移除「未来的宏观日历」</dt><dd>「宏观与情绪」卡片右侧的「未来的宏观日历」区块已移除，仅保留下方「关注事件 · 实时数据」区块；未来事件仍可在投资日历中查看，宏观经济数据已独立成卡。</dd></dl><hr>` + v2108Changelog;
+  // v2.10.10：强平概率计算器支持一键引用顶部持仓、持仓价快选与手动计算，并新增半月/一月/半年/一年触及概率。
+  const v2109Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.10.10 更新日志</b><dl><dt>强平概率计算器：一键引用顶部持仓</dt><dd>计算器表单下方新增操作条，「引用顶部持仓数据」把上方「我的持仓与盈亏估算」卡片里的交易所、方向、持仓量、杠杆倍率、开仓均价一次性填入计算器。</dd><dt>持仓价快选</dt><dd>新增「填入我的持仓价」按钮，展开后可一键选择「做多持仓价」或「做空持仓价」填入开仓均价并自动切换方向；两个价格在每次确认持仓或修改开仓均价时自动记录，随时复用。</dd><dt>改成点「计算」才出结果</dt><dd>手动修改表单不再边输边重算，改动后提示「参数已修改，点击计算更新结果」，点「计算」按钮才刷新，避免数字乱跳；用快捷按钮填入时会立即计算。</dd><dt>新增半个月 / 一个月 / 半年 / 一年触及概率</dt><dd>历史触及概率从 12h / 24h / 48h / 1 周四个短窗口扩展为两组：短线窗口继续用 15 分钟 K 线，长线窗口（半个月 / 一个月 / 半年 / 一年）改用日线样本，并在脚注标注日线样本区间与根数；杠杆越高、强平距离越近，长窗口越容易饱和到 100%，属正常现象。</dd><dt>修复刷新后顶部持仓被清空</dt><dd>修复「我的持仓与盈亏估算」在每次刷新时把持仓量、保证金、开仓均价、标记价格回写成空值的问题（旧逻辑在杠杆下拉框插入时派发 input 事件，把当时还空着的表单字段写回了状态），现在刷新后数据与「确认持仓并显示买入点」状态都会保留。</dd></dl><hr>` + v2109Changelog;
+  // v2.10.11：宏观与情绪卡片重排 —— 恐惧贪婪收成左上角小方块，其余整块让给「关注事件 · 实时数据」，并补上秒级倒计时与阈值式解读。
+  const v2110Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.10.11 更新日志</b><dl><dt>恐惧贪婪改成左上角小方块</dt><dd>「宏观与情绪」卡片左上角只留一个小正方形显示恐惧贪婪指数（大号数值 + 情绪词），不再横向铺满一整条，腾出的横向空间全部让给右侧的「关注事件 · 实时数据」。</dd><dt>关注事件 · 实时数据：突出倒计时</dt><dd>该区块改为大号 HH:MM:SS 秒级倒计时（超过一天自动带天数），并写清北京时间与事件当地时间；倒计时每秒刷新，已公布后自动切换为「已公布」。</dd><dt>补上预期 / 前值 / 实际与阈值解读</dt><dd>新增「预期 / 前值 / 实际」三栏，并给出阈值式解读：以「预期」为锚（数据源没有免费共识时退回「前值」并注明），写明「实际 > 锚点 → 高于预期/前值 → 通常利好或利空 BTC」「实际 < 锚点 → …」「实际 = 锚点 → 通常影响有限」三种情景；已公布时高亮命中的那一条，并附该类数据的影响说明。</dd></dl><hr>` + v2110Changelog;
+  // v2.10.12：强平概率计算器的「填入我的持仓价」改为直接读取顶部两个持仓舱段，并逐项填入持仓数据。
+  const v2111Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.10.12 更新日志</b><dl><dt>「填入我的持仓价」改为读取顶部两个舱段</dt><dd>修复「填入我的持仓价」浮层里两个价格一直显示「--」的问题：原实现只读旧的「我的持仓与盈亏估算」卡片留言记录，没有读取顶部「我的持仓」卡片的两个舱段。现在浮层直接列出顶部两个舱段的开仓均价，并附带持仓量、保证金与有效杠杆，哪一格没填就明确置灰并提示。</dd><dt>选中舱段 = 一次填好整笔持仓</dt><dd>点选某个舱段不再是只填开仓均价，而是把方向、开仓均价、持仓量、有效杠杆一起写入计算器（有效杠杆 = 持仓量 ÷ 保证金，与顶部卡片显示的理论强平价同口径），上下两块数字从此一致。</dd><dt>「引用顶部持仓数据」同样优先取顶部舱段</dt><dd>该按钮原先读旧持仓卡；现在优先取与当前方向一致、且已填价格的顶部舱段，顶部为空时才回退旧卡片，并在回执里写明取的是哪个舱段、填了哪些值。</dd><dt>浮层实时跟随顶部卡片</dt><dd>顶部持仓卡保存或修改后，浮层内容与本地记录立即刷新，不会出现「卡片已改、菜单还是旧值」。</dd></dl><hr>` + v2111Changelog;
+  // v2.10.13：宏观与情绪卡片更名为「关注宏观事件实时数据」，并移除恐惧贪婪指数。
+  const v2112Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.10.13 更新日志</b><dl><dt>卡片更名并聚焦实时数据</dt><dd>「宏观与情绪」卡片标题改为「关注宏观事件实时数据」，右上角标签改为「实时数据」。</dd><dt>移除恐惧贪婪指数</dt><dd>该卡片不再显示恐惧贪婪指数，整块区域只保留「关注事件 · 实时数据」。</dd><dt>关注事件放大展示</dt><dd>「关注事件 · 实时数据」区块现在占满整张卡片，内部事件标题、倒计时、预期/前值/实际与阈值解读的字号、间距同步放大，阅读更醒目。</dd></dl><hr>` + v2112Changelog;
+  // v2.10.14：去掉套娃标题，事件公布后 30 分钟内显示并高频抓取，过期自动移除。
+  const v2113Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.10.14 更新日志</b><dl><dt>去掉内部套娃标题</dt><dd>「关注宏观事件实时数据」卡片不再套一层「关注事件 · 实时数据」子标题，整块区域直接展示关注的数据本身。</dd><dt>已公布数据保留 30 分钟</dt><dd>事件公布后的实际值与解读只保留 30 分钟，超过后自动从卡片移除，避免把过期数据当成实时参考。</dd><dt>第一时间抓取实际值</dt><dd>事件到达公布时间前后 2 分钟内以及公布后 30 分钟内，每 15 秒强制刷新一次投资日历，跳过服务端 5 分钟缓存，确保实际值一经发布就立即回填。</dd></dl><hr>` + v2113Changelog;
+  // v2.10.15：投资日历「重大事件」支持关注并同步到上方实时数据卡片。
+  const v2114Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.10.15 更新日志</b><dl><dt>重大事件也可关注</dt><dd>投资日历「重大事件」卡片里的每个事件右上角新增「关注」勾选框；勾选后事件会进入顶部「关注宏观事件实时数据」卡片，与常规宏观事件共享同一份关注列表（最多 3 个）。</dd><dt>重大事件同样适用实时规则</dt><dd>被关注的重大事件同样遵循「未公布显示倒计时、公布后保留 30 分钟、公布前后 2 分钟及公布后 30 分钟内每 15 秒强制刷新」的规则；手工维护的政策/定性事件无预期/前值，只展示时间与解读。</dd><dt>空状态提示同步更新</dt><dd>上方卡片为空时，提示用户可去投资日历列表或「重大事件」卡片勾选事件。</dd></dl><hr>` + v2114Changelog;
+  // v2.10.16：修复被关注重大事件在实时卡片只显示倒计时、缺名称与利好利空解读的问题。
+  const v2115Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.10.16 更新日志</b><dl><dt>重大事件实时卡片补全展示</dt><dd>修复在投资日历「重大事件」关注美国《清晰法案》等事件后，上方「关注宏观事件实时数据」卡片只显示倒计时、不显示事件名称、利好/利空判断与解读的问题：现在标题优先使用事件名称（curated 事件以「重大事件」标注来源），非数值类政策/定性事件直接在倒计时下方展示「利好 BTC / 利空 BTC / 中性」标签，并附人工编辑性解读（judge）。</dd><dt>数值类事件保留阈值解读</dt><dd>带预期/前值/实际的宏观事件仍展示三栏数据并给出「实际 vs 预期/前值」阈值式利好利空解读；两类事件同样遵循公布后保留 30 分钟、公布前后每 15 秒强制刷新规则。</dd></dl><hr>` + v2115Changelog;
+  // v2.10.17：数据连通性面板补全缺失 API 检测，并按分组折叠重做 UI。
+  const v2116Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.10.17 更新日志</b><dl><dt>连通性补全缺失 API</dt><dd>数据连通性面板由 10 项扩展到 17 项，新增投资日历（东方财富 / TradingView / FinanceCalendar / 美国财政部 / Deribit / mempool 等上游）、新闻流（Google News）、美股实时报价（Yahoo Finance）、衍生品上下文（资金费率 / OI / 基差）、AI 助手与密钥状态（千问 / CoinGecko / Finnhub / EIA / 自定义）、语音播报（Edge TTS）、预警推送（ServerChan）共 7 类此前未检测的数据链路。</dd><dt>分组折叠 UI</dt><dd>连通性面板改为按「行情与衍生品 / 概率与跨市场 / 宏观与日历 / 情绪与新闻 / AI 与服务」五组展示，每组可独立折叠并带可用率徽章；面板改为可滚动，不再因 API 增多而无限拉长，浏览器→本站与本站→上游延迟仍分列显示。</dd></dl><hr>` + v2116Changelog;
+  // v2.10.18：消息推送默认折叠，并严格按已验证的大模型 Key 控制 AI 助手入口与接口权限。
+  const v2117Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.10.18 更新日志</b><dl><dt>消息推送默认折叠</dt><dd>「消息推送」板块默认收起，折叠外观与「高杠杆强平缓冲参考」保持一致；需要配置 SendKey 或管理预警规则时再展开，减少页面纵向占用。</dd><dt>AI 助手按有效接入显示</dt><dd>页面不再默认展示 AI 助手按钮。只有在「API 接入中心」保存大语言模型 API Key 且验证通过后才显示；未接入、未验证、验证失败、更新或清除 Key 时立即隐藏入口并关闭助手面板。</dd><dt>AI 接口权限收紧</dt><dd>模型切换与提问接口同步校验 Key 的验证状态，不能通过绕过前端使用未验证的凭据；验证失败会撤销旧的有效标记，避免已过期或已替换的 Key 继续被视为可用。</dd></dl><hr>` + v2117Changelog;
   // 旧版本默认收起，确保用户打开日志时首先看到当前版本的完整变更。
   // Older releases are collapsed by default so opening the log focuses on the current release.
   const collapseLegacyRelease = () => {
@@ -6982,7 +7255,7 @@ renderRangeExtremaPoints = function () {
       heading = divider?.nextElementSibling,
       content = heading?.nextElementSibling;
     if (!divider || heading?.tagName !== "B" || content?.tagName !== "DL")
-      return;
+      return false;
     const details = document.createElement("details"),
       summary = document.createElement("summary");
     details.className = "legacy-release";
@@ -6990,18 +7263,11 @@ renderRangeExtremaPoints = function () {
     details.append(summary, content);
     divider.replaceWith(details);
     heading.remove();
+    return true;
   };
-  // 每个历史版本调一次：当前为 v2.4.1 … v2.0.0，共 7 个。新增版本时必须同步加一行，
-  // 否则最旧的那版不会被折叠。
-  // One call per legacy release (currently v2.4.1 down to v2.0.0 = seven). Adding a release
-  // means adding one call here, otherwise the oldest entry stays expanded.
-  collapseLegacyRelease();
-  collapseLegacyRelease();
-  collapseLegacyRelease();
-  collapseLegacyRelease();
-  collapseLegacyRelease();
-  collapseLegacyRelease();
-  collapseLegacyRelease();
+  // 自动收起当前版本之后的全部历史版本；版本链增长时无需再维护固定调用次数。
+  // Collapse every release after the current one; future releases need no manual count update.
+  while (collapseLegacyRelease()) {}
   document.body.append(log);
   version.onclick = () => {
     const open = log.hidden;
@@ -7716,7 +7982,7 @@ setTimeout(() => {
       Math.min(max, (state.panOffset || 0) + (dir === "back" ? step : -step)),
     );
     hoverIndex = null;
-    chartSelection = null;
+    clearChartSelection();
     draw();
     updatePanControls();
   };
@@ -8065,6 +8331,7 @@ const viewRanges = {
   "6时": { minutes: 360 },
   "12时": { minutes: 720 },
   "1D": { minutes: 1440 },
+  "2D": { minutes: 2880 },
   "1W": { minutes: 10080 },
   "1M": { minutes: 43200 },
   "6M": { minutes: 262800 },
@@ -8073,6 +8340,11 @@ const viewRanges = {
 // The local market gateway pages OKX history up to this bound. It is large
 // enough for the 12-hour and 1-day minute windows without an unbounded fetch.
 const MAX_VISIBLE_CANDLES = 1800;
+/* 低于这个根数时 K 线图基本无法阅读（一根柱子代表一整个周期），
+   范围与周期冲突时按此下限自动换到更合适的周期；RANGE_TARGET_CANDLES 是
+   换周期时的目标密度。 */
+const MIN_RANGE_CANDLES = 8;
+const RANGE_TARGET_CANDLES = 360;
 const intervalMinutes = {
   "5s": 5 / 60,
   "10s": 10 / 60,
@@ -8133,20 +8405,56 @@ if (state.range && !state.rangeRequiredPoints) {
     : 0;
 }
 function applyVisibleRange(label) {
-  const preset = viewRanges[label],
-    minutes = preset?.minutes,
-    requiredPoints = Math.max(
-      2,
-      Math.ceil(minutes / (intervalMinutes[state.interval] || 1)),
-    ),
+  const minutes = viewRanges[label]?.minutes;
+  if (!minutes) return state.interval;
+  /* 视图一次最多取 MAX_VISIBLE_CANDLES 根 K 线。
+     范围与周期冲突时，以「查看范围」为准微调 K 线周期，保证刻度真的覆盖所选跨度：
+       ① 周期过细、装不下（「1 分 × 1W」= 10080 根）：放粗到仍能装下整个范围的最细周期，
+          否则刻度只会停在最近 30 小时，与「查看范围」标签不符；
+       ② 周期过粗、装不满（「1 日 × 6时」= 1 根，K 线图无法阅读）：换到约 360 根的周期，
+          否则从「1Y」切回短范围时会留下一根柱子代表一整段。
+     只要不冲突就不动周期（例如默认的「1 分 × 6时」= 360 根保持原样）。 */
+  const currentPoints = rangePointsFor(minutes, state.interval);
+  if (currentPoints > MAX_VISIBLE_CANDLES)
+    state.interval = finestIntervalForRange(minutes);
+  else if (currentPoints < MIN_RANGE_CANDLES)
+    state.interval = balancedIntervalForRange(minutes);
+  const requiredPoints = Math.max(2, rangePointsFor(minutes, state.interval)),
     points = Math.min(MAX_VISIBLE_CANDLES, requiredPoints);
-  // Range is a viewing window only.  Never rewrite the independently selected
-  // candle aggregation just to make a long preset fit an arbitrary bar cap.
   state.range = label;
   state.rangeRequiredPoints = requiredPoints;
   state.viewPoints = points;
   state.limit = Math.max(300, points);
   localStorage.setItem("btc_visible_range", label);
+  return state.interval;
+}
+/* 某个周期在给定跨度下会画出多少根 K 线。 */
+function rangePointsFor(minutes, interval) {
+  return Math.ceil(minutes / (intervalMinutes[interval] || 1));
+}
+/* 仍能把整个范围装进 MAX_VISIBLE_CANDLES 根以内的最细周期（intervals 由细到粗排列）。 */
+function finestIntervalForRange(minutes) {
+  for (const [value] of intervals) {
+    if (!intervalMinutes[value]) continue;
+    if (rangePointsFor(minutes, value) <= MAX_VISIBLE_CANDLES) return value;
+  }
+  return intervals.at(-1)?.[0] || state.interval;
+}
+/* 根数最接近 RANGE_TARGET_CANDLES 的周期，用于把「一根柱子代表一整段」的过粗组合拉回可读范围。 */
+function balancedIntervalForRange(minutes) {
+  let best = null,
+    bestScore = Infinity;
+  for (const [value] of intervals) {
+    if (!intervalMinutes[value]) continue;
+    const count = rangePointsFor(minutes, value);
+    if (count > MAX_VISIBLE_CANDLES) continue;
+    const score = Math.abs(Math.log(count / RANGE_TARGET_CANDLES));
+    if (score < bestScore) {
+      bestScore = score;
+      best = value;
+    }
+  }
+  return best || finestIntervalForRange(minutes);
 }
 const savedVisibleRange = localStorage.getItem("btc_visible_range");
 if (viewRanges[savedVisibleRange]) applyVisibleRange(savedVisibleRange);
@@ -8185,8 +8493,24 @@ buttons = function () {
       (b) =>
         (b.onclick = () => {
           state.interval = b.dataset.candle;
-          if (state.range) applyVisibleRange(state.range);
-          else state.limit = Math.max(300, state.limit || 300);
+          const rangeMinutes = viewRanges[state.range]?.minutes;
+          if (
+            rangeMinutes &&
+            Math.ceil(rangeMinutes / (intervalMinutes[state.interval] || 1)) >
+              MAX_VISIBLE_CANDLES
+          ) {
+            /* 用户主动选了更细的周期：此时周期优先，把「查看范围」退回自定义，
+               只显示能取到的最近 MAX_VISIBLE_CANDLES 根，避免范围标签与实际刻度不符。 */
+            state.range = null;
+            state.rangeRequiredPoints = 0;
+            state.viewPoints = MAX_VISIBLE_CANDLES;
+            state.limit = Math.max(300, MAX_VISIBLE_CANDLES);
+            localStorage.removeItem("btc_visible_range");
+          } else if (state.range) {
+            applyVisibleRange(state.range);
+          } else {
+            state.limit = Math.max(300, state.limit || 300);
+          }
           buttonsSignature = "";
           intervalPopover?.classList.remove("is-open");
           loadCurrent();
@@ -8451,7 +8775,12 @@ positionCalc = function () {
   label.innerHTML = `${tx("杠杆倍率", "Leverage")}<select name="leverage">${[1, 2, 3, 5, 10, 20, 30, 50, 100].map((v) => `<option value="${v}">${v}×</option>`).join("")}</select>`;
   form.querySelector("label:nth-child(3)")?.before(label);
   form.elements.leverage.value = positionState.leverage;
-  form.dispatchEvent(new Event("input", { bubbles: true }));
+  /* 这里原先派发 input 事件，会把当时还空着的表单字段回写进 positionState，
+     刷新一次就清空用户填好的持仓量 / 保证金 / 开仓均价 / 标记价格。
+     改为从状态同步到表单后直接重绘，既不丢数据，也不会误清 confirmed。 */
+  for (const key of ["exchange", "side", "amount", "margin", "entry", "mark"])
+    if (form.elements[key]) form.elements[key].value = positionState[key] ?? "";
+  renderPosition();
 })();
 
 if (typeof positionState.confirmed !== "boolean")
@@ -8882,17 +9211,228 @@ let renderedPriceText = null;
 let resonanceTimer = null,
   horizonForecastCache = null,
   horizonForecastLoading = false;
+/* ════════════════════════════════════════════════════════════════════════
+   重大事件卡片（对比特币影响权重高）
+   框选图表时，在两条框选线之间浮现此卡片，只列出「影响力大」的事件：
+   · 手工维护的 MAJOR_EVENTS（如美国《清晰法案》投票等定性 / 政策事件）
+   · 投资日历里 importance=high 的宏观 / 加密事件（含预期 / 前值，自动合并去重）
+   判断结果（利好 / 利空）为「编辑性预判」+ 日历「公布值 vs 预期」的预期差推断，
+   非确定性结论；政策类定性事件无预期 / 前值数值。
+   新增事件：直接往 MAJOR_EVENTS 数组里加一项即可（at 用 Date.parse）。
+   ════════════════════════════════════════════════════════════════════════ */
+const MAJOR_EVENTS = [
+  {
+    name: "美国《清晰法案》(CLARITY Act) 参议院投票",
+    at: Date.parse("2026-09-15T18:00:00Z"), // 9/15 14:00 ET / 9/16 02:00 北京
+    country: "US",
+    category: "crypto",
+    importance: "high",
+    weight: 5, // 对比特币影响权重 1–5
+    estimate: null, // 定性事件无数值
+    previous: null,
+    kind: "bull", // 编辑预判：bull / bear / neutral
+    judge:
+      "9/15 参议院 cloture 需 60 票：共和党约 51 票，需 7-9 名民主党跨党，目前仅约 2 人存可能。预测市场通过概率约 15-20%（Polymarket ~17%、Galaxy low double digits）。通过→监管明朗，长期利好 BTC；失败→不确定性延续，短期利空。概率加权短期偏空（期望跌幅约 -10%），但若意外通过可触发 10-20% relief rally。",
+  },
+  {
+    name: "美国战略比特币储备相关行政进展",
+    at: Date.parse("2026-10-08T14:00:00Z"), // ⚠️ 示例日期，请按真实日程修改
+    country: "US",
+    category: "crypto",
+    importance: "high",
+    weight: 4,
+    estimate: null,
+    previous: null,
+    kind: "bull",
+    judge: "若确认增持 / 建立储备框架，叙事层面利好；反之中性。属定性事件。",
+  },
+  // 模板：复制一项改字段即可
+  // {
+  //   name: "事件名称", at: Date.parse("2026-01-01T00:00:00Z"),
+  //   country: "US", category: "macro", importance: "high", weight: 3,
+  //   estimate: "3.2%", previous: "3.0%",          // 数值类事件填预期 / 前值
+  //   kind: "bull", judge: "预计高于预期 → 偏紧，短期利空；长期看落地节奏。",
+  // },
+];
+function majorEventsView() {
+  const now = Date.now();
+  const curated = MAJOR_EVENTS.map((ev) => ({
+    curated: true,
+    name: ev.name,
+    at: Number(ev.at),
+    country: ev.country,
+    category: ev.category,
+    importance: ev.importance,
+    weight: ev.weight || 0,
+    estimate: ev.estimate ?? null,
+    previous: ev.previous ?? null,
+    actual: null,
+    kind: ev.kind || "neutral",
+    judge: ev.judge || "",
+  }));
+  const live = (investmentCalendarData?.events || [])
+    .filter(
+      (e) =>
+        e.importance === "high" &&
+        (e.category === "macro" || e.category === "crypto"),
+    )
+    .map((e) => {
+      const bias = macroEventBias(e) || {};
+      const v = {
+        curated: false,
+        ref: e,
+        name: calendarEventTitle(e.title),
+        at: Number(e.at),
+        country: e.country,
+        category: e.category,
+        importance: e.importance,
+        weight: 5,
+        estimate: e.estimate ?? null,
+        previous: e.previous ?? null,
+        actual: e.actual ?? null,
+        kind: bias.kind || "neutral",
+        judge: bias.tip || "",
+      };
+      // 尚未公布、且为数值型（有预期 / 前值）：用「预期相对前值」预判方向
+      if (
+        e.at > now &&
+        v.estimate !== null &&
+        v.previous !== null &&
+        (v.kind === "neutral" || v.kind === "muted" || v.kind === "flat")
+      ) {
+        const en = macroParseNumber(e.estimate),
+          pn = macroParseNumber(e.previous);
+        if (en != null && pn != null && Math.abs(en - pn) > 1e-9) {
+          const rising = en > pn;
+          const cls = macroIndicatorClass(e.title);
+          const bearishIfRising = cls !== "unemployment";
+          v.kind = rising === bearishIfRising ? "bear" : "bull";
+          v.judge = rising
+            ? tx(
+                "预期较前值上升，市场偏紧预期 → 短期利空概率更高",
+                "Consensus above prior; tighter expectations lean bearish",
+              )
+            : tx(
+                "预期较前值下降，市场宽松预期 → 短期利好概率更高",
+                "Consensus below prior; easier expectations lean bullish",
+              );
+        }
+      }
+      return v;
+    });
+  const merged = [...curated, ...live];
+  const seen = new Set();
+  return merged
+    .filter((ev) => {
+      const key = ev.name + "|" + calendarBeijingDayKey(ev.at);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((a, b) => a.at - b.at);
+}
+function renderInvestmentCalendarMajorEvents() {
+  const now = Date.now();
+  // The compact strip is strictly the next four major events by time. It is a
+  // near-term glance, while the lower timeline remains the complete calendar.
+  const list = majorEventsView()
+    .filter(investmentCalendarMatchesSelectors)
+    .filter((ev) => ev.at > now - 24 * 60 * 60 * 1000 && ev.at > now)
+    .sort((a, b) => a.at - b.at)
+    .slice(0, 4);
+  if (!list.length) return "";
+
+  const renderMini = (ev) => {
+    const bj = calendarFormatBeijing(ev.at, { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
+    const refZone = calendarLocalZone(ev.country);
+    const refLabel = calendarLocalLabel(ev.country);
+    const local = calendarFormatInZone(ev.at, refZone, { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
+    const countdown = ev.at > now ? `<span class="mev-mini-cd">⏳ ${macroCountdown(ev.at)}</span>` : `<span class="mev-mini-cd is-past">${tx("已发生", "Past")}</span>`;
+    const kindLabel = ev.kind === "bull" ? tx("利好", "Bull") : ev.kind === "bear" ? tx("利空", "Bear") : tx("中性", "Neutral");
+    const mets = ev.estimate !== null || ev.previous !== null
+      ? `<span class="mev-mini-met" title="${tx("预期", "Est")}">${tx("预期", "Est")} ${ev.estimate !== null ? calendarEscape(String(ev.estimate)) : "—"}</span><span class="mev-mini-met" title="${tx("前值", "Prev")}">${tx("前值", "Prev")} ${ev.previous !== null ? calendarEscape(String(ev.previous)) : "—"}</span>`
+      : "";
+    const pickKey = macroCalendarPickKey(ev);
+    const isPicked = macroCalendarPicks.has(pickKey);
+    return `<article class="mev-mini mev-mini-${ev.kind}${isPicked ? " is-picked" : ""}">
+      <label class="cal-pick mev-mini-pick" data-pin-label="${calendarEscape(tx("关注", "Pin"))}" data-pinned-label="${calendarEscape(tx("已关注", "Pinned"))}" title="${calendarEscape(tx("显示在上方宏观实时数据卡片", "Pin to top macro live-data card"))}">
+        <input type="checkbox" data-cal-pick="${calendarEscape(pickKey)}"${isPicked ? " checked" : ""}>
+        <i class="cal-pick-ui"></i>
+      </label>
+      <div class="mev-mini-top">
+        <i class="mev-mini-dot ${ev.importance}"></i>
+        <span class="mev-mini-name" title="${calendarEscape(ev.name)}">${calendarEscape(ev.name)}</span>
+        <span class="mev-mini-weight" title="${tx("对比特币影响权重", "BTC impact weight")}">${tx("权重", "W")}${ev.weight}</span>
+      </div>
+      <div class="mev-mini-times">
+        <span class="mev-mini-bj"><i>🇨🇳 ${tx("北京", "BJ")}</i>${calendarEscape(bj)}</span>
+        <span class="mev-mini-local"><i>${calendarEscape(refLabel)}</i>${calendarEscape(local)}</span>
+      </div>
+      <div class="mev-mini-mets">${mets}</div>
+      <div class="mev-mini-foot">
+        <span class="mev-mini-kind">${kindLabel}</span>
+        ${countdown}
+      </div>
+      ${ev.judge ? `<small class="mev-mini-judge">${calendarEscape(ev.judge)}</small>` : ""}
+    </article>`;
+  };
+
+  return `<section class="ic-major-events">
+    <header class="ic-major-head">
+      <b>${tx("重大事件", "Major events")}</b>
+      <span>${tx("对比特币影响权重高", "High BTC impact")}</span>
+    </header>
+    <div class="ic-major-list">${list.map(renderMini).join("")}</div>
+  </section>`;
+}
+/* 清空框选并同步隐藏浮层、恢复底部提示。
+   任何“显式”清除（双击图表、切换周期/范围/数据源、平移）都走这里；
+   鼠标移出图表（pointerleave）不再触发——框选数据要留在屏幕上供阅读。 */
+function clearChartSelection() {
+  chartSelection = null;
+  const overlay = $("selectionOverlay");
+  if (overlay) {
+    overlay.hidden = true;
+    overlay.innerHTML = "";
+  }
+  const stat = $("selectionStats");
+  if (stat)
+    stat.textContent = tx(
+      "拖拽图表可框选区段，显示时间段、最高、最低及涨跌幅。",
+      "Drag on chart to select a time span, high, low and return.",
+    );
+}
 function renderSelectionOverlay() {
-  if (!chartSelection) return;
+  const overlay = $("selectionOverlay");
+  if (!chartSelection) {
+    if (overlay) overlay.hidden = true;
+    return;
+  }
   const d = visibleCandles(),
     a = Math.min(chartSelection.start, chartSelection.end),
-    b = Math.max(chartSelection.start, chartSelection.end),
-    s = d.slice(a, b + 1),
-    hi = Math.max(...s.map((v) => v.high)),
+    b = Math.max(chartSelection.start, chartSelection.end);
+  /* 单击（未拖动）不构成框选：直接清掉，避免留下 1 根 K 线的“粘性”选区。 */
+  if (a === b) {
+    clearChartSelection();
+    drawLive();
+    return;
+  }
+  const s = d.slice(a, b + 1);
+  /* 选区索引若因数据刷新而越界，slice 可能为空 → 直接收敛，避免 .at(-1) 抛错。
+     If the indices drift out of range after a data refresh, bail out cleanly. */
+  if (!s.length) {
+    clearChartSelection();
+    drawLive();
+    return;
+  }
+  const hi = Math.max(...s.map((v) => v.high)),
     lo = Math.min(...s.map((v) => v.low)),
-    now = state.ticker?.last,
-    ret = (s.at(-1).close / s[0].open - 1) * 100,
-    overlay = $("selectionOverlay");
+    /* 实时价缺失时退回最后一根收盘，保证「最高 / 最低 / 区间涨跌」永远有得可算，
+       不会因为报价源抖动让整张框选数据卡凭空消失。 */
+    now = Number.isFinite(state.ticker?.last)
+      ? state.ticker.last
+      : d.at(-1)?.close,
+    ret = (s.at(-1).close / s[0].open - 1) * 100;
   if (!overlay || !Number.isFinite(now)) return;
   const diff = (v) => v - now;
   overlay.hidden = false;
@@ -9006,12 +9546,11 @@ addDecisionRenderEnhancer("horizon-forecasts", () => {
 });
 $("chart")
   ?.closest(".chart-box")
-  ?.insertAdjacentHTML("beforeend", '<div id="selectionOverlay" hidden></div>');
+  ?.insertAdjacentHTML(
+    "beforeend",
+    '<div id="selectionOverlay" hidden></div>',
+  );
 $("chart")?.addEventListener("pointerup", renderSelectionOverlay);
-$("chart")?.addEventListener("pointerleave", () => {
-  const o = $("selectionOverlay");
-  if (o) o.hidden = true;
-});
 $("chart")?.addEventListener("mousemove", (event) => {
   const tip = $("chartTooltip"),
     d = visibleCandles(),
@@ -9277,19 +9816,8 @@ drawChartWithoutDuplicateExtremaText = function () {
   }
 };
 if (state.candles.length) drawChartWithoutDuplicateExtremaText();
-/* Keep every zoom path within the same 500% ceiling. */
-$("chart")?.addEventListener(
-  "wheel",
-  () => {
-    if (state.zoom > 5) {
-      state.zoom = 5;
-      const label = $("zoomLabel");
-      if (label) label.textContent = "500%";
-      draw();
-    }
-  },
-  { passive: true },
-);
+/* 缩放上限（700%）现在只在工具栏 − / + / 重置 三处生效：
+   滚轮已不再绑定缩放，因此这里原来的「滚轮兜底压回上限」监听已移除。 */
 const zoomControls = document.querySelector(".zoom-tools");
 if (zoomControls)
   zoomControls.onclick = (event) => {
@@ -9975,24 +10503,22 @@ function applyHeroUnitOrder() {
     priceDiv.draggable = true;
     units.push({ key: "price", el: priceDiv });
   }
+  /* 包含编辑态在内的所有持仓单元：编辑态模板同样带 data-hero-unit，
+     否则丢失排序会退回 order:0，编辑面板会跳到第一列。 */
   hero
-    .querySelectorAll("#personalEntryCard [data-entry-drag-index]")
+    .querySelectorAll('#personalEntryCard [data-hero-unit^="slot"]')
     .forEach((slot) => {
-      const key = `slot${slot.dataset.entryDragIndex}`;
-      slot.dataset.heroUnit = key;
+      const key = slot.dataset.heroUnit;
+      if (!/^slot[01]$/.test(key)) return;
       units.push({ key, el: slot });
     });
   units.forEach(({ key, el }) => {
-    let order;
-    if (desktop) {
-      order = heroUnitOrder.indexOf(key);
-    } else {
-      /* 窄屏：价格卡不参与互换，仅两个持仓槽在卡内排序。 */
-      order =
+    const order = desktop
+      ? heroUnitOrder.indexOf(key)
+      : /* 窄屏：价格卡不参与互换，仅两个持仓槽在卡内排序。 */
         key === "price"
-          ? 0
-          : heroUnitOrder.filter((k) => k !== "price").indexOf(key);
-    }
+        ? 0
+        : heroUnitOrder.filter((k) => k !== "price").indexOf(key);
     el.style.order = String(order);
   });
   /* 视觉上最左的单元不带左侧分隔线。 */
@@ -10077,7 +10603,7 @@ function personalEntrySlot(index, live) {
     configuredLeverage = validEntry(Number(entry.leverage));
   if (personalEntryEditingIndex === index) {
     const fmt = (v, digits = 2) => (v ? Number(v).toFixed(digits) : "");
-    return `<article class="personal-entry-slot ${side} editing">${personalSidePicker(index, side)}<div class="personal-entry-form"><label><small>${tx("持仓量 (USDT)", "Size (USDT)")}</small><input class="personal-entry-input" data-entry-amount="${index}" aria-label="${tx("持仓量", "Position size")}" type="number" inputmode="decimal" min="0" step="0.01" placeholder="0.00" value="${fmt(entry.amount)}"></label><label><small>${tx("开仓均价 (USDT)", "Entry price (USDT)")}</small><input class="personal-entry-input" data-entry-price="${index}" aria-label="${tx("我的买入价", "My entry price")}" type="number" inputmode="decimal" min="0" step="0.01" placeholder="0.00" value="${fmt(price)}"></label><label><small>${tx("保证金 (USDT)", "Margin (USDT)")}</small><input class="personal-entry-input" data-entry-margin="${index}" aria-label="${tx("保证金", "Margin")}" type="number" inputmode="decimal" min="0" step="0.01" placeholder="0.00" value="${fmt(entry.margin)}"></label><label><small>${tx("杠杆 (倍)", "Leverage (x)")}</small><input class="personal-entry-input" data-entry-leverage="${index}" aria-label="${tx("杠杆倍数", "Leverage")}" type="number" inputmode="decimal" min="0" step="1" placeholder="${tx("自动", "Auto")}" value="${fmt(entry.leverage, 0)}"></label></div><div class="personal-entry-actions"><button type="button" class="personal-entry-btn primary" data-entry-save="${index}">${tx("保存", "Save")}</button><button type="button" class="personal-entry-btn" data-entry-cancel="${index}">${tx("取消", "Cancel")}</button><button type="button" class="personal-entry-btn danger" data-entry-clear="${index}">${tx("清除", "Clear")}</button></div><small>${tx("Enter 保存 · Esc 取消；杠杆留空 = 持仓量÷保证金；清除 = 清空本笔持仓", "Enter to save · Esc to cancel; blank leverage = size÷margin; Clear removes the position")}</small></article>`;
+    return `<article class="personal-entry-slot ${side} editing" data-hero-unit="slot${index}">${personalSidePicker(index, side)}<div class="personal-entry-form"><label><small>${tx("持仓量 (USDT)", "Size (USDT)")}</small><input class="personal-entry-input" data-entry-amount="${index}" aria-label="${tx("持仓量", "Position size")}" type="number" inputmode="decimal" min="0" step="0.01" placeholder="0.00" value="${fmt(entry.amount)}"></label><label><small>${tx("开仓均价 (USDT)", "Entry price (USDT)")}</small><input class="personal-entry-input" data-entry-price="${index}" aria-label="${tx("我的买入价", "My entry price")}" type="number" inputmode="decimal" min="0" step="0.01" placeholder="0.00" value="${fmt(price)}"></label><label><small>${tx("保证金 (USDT)", "Margin (USDT)")}</small><input class="personal-entry-input" data-entry-margin="${index}" aria-label="${tx("保证金", "Margin")}" type="number" inputmode="decimal" min="0" step="0.01" placeholder="0.00" value="${fmt(entry.margin)}"></label><label><small>${tx("杠杆 (倍)", "Leverage (x)")}</small><input class="personal-entry-input" data-entry-leverage="${index}" aria-label="${tx("杠杆倍数", "Leverage")}" type="number" inputmode="decimal" min="0" step="1" placeholder="${tx("自动", "Auto")}" value="${fmt(entry.leverage, 0)}"></label></div><div class="personal-entry-actions"><button type="button" class="personal-entry-btn primary" data-entry-save="${index}">${tx("保存", "Save")}</button><button type="button" class="personal-entry-btn" data-entry-cancel="${index}">${tx("取消", "Cancel")}</button><button type="button" class="personal-entry-btn danger" data-entry-clear="${index}">${tx("清除", "Clear")}</button></div><small>${tx("Enter 保存 · Esc 取消；杠杆留空 = 持仓量÷保证金；清除 = 清空本笔持仓", "Enter to save · Esc to cancel; blank leverage = size÷margin; Clear removes the position")}</small></article>`;
   }
   if (!price)
     return `<article class="personal-entry-slot ${side} empty" draggable="true" data-entry-drag-index="${index}" data-hero-unit="slot${index}">${personalSidePicker(index, side, configuredLeverage)}<button type="button" class="personal-entry-value" data-entry-value="${index}">--</button><small>${tx("双击输入杠杆、持仓量、保证金和开仓均价", "Double-click to enter leverage, size, margin and entry price")}<br>${tx("拖拽可以与价格卡/另一持仓互换位置", "Drag to swap with the price card or the other position")}</small></article>`;
@@ -10211,7 +10737,7 @@ function renderPersonalEntryCard(force = false) {
       hostIndex = Number(String(hostKey).slice(4));
     card
       .querySelector(
-        `[data-entry-drag-index="${hostIndex}"] .personal-entry-heading`,
+        `[data-hero-unit="slot${hostIndex}"] .personal-entry-heading`,
       )
       ?.insertAdjacentHTML("beforeend", sync);
   }
@@ -10465,16 +10991,171 @@ loadFedMonitor();
 setInterval(loadFedMonitor, 60_000);
 setInterval(refreshMacroUpdateAges, 30_000);
 
-/* Investment calendar: the full table is purpose-built for BTC risk windows.
-   It uses the server-side feed so an optional Finnhub key never reaches JS. */
+/* Investment calendar: a table-first risk window, purpose-built for BTC risk
+   windows. It reads the server-side feed so an optional Finnhub key never
+   reaches the browser. Every wall-clock decision is made in Beijing time. */
 let investmentCalendarData = null;
-let investmentCalendarFilter = "all";
-let investmentCalendarTimeZone = "Asia/Shanghai";
-let investmentCalendarExpanded = false;
-const calendarEscape = (value) => String(value ?? "--").replace(/[&<>\"]/g, (char) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" })[char]);
+// The lower timeline is the complete calendar by default. Date shortcuts are
+// opt-in views; starting on "today" made future events appear to be missing
+// even though the API and the Major events strip already contained them.
+let investmentCalendarRange = "all";          // yesterday|today|tomorrow|week|nextweek|custom|all
+let investmentCalendarFrom = "";              // yyyy-mm-dd (Beijing day)
+let investmentCalendarTo = "";                // yyyy-mm-dd (Beijing day)
+let investmentCalendarImportance = new Set(); // empty = all (low|medium|high)
+let investmentCalendarRegions = new Set();    // empty = all countries
+let investmentCalendarCategories = new Set(); // empty = all categories
+let investmentCalendarTimeZone = "local";     // reference zone for the secondary line
+let investmentCalendarShowFilters = true;
+let investmentCalendarVisibleLimit = 6;        // collapsed=6, first expansion=10, then +10
+let calendarOpenMenu = null;                  // region|category|importance|null
+const calendarMenuSearch = { region: "", category: "", importance: "" };
+
+function investmentCalendarMatchesSelectors(event) {
+  return (!investmentCalendarImportance.size || investmentCalendarImportance.has(event.importance || "low"))
+    && (!investmentCalendarRegions.size || investmentCalendarRegions.has(event.country || "GLOBAL"))
+    && (!investmentCalendarCategories.size || investmentCalendarCategories.has(event.category || "macro"));
+}
+function resetInvestmentCalendarVisibleLimit() { investmentCalendarVisibleLimit = 6; }
+
+/* 「宏观经济数据」卡片独立筛选器状态，默认只显示高重要性事件。 */
+let releasedDataRegions = new Set();          // empty = all countries
+let releasedDataCategories = new Set();       // empty = all categories
+let releasedDataImportance = new Set(["high"]); // default high only
+let releasedDataShowFilters = true;
+let releasedDataOpenMenu = null;                // region|category|importance|null
+const releasedDataMenuSearch = { region: "", category: "", importance: "" };
+const MACRO_PICKS_KEY = "btc_macro_calendar_picks";
+let macroCalendarPicks = new Set();           // at|title keys of user-picked events from investment calendar
+
+function loadMacroCalendarPicks() {
+  try {
+    const raw = localStorage.getItem(MACRO_PICKS_KEY);
+    macroCalendarPicks = new Set(raw ? JSON.parse(raw) : []);
+  } catch {
+    macroCalendarPicks = new Set();
+  }
+}
+function saveMacroCalendarPicks() {
+  try { localStorage.setItem(MACRO_PICKS_KEY, JSON.stringify([...macroCalendarPicks])); } catch {}
+}
+function macroCalendarPickKey(event) {
+  return `${Number(event.at)}|${event.title || event.name || ""}`;
+}
+function macroCalendarPickEvent(key) {
+  if (!investmentCalendarData?.events) return null;
+  const [atStr, ...titleParts] = String(key).split("|");
+  const at = Number(atStr);
+  const title = titleParts.join("|");
+  const fromCalendar = investmentCalendarData.events.find((e) => Number(e.at) === at && (e.title === title || e.name === title));
+  if (fromCalendar) return fromCalendar;
+  // 重大事件（手工维护 / 高重要性自动聚合）也可能被关注，fallback 到 majorEventsView。
+  return majorEventsView().find((e) => Number(e.at) === at && (e.name === title || e.title === title)) || null;
+}
+function macroCalendarPickedEvents(limit = 3) {
+  if (!investmentCalendarData?.events) return [];
+  const now = Date.now();
+  const picked = [...macroCalendarPicks]
+    .map(macroCalendarPickEvent)
+    .filter(Boolean)
+    .sort((a, b) => {
+      const ad = Math.abs(a.at - now), bd = Math.abs(b.at - now);
+      return ad - bd;
+    })
+    .slice(0, limit);
+  return picked;
+}
+
+// 关注宏观事件实时数据：只保留「尚未公布」或「已公布但不超过 30 分钟」的事件，
+// 超过 30 分钟后自动移除，让卡片始终聚焦可交易的实时/即将到来的数据。
+const MACRO_LIVE_WINDOW_MS = 30 * 60_000;
+let macroLiveFetchTimer = null;
+function macroCalendarPickedLiveEvent() {
+  if (!investmentCalendarData?.events) return null;
+  const now = Date.now();
+  const picked = [...macroCalendarPicks]
+    .map(macroCalendarPickEvent)
+    .filter(Boolean)
+    .filter((event) => {
+      if (event.at > now) return true; // 未公布： upcoming
+      return now - event.at <= MACRO_LIVE_WINDOW_MS; // 已公布：30 分钟内
+    })
+    .sort((a, b) => {
+      const ad = Math.abs(a.at - now), bd = Math.abs(b.at - now);
+      return ad - bd;
+    })[0];
+  return picked || null;
+}
+function manageMacroLiveFetch() {
+  const event = macroCalendarPickedLiveEvent();
+  const now = Date.now();
+  const inLiveWindow = event && event.at <= now && now - event.at <= MACRO_LIVE_WINDOW_MS;
+  const nearRelease = event && event.at > now && event.at - now <= 2 * 60_000;
+  if (inLiveWindow || nearRelease) {
+    if (!macroLiveFetchTimer) {
+      // 事件公布前后 2 分钟/公布后 30 分钟内，每 15 秒强制刷新一次，第一时间抓取实际值。
+      macroLiveFetchTimer = setInterval(() => loadInvestmentCalendar(true), 15_000);
+    }
+  } else if (macroLiveFetchTimer) {
+    clearInterval(macroLiveFetchTimer);
+    macroLiveFetchTimer = null;
+  }
+}
+
+const calendarEscape = (value) => String(value ?? "--").replace(/[&<>"]/g, (char) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" })[char]);
 function calendarFormat(at, options) {
   return new Intl.DateTimeFormat(uiLang === "zh" ? "zh-CN" : "en-US", { timeZone: investmentCalendarTimeZone, ...options }).format(at);
 }
+function calendarFormatInZone(at, zone, options) {
+  return new Intl.DateTimeFormat(uiLang === "zh" ? "zh-CN" : "en-US", { timeZone: zone, ...options }).format(at);
+}
+function calendarFormatBeijing(at, options) {
+  return new Intl.DateTimeFormat(uiLang === "zh" ? "zh-CN" : "en-US", { timeZone: "Asia/Shanghai", ...options }).format(at);
+}
+const CALENDAR_LOCAL_ZONE = {
+  US:"America/New_York", CN:"Asia/Shanghai", EU:"Europe/Brussels", JP:"Asia/Tokyo", UK:"Europe/London",
+  DE:"Europe/Berlin", FR:"Europe/Paris", BR:"America/Sao_Paulo", AU:"Australia/Sydney", SG:"Asia/Singapore",
+  CA:"America/Toronto", KR:"Asia/Seoul", IN:"Asia/Kolkata", RU:"Europe/Moscow", OPEC:"Europe/Vienna",
+  CH:"Europe/Zurich", IT:"Europe/Rome", ES:"Europe/Madrid", MX:"America/Mexico_City", TR:"Europe/Istanbul",
+  ZA:"Africa/Johannesburg", NZ:"Pacific/Auckland", HK:"Asia/Hong_Kong", TW:"Asia/Shanghai",
+  BTC:"UTC", OIL:"UTC", GLOBAL:"UTC",
+};
+function calendarLocalZone(country) { return CALENDAR_LOCAL_ZONE[country] || "UTC"; }
+function calendarLocalLabel(country) { return calendarCountry(country).label; }
+
+/* Beijing wall-clock helpers. Mainland China has no DST, so a fixed +8h shift is
+   exact — no timezone round-trips needed for day bucketing and range windows. */
+const CALENDAR_BJ_OFFSET = 8 * 3_600_000, CALENDAR_DAY = 86_400_000;
+function calendarBeijingDayStart(ts) { return Math.floor((Number(ts) + CALENDAR_BJ_OFFSET) / CALENDAR_DAY) * CALENDAR_DAY - CALENDAR_BJ_OFFSET; }
+function calendarBeijingDayKey(ts) { const d = new Date(Number(ts) + CALENDAR_BJ_OFFSET); return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,"0")}-${String(d.getUTCDate()).padStart(2,"0")}`; }
+function calendarBeijingDateToMs(value) {
+  const matched = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || ""));
+  return matched ? Date.UTC(+matched[1], +matched[2] - 1, +matched[3]) - CALENDAR_BJ_OFFSET : NaN;
+}
+function calendarWeekStart(ts) {
+  const day = calendarBeijingDayStart(ts), dow = new Date(day + CALENDAR_BJ_OFFSET).getUTCDay();
+  return day + (dow === 0 ? -6 : 1 - dow) * CALENDAR_DAY;
+}
+// Date shortcuts narrow the otherwise complete calendar timeline.
+function calendarRangeWindow(range) {
+  const today = calendarBeijingDayStart(Date.now());
+  switch (range) {
+    case "yesterday": return [today - CALENDAR_DAY, today];
+    case "tomorrow": return [today + CALENDAR_DAY, today + 2 * CALENDAR_DAY];
+    case "week": { const w = calendarWeekStart(today); return [w, w + 7 * CALENDAR_DAY]; }
+    case "nextweek": { const w = calendarWeekStart(today) + 7 * CALENDAR_DAY; return [w, w + 7 * CALENDAR_DAY]; }
+    case "all": return [-Infinity, Infinity];
+    case "custom": {
+      const from = calendarBeijingDateToMs(investmentCalendarFrom), to = calendarBeijingDateToMs(investmentCalendarTo);
+      return [Number.isFinite(from) ? from : -Infinity, Number.isFinite(to) ? to + CALENDAR_DAY : Infinity];
+    }
+    default: return [today, today + CALENDAR_DAY];
+  }
+}
+const CALENDAR_RANGES = [
+  ["yesterday", "昨天", "Yesterday"], ["today", "今天", "Today"], ["tomorrow", "明天", "Tomorrow"],
+  ["week", "本周", "This week"], ["nextweek", "下周", "Next week"], ["custom", "自定义日期", "Custom"], ["all", "全部", "All"],
+];
+const CALENDAR_IMPORTANCE = [["high", "高", "High"], ["medium", "中", "Medium"], ["low", "低", "Low"]];
 function calendarWindow(event) {
   const diff = Number(event.at) - Date.now();
   const liquidity = event.category === "liquidity";
@@ -10509,6 +11190,239 @@ function calendarEventTitle(title) {
   const buyback=raw.match(/^美财政部回购\s+·\s+(.+)$/);
   return buyback ? `美国财政部回购（${buyback[1]}） · U.S. Treasury Buyback (${buyback[1]})` : raw;
 }
+function calendarCountry(code) {
+  const map = {
+    US:{flag:"US",emoji:"🇺🇸",label:tx("美国","US"),cls:"c-us"}, CN:{flag:"CN",emoji:"🇨🇳",label:tx("中国","CN"),cls:"c-cn"},
+    EU:{flag:"EU",emoji:"🇪🇺",label:tx("欧元区","EU"),cls:"c-eu"}, JP:{flag:"JP",emoji:"🇯🇵",label:tx("日本","JP"),cls:"c-jp"},
+    UK:{flag:"UK",emoji:"🇬🇧",label:tx("英国","UK"),cls:"c-uk"}, DE:{flag:"DE",emoji:"🇩🇪",label:tx("德国","DE"),cls:"c-de"},
+    FR:{flag:"FR",emoji:"🇫🇷",label:tx("法国","FR"),cls:"c-fr"}, BR:{flag:"BR",emoji:"🇧🇷",label:tx("巴西","BR"),cls:"c-br"},
+    AU:{flag:"AU",emoji:"🇦🇺",label:tx("澳大利亚","AU"),cls:"c-au"}, SG:{flag:"SG",emoji:"🇸🇬",label:tx("新加坡","SG"),cls:"c-sg"},
+    CA:{flag:"CA",emoji:"🇨🇦",label:tx("加拿大","CA"),cls:"c-ca"}, KR:{flag:"KR",emoji:"🇰🇷",label:tx("韩国","KR"),cls:"c-kr"},
+    IN:{flag:"IN",emoji:"🇮🇳",label:tx("印度","IN"),cls:"c-in"}, RU:{flag:"RU",emoji:"🇷🇺",label:tx("俄罗斯","RU"),cls:"c-ru"},
+    OPEC:{flag:"OPEC",emoji:"🛢",label:tx("OPEC","OPEC"),cls:"c-opec"}, CH:{flag:"CH",emoji:"🇨🇭",label:tx("瑞士","CH"),cls:"c-ch"},
+    IT:{flag:"IT",emoji:"🇮🇹",label:tx("意大利","IT"),cls:"c-it"}, ES:{flag:"ES",emoji:"🇪🇸",label:tx("西班牙","ES"),cls:"c-es"},
+    MX:{flag:"MX",emoji:"🇲🇽",label:tx("墨西哥","MX"),cls:"c-mx"}, TR:{flag:"TR",emoji:"🇹🇷",label:tx("土耳其","TR"),cls:"c-tr"},
+    ZA:{flag:"ZA",emoji:"🇿🇦",label:tx("南非","ZA"),cls:"c-za"}, NZ:{flag:"NZ",emoji:"🇳🇿",label:tx("新西兰","NZ"),cls:"c-nz"},
+    HK:{flag:"HK",emoji:"🇭🇰",label:tx("中国香港","HK"),cls:"c-hk"}, TW:{flag:"TW",emoji:"",label:tx("中国台湾","Taiwan, China"),cls:"c-tw"},
+    BTC:{flag:"₿",emoji:"",label:tx("比特币","BTC"),cls:"c-btc"}, OIL:{flag:"OIL",emoji:"🛢",label:tx("能源","Oil"),cls:"c-oil"},
+    GLOBAL:{flag:"GLB",emoji:"🌐",label:tx("全球","Global"),cls:"c-global"},
+  };
+  return map[code] || { flag:String(code||"--").slice(0,3).toUpperCase(), emoji:"", label:String(code||"--"), cls:"c-etc" };
+}
+const CALENDAR_CATEGORIES = [
+  ["macro", "宏观", "Macro", "cat-macro"],
+  ["liquidity", "流动性", "Liquidity", "cat-liquidity"],
+  ["energy", "能源", "Energy", "cat-energy"],
+  ["risk", "避险", "Risk", "cat-risk"],
+  ["crypto", "加密期权", "Crypto", "cat-crypto"],
+  ["chain", "BTC 链上", "BTC chain", "cat-chain"],
+];
+function calendarCategoryMeta(key) {
+  const row = CALENDAR_CATEGORIES.find((entry) => entry[0] === key);
+  return row ? { key:row[0], label:tx(row[1],row[2]), cls:row[3] } : { key, label:key, cls:"cat-macro" };
+}
+function calendarImportanceDots(event) {
+  const stars = event.importance === "high" ? 3 : event.importance === "medium" ? 2 : 1;
+  return [1,2,3].map((n) => `<i class="ic-dot${n<=stars?" on":""}"></i>`).join("");
+}
+function calendarFlagHtml(code) {
+  const country = calendarCountry(code);
+  const mark = country.emoji ? `<i class="cal-flag-emoji">${country.emoji}</i>` : "";
+  return `<span class="cal-flag ${country.cls}" title="${calendarEscape(country.label)}">${mark}<em class="cal-flag-code">${calendarEscape(country.flag)}</em></span>`;
+}
+
+/* —— Data-reaction playbook ——
+   Directional maps for the four assets the user asked about. These are
+   heuristics built on the common "surprise vs consensus" logic, not
+   certainties; the UI states that explicitly. */
+const CALENDAR_IMPACT_ASSETS = [["btc","比特币","Bitcoin"],["crypto","加密货币","Crypto"],["stocks","美股","US stocks"],["gold","黄金","Gold"]];
+function calendarImpactFamily(title) {
+  const t = String(title || "").toLowerCase();
+  if (/失业率|unemploy|失业金|jobless|初请/.test(t)) return "unemployment";
+  if (/cpi|ppi|pce|物价|通胀|消费者价格|生产者价格|inflation|price index/.test(t)) return "inflation";
+  if (/利率|fomc|rate decision|央行|决议|interest rate|benchmark rate|议息/.test(t)) return "rates";
+  if (/非农|就业|payroll|employment/.test(t)) return "jobs";
+  if (/原油库存|eia|petroleum|库存|opec|钻井/.test(t)) return "energy";
+  if (/gdp|零售|销售|retail|gross domestic|pmi|工业|景气|制造业|商业活动/.test(t)) return "growth";
+  return null;
+}
+const CALENDAR_IMPACT_MODELS = {
+  inflation: { label:"通胀", note:"通胀高于预期 → 紧缩预期与实际利率上行，通常压制 BTC、加密货币、美股与黄金。",
+    high:{btc:-1,crypto:-1,stocks:-1,gold:-1}, low:{btc:1,crypto:1,stocks:1,gold:1} },
+  rates: { label:"利率", note:"政策利率高于预期（偏鹰）→ 美元与实际利率走强，压制 BTC、加密货币、美股与黄金。",
+    high:{btc:-1,crypto:-1,stocks:-1,gold:-1}, low:{btc:1,crypto:1,stocks:1,gold:1} },
+  unemployment: { label:"失业率", note:"失业率高于预期 → 就业转弱、降息预期升温，利好 BTC、加密货币、美股与黄金。",
+    high:{btc:1,crypto:1,stocks:1,gold:1}, low:{btc:-1,crypto:-1,stocks:-1,gold:-1} },
+  jobs: { label:"就业", note:"就业强于预期 → 经济有韧性但紧缩预期升温，股市多空拉锯，BTC、加密货币与黄金承压。",
+    high:{btc:-1,crypto:-1,stocks:0,gold:-1}, low:{btc:1,crypto:1,stocks:0,gold:1} },
+  growth: { label:"增长", note:"增长强于预期 → 风险偏好回暖，利好 BTC、加密货币与美股；黄金主要看实际利率，方向有限。",
+    high:{btc:1,crypto:1,stocks:1,gold:0}, low:{btc:-1,crypto:-1,stocks:-1,gold:1} },
+  energy: { label:"能源", note:"能源类数据以原油供需为主，对 BTC、加密货币、美股与黄金通常无直接方向。",
+    high:{btc:0,crypto:0,stocks:0,gold:0}, low:{btc:0,crypto:0,stocks:0,gold:0} },
+};
+function calendarImpactModel(event) {
+  const family = calendarImpactFamily(event.title);
+  if (!family) return null;
+  const model = CALENDAR_IMPACT_MODELS[family];
+  return { family, label:model.label, note:model.note, high:model.high, low:model.low };
+}
+function calendarImpactDir(value) {
+  if (value > 0) return { kind:"bull", label:tx("利好","Bullish") };
+  if (value < 0) return { kind:"bear", label:tx("利空","Bearish") };
+  return { kind:"flat", label:tx("中性","Neutral") };
+}
+// Directional events for the playbook. Upcoming releases come first (they are the
+// actionable ones), then the most recent releases so a just-published print still
+// shows which scenario actually landed.
+function calendarImpactEvents(limit = 3, filters = {}) {
+  const { regions = null, categories = null, importance = null } = filters;
+  const now = Date.now();
+  const pool = (investmentCalendarData?.events || [])
+    .filter((event) => event.category === "macro")
+    .filter((event) => !importance || importance.size === 0 || importance.has(event.importance || "low"))
+    .filter((event) => !regions || regions.size === 0 || regions.has(event.country || "GLOBAL"))
+    .filter((event) => !categories || categories.size === 0 || categories.has(event.category || "macro"))
+    .filter((event) => event.at >= now - 18 * 3_600_000 && event.at <= now + 14 * CALENDAR_DAY)
+    .filter((event) => calendarImpactModel(event));
+  const rank = (event) => (event.importance === "high" ? 0 : 1);
+  const upcoming = pool.filter((event) => event.at >= now).sort((a, b) => (rank(a) - rank(b)) || (a.at - b.at));
+  const recent = pool.filter((event) => event.at < now).sort((a, b) => (rank(a) - rank(b)) || (b.at - a.at));
+  return [...upcoming, ...recent].slice(0, limit);
+}
+function renderImpactCard(event, compact = false) {
+  const model = calendarImpactModel(event);
+  if (!model) return "";
+  const released = event.at <= Date.now();
+  const actualN = macroParseNumber(event.actual), estimateN = macroParseNumber(event.estimate);
+  const liveKey = released && actualN != null && estimateN != null && Math.abs(actualN - estimateN) > 1e-9
+    ? (actualN > estimateN ? "high" : "low") : null;
+  const when = event.timePrecision === "date"
+    ? tx("日期待定","Date TBD")
+    : `${calendarFormatBeijing(event.at,{month:"2-digit",day:"2-digit"})} ${calendarFormatBeijing(event.at,{hour:"2-digit",minute:"2-digit",hour12:false})} ${tx("北京","Beijing")}`;
+  const impLabel = (CALENDAR_IMPORTANCE.find(([k]) => k === event.importance) || ["low", tx("低","Low"), "Low"])[1];
+  const head = CALENDAR_IMPACT_ASSETS.map(([asset,zh,en]) => `<th class="asset-${asset}">${tx(zh,en)}</th>`).join("");
+  const row = (key, label) => {
+    const dirs = model[key];
+    const cells = CALENDAR_IMPACT_ASSETS.map(([asset]) => {
+      const dir = calendarImpactDir(dirs[asset]);
+      return `<td class="${dir.kind} asset-${asset}">${dir.label}</td>`;
+    }).join("");
+    return `<tr class="${liveKey === key ? "is-live" : ""}"><th>${tx(label[0],label[1])}${liveKey === key ? `<em>${tx("已公布","Released")}</em>` : ""}</th>${cells}</tr>`;
+  };
+  const actualLine = released && event.actual
+    ? `<p class="ic-impact-actual">${tx("已公布","Released")} <b>${calendarEscape(String(event.actual))}</b>${estimateN != null ? ` · ${tx("预期","Est")} ${calendarEscape(String(event.estimate))}` : ""}</p>`
+    : "";
+  return `<article class="ic-impact-card${compact ? " is-compact" : ""}">
+    <header class="ic-impact-top">
+      ${calendarFlagHtml(event.country)}
+      <div class="ic-impact-title"><b>${calendarEscape(calendarEventTitle(event.title))}</b><span>${calendarEscape(when)} · ${tx("影响力","Impact")} ${calendarEscape(model.label)} · ${tx("重要等级","Importance")} ${calendarEscape(impLabel)}</span></div>
+      <span class="cal-impact imp-${event.importance}" title="${tx(impLabel, impLabel)}">${calendarImportanceDots(event)}<em>${calendarEscape(impLabel)}</em></span>
+    </header>
+    ${actualLine}
+    <table class="ic-impact-matrix">
+      <thead><tr><th>${tx("情景","Scenario")}</th>${head}</tr></thead>
+      <tbody>${row("high", ["高于预期","Above est"])}${row("low", ["低于预期","Below est"])}</tbody>
+    </table>
+    ${compact ? "" : `<p class="ic-impact-note">${calendarEscape(model.note)}</p>`}
+  </article>`;
+}
+
+function renderCalendarEventRow(event) {
+  const pickKey = macroCalendarPickKey(event);
+  const isPicked = macroCalendarPicks.has(pickKey);
+  const country = calendarCountry(event.country);
+  const category = calendarCategoryMeta(event.category);
+  const [label, read, hot] = calendarWindow(event);
+  // Primary line: Beijing wall-clock date + time. Secondary line: event local time / ET / UTC.
+  const beijingDate = event.timePrecision === "date" ? tx("日期待定","Date TBD") : calendarFormatBeijing(event.at,{month:"numeric",day:"numeric"});
+  const beijingTime = event.timePrecision === "date" ? tx("--","--") : calendarFormatBeijing(event.at,{hour:"2-digit",minute:"2-digit",hour12:false});
+  const refZone = investmentCalendarTimeZone === "local" ? calendarLocalZone(event.country) : investmentCalendarTimeZone;
+  const refLabel = investmentCalendarTimeZone === "local" ? calendarLocalLabel(event.country) : investmentCalendarTimeZone === "America/New_York" ? tx("美东","ET") : "UTC";
+  const localDate = event.timePrecision === "date" ? tx("待定","TBD") : calendarFormatInZone(event.at,refZone,{month:"numeric",day:"numeric"});
+  const localTime = event.timePrecision === "date" ? tx("--","--") : calendarFormatInZone(event.at,refZone,{hour:"2-digit",minute:"2-digit",hour12:false});
+  const eventCountdown = event.timePrecision === "date" ? tx("官方已给日期","Official date") : event.at < Date.now() ? tx("已发布","Released") : `${tx("距今","In ")} ${macroCountdown(event.at)}`;
+  const met = (value, field) => {
+    const placeholder = field==="actual"
+      ? (event.at > Date.now() && event.category==="macro" ? tx("待公布","Pending") : event.category==="liquidity" ? tx("操作后公布","After op") : tx("不适用","N/A"))
+      : field==="estimate"
+      ? (event.category==="macro" ? tx("无免费共识","No consensus") : tx("不适用","N/A"))
+      : (event.category==="macro" ? tx("官方未提供","—") : tx("不适用","N/A"));
+    return (value===null||value===undefined||value==="")
+      ? `<span class="ic-met-val empty">${calendarEscape(placeholder)}</span>`
+      : `<span class="ic-met-val">${calendarEscape(String(value))}</span>`;
+  };
+  return `<li class="cal-event${hot?" is-hot":""}${isPicked?" is-picked":""}" data-category="${calendarEscape(event.category||"")}">
+    <label class="cal-pick" data-pin-label="${calendarEscape(tx("关注","Pin"))}" data-pinned-label="${calendarEscape(tx("已关注","Pinned"))}" title="${calendarEscape(tx("显示在未来的宏观日历","Pin to upcoming macro calendar"))}">
+      <input type="checkbox" data-cal-pick="${calendarEscape(pickKey)}"${isPicked?" checked":""}>
+      <i class="cal-pick-ui"></i>
+    </label>
+    <div class="cal-when">
+      <span class="cal-datetime"><span class="cal-date">${calendarEscape(beijingDate)}</span><span class="cal-time">${calendarEscape(beijingTime)}</span></span>
+      <span class="cal-localtime">${calendarEscape(refLabel)} ${calendarEscape(localDate)} ${calendarEscape(localTime)}</span>
+      <span class="cal-countdown calendar-countdown" data-calendar-at="${Number(event.at)}" data-calendar-time-precision="${calendarEscape(event.timePrecision||"time")}">${eventCountdown}</span>
+    </div>
+    ${calendarFlagHtml(event.country)}
+    <div class="cal-main">
+      <div class="cal-name"><span class="cal-cat ${category.cls}">${calendarEscape(category.label)}</span>${calendarEscape(calendarEventTitle(event.title))}${event.fallback?"<em class=\"cal-fallback\">节奏回退</em>":""}</div>
+      <div class="cal-sub">${calendarEscape(event.source||"--")}</div>
+    </div>
+    <div class="cal-impact imp-${event.importance}" title="${event.importance==="high"?tx("高重要","High"):event.importance==="medium"?tx("中重要","Medium"):tx("低重要","Low")}">${calendarImportanceDots(event)}</div>
+    <span class="ic-met is-actual"><b>${tx("今值","Act")}</b>${met(event.actual,"actual")}</span>
+    <span class="ic-met is-est"><b>${tx("预期","Est")}</b>${met(event.estimate,"estimate")}</span>
+    <span class="ic-met is-prev"><b>${tx("前值","Prev")}</b>${met(event.previous,"previous")}</span>
+    <div class="cal-read ${hot?"is-hot":""}"><b>${label}</b><span title="${calendarEscape(read)}">${calendarEscape(read)}</span></div>
+  </li>`;
+}
+function renderCalendarField(kind, label, options, selected) {
+  const open = calendarOpenMenu === kind;
+  const valueText = selected.size === 0
+    ? tx("全部","All")
+    : selected.size === 1
+    ? (options.find((option) => option.key === [...selected][0])?.label || tx("已选 1 项","1 selected"))
+    : tx(`已选 ${selected.size} 项`, `${selected.size} selected`);
+  const query = String(calendarMenuSearch[kind] || "").trim().toLowerCase();
+  const rows = options.filter((option) => !query || `${option.label} ${option.key}`.toLowerCase().includes(query));
+  return `<div class="ic-field" data-field="${kind}">
+    <span class="ic-field-label">${calendarEscape(label)}</span>
+    <button type="button" class="ic-select${selected.size?" has-value":""}" data-menu-toggle="${kind}">
+      <span class="ic-select-value">${calendarEscape(valueText)}</span><i class="ic-caret${open?" up":""}"></i>
+    </button>
+    <div class="ic-menu"${open?"":" hidden"}>
+      <div class="ic-menu-head">
+        <input type="search" class="ic-menu-search" data-menu-search="${kind}" value="${calendarEscape(calendarMenuSearch[kind]||"")}" placeholder="${tx("搜索…","Search…")}" autocomplete="off">
+        <div class="ic-menu-actions"><button type="button" data-menu-all="${kind}">${tx("全选","All")}</button><button type="button" data-menu-clear="${kind}">${tx("全部清除","Clear")}</button></div>
+      </div>
+      <ul class="ic-menu-list">${rows.length
+        ? rows.map((option) => `<li data-search-text="${calendarEscape(`${option.label} ${option.key}`.toLowerCase())}"><label class="ic-opt"><input type="checkbox" data-opt-field="${kind}" data-opt-key="${calendarEscape(option.key)}"${selected.has(option.key)?" checked":""}><span class="ic-opt-label">${option.html || calendarEscape(option.label)}</span>${option.count!=null?`<em>${option.count}</em>`:""}</label></li>`).join("")
+        : `<li class="ic-menu-empty">${tx("无匹配项","No match")}</li>`}</ul>
+    </div>
+  </div>`;
+}
+function renderReleasedDataField(kind, label, options, selected) {
+  const open = releasedDataOpenMenu === kind;
+  const valueText = selected.size === 0
+    ? tx("全部","All")
+    : selected.size === 1
+    ? (options.find((option) => option.key === [...selected][0])?.label || tx("已选 1 项","1 selected"))
+    : tx(`已选 ${selected.size} 项`, `${selected.size} selected`);
+  const query = String(releasedDataMenuSearch[kind] || "").trim().toLowerCase();
+  const rows = options.filter((option) => !query || `${option.label} ${option.key}`.toLowerCase().includes(query));
+  return `<div class="ic-field rd-field" data-field="${kind}">
+    <span class="ic-field-label">${calendarEscape(label)}</span>
+    <button type="button" class="ic-select${selected.size?" has-value":""}" data-released-menu-toggle="${kind}">
+      <span class="ic-select-value">${calendarEscape(valueText)}</span><i class="ic-caret${open?" up":""}"></i>
+    </button>
+    <div class="ic-menu"${open?"":" hidden"}>
+      <div class="ic-menu-head">
+        <input type="search" class="ic-menu-search" data-released-menu-search="${kind}" value="${calendarEscape(releasedDataMenuSearch[kind]||"")}" placeholder="${tx("搜索…","Search…")}" autocomplete="off">
+        <div class="ic-menu-actions"><button type="button" data-released-menu-all="${kind}">${tx("全选","All")}</button><button type="button" data-released-menu-clear="${kind}">${tx("全部清除","Clear")}</button></div>
+      </div>
+      <ul class="ic-menu-list">${rows.length
+        ? rows.map((option) => `<li data-search-text="${calendarEscape(`${option.label} ${option.key}`.toLowerCase())}"><label class="ic-opt"><input type="checkbox" data-released-opt-field="${kind}" data-released-opt-key="${calendarEscape(option.key)}"${selected.has(option.key)?" checked":""}><span class="ic-opt-label">${option.html || calendarEscape(option.label)}</span>${option.count!=null?`<em>${option.count}</em>`:""}</label></li>`).join("")
+        : `<li class="ic-menu-empty">${tx("无匹配项","No match")}</li>`}</ul>
+    </div>
+  </div>`;
+}
 function renderInvestmentCalendar(data) {
   investmentCalendarData = data || investmentCalendarData;
   let card = $("investmentCalendarCard");
@@ -10516,49 +11430,247 @@ function renderInvestmentCalendar(data) {
     card = document.createElement("section");
     card.id = "investmentCalendarCard";
     card.className = "card investment-calendar-card";
-    const fed = $("fedMonitorCard"), anchor = $("fearGreedGauge");
-    if (fed) fed.before(card); else if (anchor) anchor.after(card); else document.querySelector("main")?.append(card);
+    // 阅读顺序：BTC 多因子研究 → 宏观经济数据 → 投资日历 → 宏观与情绪。
+    const released = $("releasedDataCard"),
+      research = $("researchOutlookCard"),
+      fed = $("fedMonitorCard"),
+      anchor = $("fearGreedGauge");
+    if (released) released.after(card);
+    else if (research) research.after(card);
+    else if (fed) fed.before(card);
+    else if (anchor) anchor.after(card);
+    else document.querySelector("main")?.append(card);
   }
   if (!card) return;
-  const filteredEvents = (investmentCalendarData?.events || []).filter((event) => investmentCalendarFilter === "all" || event.category === investmentCalendarFilter || (investmentCalendarFilter === "high" && event.importance === "high"));
-  const start=Date.now()-24*3_600_000, end=Date.now()+5*86_400_000;
-  const events = investmentCalendarExpanded ? filteredEvents : filteredEvents.filter(event => event.at >= start && event.at < end);
-  const hiddenCount=Math.max(0, filteredEvents.length-events.length);
-  const tzLabel = investmentCalendarTimeZone === "UTC" ? "UTC" : "北京时间 UTC+8";
-  const nearestHigh = filteredEvents.find((event) => event.importance === "high" && event.at >= Date.now());
-  const [riskLabel, riskText] = nearestHigh ? calendarWindow(nearestHigh) : ["风险平稳", "未来列表内暂无高重要性宏观事件"];
-  let previousDay = "";
-  const rows = events.map((event) => {
-    const day = calendarFormat(event.at, { year:"numeric", month:"long", day:"numeric", weekday:"short" });
-    const dateRow = day === previousDay ? "" : `<tr class="calendar-date-row"><td colspan="8">${calendarEscape(day)}</td></tr>`;
-    previousDay = day;
-    const [label, read, hot] = calendarWindow(event), stars = event.importance === "high" ? 3 : event.importance === "medium" ? 2 : 1;
-    const unavailable = (field) => {
-      if (field === "actual") return event.at > Date.now() && event.category === "macro" ? tx("待公布", "Pending") : event.category === "liquidity" ? tx("操作后公布", "After operation") : tx("不适用", "N/A");
-      if (field === "estimate") return event.category === "macro" ? tx("无免费共识", "No free consensus") : tx("不适用", "N/A");
-      return event.category === "macro" ? tx("官方日程未提供", "Not in official calendar") : tx("不适用", "N/A");
-    };
-    const val = (value, field, cls = "") => value === null || value === undefined || value === "" ? `<span class="calendar-value empty" title="${calendarEscape(unavailable(field))}">${calendarEscape(unavailable(field))}</span>` : `<span class="calendar-value ${cls}">${calendarEscape(value)}</span>`;
-    const market = event.country === "BTC" ? ["₿", "BTC", "btc"] : event.country === "OIL" ? ["OIL", tx("能源", "Energy"), "energy"] : event.country === "GLOBAL" ? ["GLB", tx("全球", "Global"), "global"] : ["US", tx("美元", "USD"), ""];
-    const eventTime = event.timePrecision === "date" ? tx("当日待定", "Time TBD") : calendarFormat(event.at,{hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false});
-    const eventCountdown = event.timePrecision === "date" ? tx("官方已给日期", "Official date") : event.at < Date.now() ? tx("已发布 / 已过期", "Released / passed") : `${tx("距今", "In ")} ${macroCountdown(event.at)}`;
-    return `${dateRow}<tr><td><div class="calendar-time">${eventTime}<small class="calendar-countdown" data-calendar-at="${Number(event.at)}" data-calendar-time-precision="${calendarEscape(event.timePrecision || "time")}">${eventCountdown}</small></div></td><td><div class="calendar-market"><span class="calendar-flag ${market[2]}">${market[0]}</span>${market[1]}</div></td><td><div class="calendar-event-title">${calendarEscape(calendarEventTitle(event.title))}${event.fallback ? "<small>节奏回退</small>" : ""}</div><small>${calendarEscape(event.source || "--")}</small></td><td><span class="calendar-impact ${event.importance}"><b>★</b><b>★</b><b>★</b></span></td><td>${val(event.actual,"actual","actual")}</td><td>${val(event.estimate,"estimate")}</td><td>${val(event.previous,"previous")}</td><td><div class="calendar-btc-read ${hot ? "high" : ""}"><b>${label}</b>${calendarEscape(read)}</div></td></tr>`;
-  }).join("");
-  const source = investmentCalendarData?.provider?.finnhubConfigured ? (investmentCalendarData.provider.finnhubAvailable ? "Finnhub 已接入" : "Finnhub 暂不可用 · 官方回退") : "官方日历 · 财政部 · EIA · Deribit";
-  card.innerHTML = `<div class="investment-calendar-head"><div><div class="investment-calendar-kicker"><i></i>BTC EVENT LAYER</div><h2>${tx("投资日历", "Investment calendar")}</h2><p>${tx("将美元流动性、宏观、能源与避险、BTC 原生事件放在同一时间轴。黄金、原油与波动率属于市场环境读数，不伪装成单一买卖建议。", "One timeline for dollar liquidity, macro, energy/risk and BTC-native events. Gold, oil and volatility remain market context—not standalone trade calls.")}</p></div><div class="investment-calendar-actions"><button data-calendar-filter="all" class="${investmentCalendarFilter === "all" ? "active" : ""}">${tx("全部", "All")}</button><button data-calendar-filter="high" class="${investmentCalendarFilter === "high" ? "active" : ""}">${tx("高重要性", "High impact")}</button><button data-calendar-filter="liquidity" class="${investmentCalendarFilter === "liquidity" ? "active" : ""}">${tx("流动性", "Liquidity")}</button><button data-calendar-filter="macro" class="${investmentCalendarFilter === "macro" ? "active" : ""}">${tx("宏观", "Macro")}</button><button data-calendar-filter="energy" class="${investmentCalendarFilter === "energy" ? "active" : ""}">${tx("原油", "Oil")}</button><button data-calendar-filter="risk" class="${investmentCalendarFilter === "risk" ? "active" : ""}">${tx("避险", "Risk")}</button><button data-calendar-filter="crypto" class="${investmentCalendarFilter === "crypto" ? "active" : ""}">${tx("加密期权", "Crypto options")}</button><button data-calendar-filter="chain" class="${investmentCalendarFilter === "chain" ? "active" : ""}">${tx("BTC 链上", "BTC chain")}</button><button data-calendar-zone="America/New_York" class="${investmentCalendarTimeZone === "America/New_York" ? "active" : ""}">ET</button><button data-calendar-zone="UTC" class="${investmentCalendarTimeZone === "UTC" ? "active" : ""}">UTC</button><span class="calendar-source">${source}</span></div></div><div class="investment-calendar-toolbar"><div class="calendar-risk-callout"><b class="${nearestHigh ? "" : "safe"}">${riskLabel}</b><span>${riskText}</span></div><span class="calendar-time-note">${tx("所有事件服务端以 UTC 存储 · 当前显示：", "Events are stored in UTC · Displaying: ")}${tzLabel}</span></div><div class="investment-calendar-scroll"><table class="investment-calendar-table"><colgroup><col style="width:12%"><col style="width:9%"><col style="width:27%"><col style="width:9%"><col style="width:10%"><col style="width:10%"><col style="width:9%"><col style="width:24%"></colgroup><thead><tr><th>${tx("时间", "Time")}</th><th>${tx("市场", "Market")}</th><th>${tx("事件", "Event")}</th><th>${tx("重要性", "Impact")}</th><th>${tx("今值", "Actual")}</th><th>${tx("预测值", "Estimate")}</th><th>${tx("前值", "Previous")}</th><th>${tx("BTC 风险读数", "BTC risk read")}</th></tr></thead><tbody>${rows || `<tr><td class="calendar-empty" colspan="8">${tx("日历暂不可用，将自动重试。", "Calendar unavailable; retrying automatically.")}</td></tr>`}</tbody></table></div><footer><span>${calendarEscape(investmentCalendarData?.disclaimer || "")}</span><span>${investmentCalendarData?.cached ? tx("缓存数据", "Cached") : tx("刚更新", "Updated")}</span></footer>`;
-  const actionBar=card.querySelector(".investment-calendar-actions");
-  const legacyZone=card.querySelector('[data-calendar-zone="America/New_York"]');
-  if (legacyZone) { legacyZone.dataset.calendarZone="Asia/Shanghai"; legacyZone.textContent=tx("北京时间", "Beijing"); legacyZone.classList.toggle("active", investmentCalendarTimeZone === "Asia/Shanghai"); }
-  const expandButton=document.createElement("button");
-  expandButton.type="button"; expandButton.className="calendar-expand";
-  expandButton.textContent=investmentCalendarExpanded ? tx("收起至近 5 天", "Show 5 days") : tx(`展开全部${hiddenCount ? `（另 ${hiddenCount} 项）` : ""}`, hiddenCount ? `Show all (${hiddenCount} more)` : "Show all");
-  actionBar?.insertBefore(expandButton, legacyZone || null);
-  const detail=document.createElement("span"); detail.className="calendar-treasury-note";
-  detail.textContent=tx("国债说明：Note 通常为 2–10 年中期国债；Bond 通常为 20–30 年长期国债。日历仅保留中长期券拍卖，已过滤高频短票 Bill。", "Treasury note: usually 2–10 years; bond: usually 20–30 years. High-frequency bills are filtered out.");
-  card.querySelector(".investment-calendar-toolbar")?.append(detail);
-  card.querySelectorAll("[data-calendar-filter]").forEach((button) => button.addEventListener("click", () => { investmentCalendarFilter = button.dataset.calendarFilter; renderInvestmentCalendar(investmentCalendarData); }));
-  card.querySelectorAll("[data-calendar-zone]").forEach((button) => button.addEventListener("click", () => { investmentCalendarTimeZone = button.dataset.calendarZone; renderInvestmentCalendar(investmentCalendarData); }));
-  expandButton.addEventListener("click", () => { investmentCalendarExpanded=!investmentCalendarExpanded; renderInvestmentCalendar(investmentCalendarData); });
+
+  const allEvents = investmentCalendarData?.events || [];
+  const [rangeStart, rangeEnd] = calendarRangeWindow(investmentCalendarRange);
+  // Counts are computed over the time window only, so the menus keep showing how
+  // many events each option would add even while other filters are active.
+  const timeFiltered = allEvents.filter((event) => event.at >= rangeStart && event.at < rangeEnd);
+  const events = timeFiltered
+    .filter(investmentCalendarMatchesSelectors)
+    .sort((a, b) => a.at - b.at);
+  const visibleEvents = events.slice(0, investmentCalendarVisibleLimit);
+  const countBy = (list, pick) => list.reduce((acc, event) => { const key = pick(event); acc.set(key, (acc.get(key) || 0) + 1); return acc; }, new Map());
+  const countryCounts = countBy(timeFiltered, (event) => event.country || "GLOBAL");
+  const categoryCounts = countBy(timeFiltered, (event) => event.category || "macro");
+  const importanceCounts = countBy(timeFiltered, (event) => event.importance || "low");
+
+  const nearestHigh = events.find((event) => event.importance === "high" && event.at >= Date.now())
+    || timeFiltered.find((event) => event.importance === "high" && event.at >= Date.now());
+  const [riskLabel, riskText] = nearestHigh ? calendarWindow(nearestHigh) : ["风险平稳", "当前时间窗内暂无高重要性事件"];
+
+  const provider = investmentCalendarData?.provider || {};
+  const sourceText = provider.domesticAvailable
+    ? tx("东方财富 · TradingView · FinanceCalendar · 美联储/BLS · 财政部 · EIA · Deribit", "Eastmoney · TradingView · FinanceCalendar · Fed/BLS · Treasury · EIA · Deribit")
+    : (provider.finnhubConfigured ? "Finnhub 已接入" : tx("官方日历 · 财政部 · EIA · Deribit", "Official · Treasury · EIA · Deribit"));
+  const fetchedAt = investmentCalendarData?.fetchedAt;
+  const updatedLabel = fetchedAt ? `${tx("更新于", "Updated")} ${calendarFormatBeijing(fetchedAt, { month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit", hour12:false })}` : "";
+
+  const todayKey = calendarBeijingDayKey(Date.now());
+  const dayKey = (at) => calendarFormatBeijing(at, { year:"numeric", month:"long", day:"numeric", weekday:"short" });
+  let previousDay = "", listHtml = "";
+  if (!events.length) {
+    listHtml = `<li class="cal-empty">${tx("该时间范围内暂无符合条件的更新。", "No events match the current filters in this range.")}</li>`;
+  } else {
+    listHtml += `<li class="cal-head">
+      <span>${tx("时间","Time")}</span><span>${tx("国家","Country")}</span><span>${tx("事件","Event")}</span><span>${tx("重要性","Impact")}</span>
+      <span>${tx("今值","Actual")}</span><span>${tx("预期","Forecast")}</span><span>${tx("前值","Previous")}</span><span>${tx("影响","Note")}</span>
+    </li>`;
+  }
+  for (const event of visibleEvents) {
+    const day = dayKey(event.at);
+    if (day !== previousDay) {
+      previousDay = day;
+      const isToday = calendarBeijingDayKey(event.at) === todayKey;
+      listHtml += `<li class="cal-day"><span class="cal-day-name">${calendarEscape(day)}</span>${isToday ? '<em class="cal-day-today">今天</em>' : ""}</li>`;
+    }
+    listHtml += renderCalendarEventRow(event);
+  }
+
+  const tzButtons = [
+    ["local", tx("当地","Local")], ["America/New_York", tx("美东","ET")], ["UTC", "UTC"],
+  ];
+  const countryOrder = ["US","CN","EU","JP","UK","DE","FR","BR","AU","CA","KR","IN","RU","CH","IT","ES","MX","TR","ZA","NZ","SG","HK","TW","OPEC","GLOBAL","BTC","OIL"];
+  const countryOptions = [...countryCounts.entries()].sort((a, b) => {
+    const ia = countryOrder.indexOf(a[0]), ib = countryOrder.indexOf(b[0]);
+    const ra = ia < 0 ? 1e9 : ia, rb = ib < 0 ? 1e9 : ib;
+    return ra !== rb ? ra - rb : String(a[0]).localeCompare(String(b[0]));
+  }).map(([code, count]) => {
+    const info = calendarCountry(code);
+    return { key:code, label:info.label, count, html:`${info.emoji?`<i class="ic-opt-flag">${info.emoji}</i>`:""}<span>${calendarEscape(info.label)}</span>` };
+  });
+  const categoryOptions = CALENDAR_CATEGORIES.filter(([key]) => categoryCounts.get(key)).map(([key, zh, en, cls]) => ({
+    key, label:tx(zh,en), count:categoryCounts.get(key), html:`<i class="ic-opt-dot ${cls}"></i><span>${tx(zh,en)}</span>`,
+  }));
+  const importanceOptions = CALENDAR_IMPORTANCE.filter(([key]) => importanceCounts.get(key)).map(([key, zh, en]) => ({
+    key, label:tx(zh,en), count:importanceCounts.get(key),
+    html:`<i class="ic-opt-stars imp-${key}">${[1,2,3].map((n) => `<i class="ic-dot${n<=(key==="high"?3:key==="medium"?2:1)?" on":""}"></i>`).join("")}</i><span>${tx(zh,en)}</span>`,
+  }));
+  const rangeSummary = investmentCalendarRange === "custom"
+    ? tx("自定义区间","Custom range")
+    : tx(`本区间 ${timeFiltered.length} 项 / 全量 ${allEvents.length} 项`, `${timeFiltered.length} in range / ${allEvents.length} total`);
+  const rankText = `${rangeSummary} · ${tx(`筛选后 ${events.length} 项，已显示 ${visibleEvents.length} 项`, `${events.length} filtered, ${visibleEvents.length} shown`)}`;
+  const hasMoreEvents = visibleEvents.length < events.length;
+  const nextVisibleCount = investmentCalendarVisibleLimit <= 6 ? Math.min(10, events.length) : Math.min(investmentCalendarVisibleLimit + 10, events.length);
+  card.innerHTML = `
+    <header class="ic-header">
+      <div class="ic-title">
+        <div class="ic-kicker"><i></i>ECONOMIC CALENDAR · 投资日历</div>
+        <h2>${tx("投资日历", "Investment calendar")}</h2>
+        <p>${tx("美元流动性、全球宏观、能源与避险、BTC 原生事件同处一条时间轴。默认按北京时间排序，下方小字为事件当地时间。", "One timeline for dollar liquidity, global macro, energy/risk and BTC-native events. Sorted by Beijing time; the small line shows the event's local time.")}</p>
+      </div>
+      <div class="ic-meta">
+        <span class="ic-source">${calendarEscape(sourceText)}</span>
+        ${updatedLabel ? `<span class="ic-updated">${updatedLabel}</span>` : ""}
+      </div>
+    </header>
+
+    <div class="ic-toolbar">
+      <div class="ic-ranges">
+        ${CALENDAR_RANGES.map(([key,zh,en]) => `<button type="button" class="ic-range${investmentCalendarRange===key?" active":""}" data-calendar-range="${key}">${tx(zh,en)}</button>`).join("")}
+      </div>
+      <button type="button" class="ic-filter-toggle" data-calendar-toggle-filters>${investmentCalendarShowFilters ? tx("隐藏筛选器","Hide filters") : tx("显示筛选器","Show filters")}<i class="ic-caret${investmentCalendarShowFilters?" up":""}"></i></button>
+    </div>
+
+    ${investmentCalendarRange === "custom" ? `<div class="ic-custom">
+      <label>${tx("起","From")}<input type="date" data-calendar-from value="${calendarEscape(investmentCalendarFrom)}"></label>
+      <label>${tx("止","To")}<input type="date" data-calendar-to value="${calendarEscape(investmentCalendarTo)}"></label>
+    </div>` : ""}
+
+    ${investmentCalendarShowFilters ? `<div class="ic-fields">
+      ${renderCalendarField("region", tx("国家及地区","Country / region"), countryOptions, investmentCalendarRegions)}
+      ${renderCalendarField("category", tx("类别领域","Category"), categoryOptions, investmentCalendarCategories)}
+      ${renderCalendarField("importance", tx("重要性","Importance"), importanceOptions, investmentCalendarImportance)}
+    </div>` : ""}
+
+    ${renderInvestmentCalendarMajorEvents()}
+
+    <div class="ic-subbar">
+      <span class="ic-clock">${tx("当前时间","Now")} <b data-calendar-clock>--:--:--</b> <em>GMT+8:00</em></span>
+      <span class="ic-range-note">${calendarEscape(rankText)}</span>
+      <span class="ic-tz-wrap"><i>${tx("参考时区","Reference")}</i>${tzButtons.map(([zone,label]) => `<button type="button" class="ic-tz-btn${investmentCalendarTimeZone===zone?" active":""}" data-calendar-zone="${zone}">${label}</button>`).join("")}</span>
+    </div>
+
+    <div class="ic-risk ${nearestHigh?"is-hot":"is-safe"}">
+      <span class="ic-risk-label">${riskLabel}</span>
+      <span class="ic-risk-text">${calendarEscape(riskText)}</span>
+    </div>
+
+    <ul class="ic-list">${listHtml}</ul>
+    ${hasMoreEvents ? `<div class="ic-list-more"><button type="button" data-calendar-more>${investmentCalendarVisibleLimit <= 6 ? tx(`展开至 ${nextVisibleCount} 条`, `Show ${nextVisibleCount}`) : tx("继续展开 10 条", "Show 10 more")}</button><span>${tx(`已显示 ${visibleEvents.length} / ${events.length} 条`, `${visibleEvents.length} / ${events.length} shown`)}</span></div>` : ""}
+
+    <footer class="ic-foot">
+      <span class="ic-treasury-note">${tx("国债说明：Note 通常为 2–10 年中期国债；Bond 通常为 20–30 年长期国债。已过滤高频短票 Bill。影响预测为宏观常识映射，不构成投资建议。","Treasury note: 2–10y; bond: 20–30y. High-frequency bills filtered out. Impact playbook is general macro mapping, not investment advice.")}</span>
+    </footer>`;
+
+  // —— Toolbar wiring ——
+  card.querySelectorAll("[data-calendar-range]").forEach((button) => button.addEventListener("click", () => {
+    investmentCalendarRange = button.dataset.calendarRange;
+    resetInvestmentCalendarVisibleLimit();
+    calendarOpenMenu = null;
+    renderInvestmentCalendar(investmentCalendarData);
+  }));
+  card.querySelector("[data-calendar-toggle-filters]")?.addEventListener("click", () => {
+    investmentCalendarShowFilters = !investmentCalendarShowFilters;
+    calendarOpenMenu = null;
+    renderInvestmentCalendar(investmentCalendarData);
+  });
+  card.querySelectorAll("[data-calendar-zone]").forEach((button) => button.addEventListener("click", () => {
+    investmentCalendarTimeZone = button.dataset.calendarZone;
+    renderInvestmentCalendar(investmentCalendarData);
+  }));
+  card.querySelector("[data-calendar-from]")?.addEventListener("change", (e) => { investmentCalendarFrom = e.target.value; resetInvestmentCalendarVisibleLimit(); renderInvestmentCalendar(investmentCalendarData); });
+  card.querySelector("[data-calendar-to]")?.addEventListener("change", (e) => { investmentCalendarTo = e.target.value; resetInvestmentCalendarVisibleLimit(); renderInvestmentCalendar(investmentCalendarData); });
+  card.querySelector("[data-calendar-more]")?.addEventListener("click", () => {
+    investmentCalendarVisibleLimit = investmentCalendarVisibleLimit <= 6 ? 10 : investmentCalendarVisibleLimit + 10;
+    renderInvestmentCalendar(investmentCalendarData);
+  });
+  // —— Filter menus ——
+  card.querySelectorAll("[data-menu-toggle]").forEach((button) => button.addEventListener("click", () => {
+    const kind = button.dataset.menuToggle;
+    calendarOpenMenu = calendarOpenMenu === kind ? null : kind;
+    renderInvestmentCalendar(investmentCalendarData);
+  }));
+  card.querySelectorAll("[data-menu-search]").forEach((input) => input.addEventListener("input", () => {
+    const kind = input.dataset.menuSearch, query = input.value.trim().toLowerCase();
+    calendarMenuSearch[kind] = input.value;
+    // Filter in place so the caret and focus survive the keystroke.
+    input.closest(".ic-menu")?.querySelectorAll("li[data-search-text]").forEach((row) => {
+      row.hidden = Boolean(query) && !row.dataset.searchText.includes(query);
+    });
+  }));
+  card.querySelectorAll("[data-opt-field]").forEach((box) => box.addEventListener("change", () => {
+    const kind = box.dataset.optField, key = box.dataset.optKey;
+    const target = kind === "region" ? investmentCalendarRegions : kind === "category" ? investmentCalendarCategories : investmentCalendarImportance;
+    if (box.checked) target.add(key); else target.delete(key);
+    resetInvestmentCalendarVisibleLimit();
+    renderInvestmentCalendar(investmentCalendarData);
+  }));
+  card.querySelectorAll("[data-menu-all]").forEach((button) => button.addEventListener("click", () => {
+    const kind = button.dataset.menuAll;
+    const target = kind === "region" ? investmentCalendarRegions : kind === "category" ? investmentCalendarCategories : investmentCalendarImportance;
+    const query = String(calendarMenuSearch[kind] || "").trim().toLowerCase();
+    button.closest(".ic-menu")?.querySelectorAll("[data-opt-key]").forEach((box) => {
+      const row = box.closest("li[data-search-text]");
+      if (query && row?.hidden) return;
+      target.add(box.dataset.optKey);
+    });
+    resetInvestmentCalendarVisibleLimit();
+    renderInvestmentCalendar(investmentCalendarData);
+  }));
+  card.querySelectorAll("[data-menu-clear]").forEach((button) => button.addEventListener("click", () => {
+    const kind = button.dataset.menuClear;
+    const target = kind === "region" ? investmentCalendarRegions : kind === "category" ? investmentCalendarCategories : investmentCalendarImportance;
+    const query = String(calendarMenuSearch[kind] || "").trim().toLowerCase();
+    if (!query) { target.clear(); resetInvestmentCalendarVisibleLimit(); renderInvestmentCalendar(investmentCalendarData); return; }
+    button.closest(".ic-menu")?.querySelectorAll("[data-opt-key]").forEach((box) => {
+      const row = box.closest("li[data-search-text]");
+      if (row?.hidden) return;
+      target.delete(box.dataset.optKey);
+    });
+    resetInvestmentCalendarVisibleLimit();
+    renderInvestmentCalendar(investmentCalendarData);
+  }));
+  // —— Pin events to the macro calendar (max 3) ——
+  card.querySelectorAll("[data-cal-pick]").forEach((box) => box.addEventListener("change", () => {
+    const key = box.dataset.calPick;
+    if (box.checked) {
+      if (macroCalendarPicks.size >= 3) {
+        // 达到上限：移除最早勾选的，保持最多 3 个
+        const first = macroCalendarPicks.values().next().value;
+        macroCalendarPicks.delete(first);
+      }
+      macroCalendarPicks.add(key);
+    } else {
+      macroCalendarPicks.delete(key);
+    }
+    saveMacroCalendarPicks();
+    renderInvestmentCalendar(investmentCalendarData);
+    renderFearGreedGauge();
+    renderReleasedDataCard();
+  }));
+  if (!window.__btcCalendarOutsideClickBound) {
+    window.__btcCalendarOutsideClickBound = true;
+    document.addEventListener("click", (event) => {
+      if (!calendarOpenMenu) return;
+      // Use the dispatch-time path: interacting with a menu re-renders the card,
+      // which detaches event.target, so a live closest() lookup would misfire and
+      // close the menu on every checkbox click.
+      const path = typeof event.composedPath === "function" ? event.composedPath() : [];
+      const insideField = path.some((node) => node && node.classList && node.classList.contains("ic-field") && !node.classList.contains("rd-field"));
+      if (insideField) return;
+      calendarOpenMenu = null;
+      renderInvestmentCalendar(investmentCalendarData);
+    });
+  }
+  refreshInvestmentCalendarClock();
+}
+
+function refreshInvestmentCalendarClock() {
+  const clock = document.querySelector("[data-calendar-clock]");
+  if (clock) clock.textContent = calendarFormatBeijing(Date.now(), { hour:"2-digit", minute:"2-digit", second:"2-digit", hour12:false });
 }
 function refreshInvestmentCalendarCountdowns() {
   document.querySelectorAll(".calendar-countdown[data-calendar-at]").forEach((element) => {
@@ -10567,11 +11679,19 @@ function refreshInvestmentCalendarCountdowns() {
     if (!Number.isFinite(at)) return;
     element.textContent=at < Date.now() ? tx("已发布 / 已过期", "Released / passed") : `${tx("距今", "In ")} ${macroCountdown(at)}`;
   });
+  refreshInvestmentCalendarClock();
 }
-async function loadInvestmentCalendar() {
-  try { const response = await apiFetch("/api/investment-calendar", 12_000), data = await response.json(); if (!response.ok) throw new Error(data.detail || data.error); renderInvestmentCalendar(data); }
+async function loadInvestmentCalendar(force = false) {
+  try { const response = await apiFetch(`/api/investment-calendar${force ? "?refresh=1" : ""}`, 12_000), data = await response.json(); if (!response.ok) throw new Error(data.detail || data.error); renderInvestmentCalendar(data); }
   catch { renderInvestmentCalendar(investmentCalendarData); }
+  // 数据到位后同步刷新「宏观与情绪」与「宏观经济数据」。卡片尚未挂载时跳过，
+  // 交给布局稳定后的补渲染逻辑，避免过早插入被重排丢弃。
+  const fgCard = $("fearGreedGauge");
+  if (fgCard && fgCard.isConnected) renderFearGreedGauge();
+  const releasedCard = $("releasedDataCard");
+  if (releasedCard && releasedCard.isConnected) renderReleasedDataCard();
 }
+loadMacroCalendarPicks();
 loadInvestmentCalendar();
 // Several legacy cards mount asynchronously; run one settled-layout pass so
 // this independent panel is not displaced while those sections are arranging.
@@ -10634,84 +11754,525 @@ function fearGreedView(value) {
     ),
   };
 }
-function renderFearGreedGauge() {
-  const sentiment = fearGreedSentiment;
-  let card = $("fearGreedGauge");
+/* ---- 宏观与情绪 v2.7.2：恐惧贪婪（紧凑）+ 近期宏观日历（联动投资日历）+ 热点新闻 ---- */
+let macroNewsData = null;
+let macroNewsError = null;
+let macroNewsLoading = false;
+let macroCountdownTimer = null;
+// 记录上一拍仍在“未来”的事件，用于侦测“刚刚公布”的瞬间并立刻拉取最新实际值。
+// Tracks which events were still upcoming last tick, so the moment one is released
+// we can immediately refetch the calendar and back-fill the actual value.
+let macroUpcomingIds = new Set();
+// 新闻情绪仅用于界面展示标签，刻意与服务端 newsSentimentScore() 分开：
+// 后者会喂给价格预测模型，改动它会影响模型行为。
+// Display-only news sentiment, deliberately separate from the server's
+// newsSentimentScore() which feeds the price model and must stay stable.
+const NEWS_DISPLAY_BULL = ["etf approval","etf inflow","institutional","accumulat","adoption","partnership","bullish","rally","surge","soar","jump","gain","rises","rise","all-time high","record high","rate cut","dovish","approval","buyback","reserve","买入","增持","采用","合作","利好","上涨","反弹","降息","获批","流入","新高","新高点"];
+const NEWS_DISPLAY_BEAR = ["etf outflow","outflow","hack","exploit","breach","lawsuit","ban","crackdown","liquidation","sell-off","selloff","plunge","slump","drops","drop","falls","fall","decline","sink","sinks","suffer","weak","rate hike","hawkish","fraud","scam","conflict","war","attack","strike","tension","escalat","sanction","tariff","invasion","default","调查","禁令","监管打击","黑客","漏洞","清算","抛售","下跌","利空","加息","流出","诉讼","冲突","战争","制裁","关税","袭击"];
+function newsDisplaySentiment(title) {
+  const t = String(title || "").toLowerCase();
+  const bull = NEWS_DISPLAY_BULL.filter((w) => t.includes(w)).length;
+  const bear = NEWS_DISPLAY_BEAR.filter((w) => t.includes(w)).length;
+  if (bull === bear) return 0;
+  return bull > bear ? 1 : -1;
+}
+function newsCleanTitle(title) {
+  return String(title || "")
+    .replace(/\s*[-–—]\s*[^-–—|]{2,40}$/, "")
+    .replace(/\s*\|\s*[^|]{2,40}$/, "")
+    .trim();
+}
+function newsRelativeTime(at) {
+  if (!Number.isFinite(at)) return "";
+  const mins = Math.max(1, Math.round((Date.now() - at) / 60_000));
+  if (mins < 60) return tx(`${mins} 分钟前`, `${mins}m ago`);
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return tx(`${hours} 小时前`, `${hours}h ago`);
+  return tx(`${Math.round(hours / 24)} 天前`, `${Math.round(hours / 24)}d ago`);
+}
+function renderNewsRow(item) {
+  const sent = newsDisplaySentiment(item.title);
+  const kind = sent > 0 ? "bull" : sent < 0 ? "bear" : "flat";
+  const label = sent > 0 ? tx("利好", "Bullish") : sent < 0 ? tx("利空", "Bearish") : tx("中性", "Neutral");
+  const title = calendarEscape(newsCleanTitle(item.title));
+  const src = calendarEscape(item.source || "--");
+  const time = newsRelativeTime(item.publishedAt);
+  const inner = `<span class="news-title">${title}</span><span class="news-meta"><em>${src}</em>${time ? `<i>${calendarEscape(time)}</i>` : ""}<b class="news-sent ${kind}">${label}</b></span>`;
+  return item.url
+    ? `<li class="news-item ${kind}"><a href="${calendarEscape(item.url)}" target="_blank" rel="noopener noreferrer">${inner}</a></li>`
+    : `<li class="news-item ${kind}">${inner}</li>`;
+}
+async function loadMacroNews(force = false) {
+  if (macroNewsLoading) return;
+  macroNewsLoading = true;
+  try {
+    const response = await apiFetch(`/api/news${force ? "?refresh=1" : ""}`, 12_000);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || data.error);
+    macroNewsData = data;
+    macroNewsError = null;
+  } catch (error) {
+    macroNewsError = error;
+  } finally {
+    macroNewsLoading = false;
+    renderFearGreedGauge();
+  }
+}
+// 指标类别 → 对 BTC 的方向含义。通胀/利率高于预期偏紧缩（利空），低于预期偏宽松（利好）；
+// 失业率反向；就业/增长按“强于预期→紧缩”处理。均为经验映射，非确定性结论。
+function macroIndicatorClass(title) {
+  const t = String(title || "").toLowerCase();
+  if (/失业率|unemploy/.test(t)) return "unemployment";
+  if (/cpi|ppi|pce|物价|通胀|消费者价格|生产者价格|inflation|price index/.test(t)) return "inflation";
+  if (/利率|fomc|rate decision|央行|决议|interest rate|benchmark rate/.test(t)) return "rate";
+  if (/非农|就业|payroll|employment/.test(t)) return "jobs";
+  if (/gdp|零售|销售|retail|gross domestic/.test(t)) return "growth";
+  return null;
+}
+function macroParseNumber(value) {
+  const matched = String(value ?? "").replace(/,/g, "").match(/-?\d+(?:\.\d+)?/);
+  return matched ? parseFloat(matched[0]) : null;
+}
+function macroEventBias(event) {
+  const cls = macroIndicatorClass(event.title);
+  if (!cls) return null;
+  const released = event.actual != null && event.actual !== "" && event.at <= Date.now();
+  const actual = macroParseNumber(event.actual),
+    estimate = macroParseNumber(event.estimate),
+    previous = macroParseNumber(event.previous);
+  if (released && actual != null && estimate != null) {
+    const diff = actual - estimate;
+    const detail = tx(`实际 ${event.actual} vs 预期 ${event.estimate}`, `actual ${event.actual} vs est ${event.estimate}`);
+    const caveat = tx("按“数据超预期→紧缩”的常见逻辑推断，实际方向还取决于当时的市场主线，非确定性结论。", "Inferred from the common 'beat → hawkish' logic; the real direction also depends on the market narrative. Not a certainty.");
+    if (Math.abs(diff) < 1e-9) return { kind: "flat", label: tx("符合预期", "As expected"), tip: tx(`${detail}，符合预期，通常影响有限。`, `${detail}; in line with consensus, usually limited impact.`) };
+    let bearish;
+    if (cls === "unemployment") bearish = diff < 0;
+    else bearish = diff > 0;
+    return bearish
+      ? { kind: "bear", label: tx("利空 BTC", "Bearish BTC"), tip: tx(`${detail}，超预期偏紧缩，通常利空风险资产。`, `${detail}; hotter than expected is typically hawkish and bearish for risk assets.`) + " " + caveat }
+      : { kind: "bull", label: tx("利好 BTC", "Bullish BTC"), tip: tx(`${detail}，不及预期偏宽松，通常利好风险资产。`, `${detail}; cooler than expected is typically dovish and bullish for risk assets.`) + " " + caveat };
+  }
+  if (estimate != null && previous != null) {
+    const diff = estimate - previous;
+    if (Math.abs(diff) < 1e-9) return { kind: "muted", label: tx("预期持平", "Flat consensus"), tip: tx("市场共识与前值持平，方向取决于公布值相对预期的偏差。", "Consensus matches the prior; direction depends on the surprise vs consensus.") };
+    return diff > 0
+      ? { kind: "muted", label: tx("预期升温", "Consensus ↑"), tip: tx("共识预期较前值上升，这是预期变化、不是公布结果。", "Consensus rose vs the prior; this is an expectation, not the release.") }
+      : { kind: "muted", label: tx("预期降温", "Consensus ↓"), tip: tx("共识预期较前值下降，这是预期变化、不是公布结果。", "Consensus fell vs the prior; this is an expectation, not the release.") };
+  }
+  return { kind: "muted", label: tx("待公布", "Pending"), tip: tx("数据尚未公布，等待实际值。", "Not yet released; awaiting the actual value.") };
+}
+function macroImportanceRank(event) {
+  return event.importance === "high" ? 0 : event.importance === "medium" ? 1 : 2;
+}
+function macroHasActual(event) {
+  return event.actual != null && event.actual !== "";
+}
+/* 未来的宏观日历：只显示用户从投资日历勾选的事件（最多 3 个）。
+   未勾选时保持空白，提示用户去投资日历勾选。 */
+function upcomingMacroEvents(limit = 4) {
+  const now = Date.now();
+  return macroCalendarPickedEvents(limit)
+    .filter((event) => event.at > now)
+    .sort((a, b) => a.at - b.at)
+    .slice(0, limit);
+}
+/* 「宏观经济数据」：刚公布的事件，已回填实际值的优先，其次按时间倒序。 */
+function releasedMacroEvents(limit = 8, filters = {}) {
+  const { regions = null, categories = null, importance = null } = filters;
+  const now = Date.now();
+  return (investmentCalendarData?.events || [])
+    .filter((event) => event.category === "macro")
+    .filter((event) => !importance || importance.size === 0 || importance.has(event.importance || "low"))
+    .filter((event) => !regions || regions.size === 0 || regions.has(event.country || "GLOBAL"))
+    .filter((event) => !categories || categories.size === 0 || categories.has(event.category || "macro"))
+    .filter((event) => event.at <= now && event.at >= now - 14 * CALENDAR_DAY)
+    .filter((event) => macroEventBias(event))
+    .sort((a, b) => (Number(macroHasActual(b)) - Number(macroHasActual(a))) || (b.at - a.at))
+    .slice(0, limit);
+}
+/* 右下角「实时数据 · 利好利空」：只取重要性为高（3 点）的事件。 */
+function macroImpactEvents(limit = 2) {
+  const now = Date.now();
+  const pool = (investmentCalendarData?.events || [])
+    .filter((event) => event.importance === "high")
+    .filter((event) => event.category === "macro" || event.category === "energy")
+    .filter((event) => event.at >= now - 18 * 3_600_000 && event.at <= now + 14 * CALENDAR_DAY)
+    .filter((event) => calendarImpactModel(event));
+  const upcoming = pool.filter((event) => event.at >= now).sort((a, b) => a.at - b.at);
+  const recent = pool.filter((event) => event.at < now).sort((a, b) => b.at - a.at);
+  return [...upcoming, ...recent].slice(0, limit);
+}
+function renderMacroCompareRow(event, { compact = false } = {}) {
+  const country = calendarCountry(event.country);
+  const bias = macroEventBias(event);
+  const released = event.at <= Date.now();
+  const bjDate = event.timePrecision === "date" ? tx("待定", "TBD") : calendarFormatBeijing(event.at, { month: "2-digit", day: "2-digit" });
+  const bjTime = event.timePrecision === "date" ? "" : calendarFormatBeijing(event.at, { hour: "2-digit", minute: "2-digit", hour12: false });
+  const countdown = released ? tx("已公布", "Released") : `${tx("距今", "In ")} ${macroCountdown(event.at)}`;
+  const num = (value, field) => {
+    if (value === null || value === undefined || value === "")
+      return `<b class="empty">${field === "actual" ? tx("待更新", "Pending") : tx("—", "—")}</b>`;
+    return `<b>${calendarEscape(String(value))}</b>`;
+  };
+  if (compact) {
+    return `<article class="macro-cmp macro-cmp-compact ${bias ? bias.kind : ""}">
+      <div class="macro-cmp-top">
+        <span class="cal-flag ${country.cls}" title="${calendarEscape(country.label)}">${country.flag}</span>
+        <span class="macro-cmp-title">${calendarEscape(calendarEventTitle(event.title))}</span>
+        <span class="macro-cmp-time"><i>${calendarEscape(bjDate)} ${calendarEscape(bjTime)}</i><em data-macro-at="${Number(event.at)}">${countdown}</em></span>
+      </div>
+      <div class="macro-cmp-metrics">
+        <span class="macro-cmp-met"><i>${tx("预期", "Est")}</i>${num(event.estimate, "estimate")}</span>
+        <span class="macro-cmp-met"><i>${tx("前值", "Prev")}</i>${num(event.previous, "previous")}</span>
+        <span class="macro-cmp-met actual ${released && event.actual ? "is-released" : ""}"><i>${tx("实际", "Act")}</i>${num(event.actual, "actual")}</span>
+        ${bias ? `<span class="macro-cmp-tag ${bias.kind}" title="${calendarEscape(bias.tip)}">${calendarEscape(bias.label)}</span>` : ""}
+      </div>
+    </article>`;
+  }
+  return `<article class="macro-cmp ${bias ? bias.kind : ""}">
+    <div class="macro-cmp-top">
+      <span class="cal-flag ${country.cls}" title="${calendarEscape(country.label)}">${country.flag}</span>
+      <span class="macro-cmp-title">${calendarEscape(calendarEventTitle(event.title))}</span>
+      <span class="macro-cmp-time"><i>${calendarEscape(bjDate)} ${calendarEscape(bjTime)}</i><em data-macro-at="${Number(event.at)}">${countdown}</em></span>
+    </div>
+    <div class="macro-cmp-metrics">
+      <span class="macro-cmp-met"><i>${tx("预期", "Est")}</i>${num(event.estimate, "estimate")}</span>
+      <span class="macro-cmp-met"><i>${tx("前值", "Prev")}</i>${num(event.previous, "previous")}</span>
+      <span class="macro-cmp-met actual ${released && event.actual ? "is-released" : ""}"><i>${tx("实际", "Act")}</i>${num(event.actual, "actual")}</span>
+      ${bias ? `<span class="macro-cmp-tag ${bias.kind}" title="${calendarEscape(bias.tip)}">${calendarEscape(bias.label)}</span>` : ""}
+    </div>
+  </article>`;
+}
+/* 大号倒计时：HH:MM:SS（超过一天则带上天数）。秒级刷新，比「距今 X 分 Y 秒」更醒目。 */
+function macroCountdownClock(at) {
+  const total = Math.max(0, Math.round((at - Date.now()) / 1000)),
+    days = Math.floor(total / 86_400),
+    hours = Math.floor((total % 86_400) / 3_600),
+    minutes = Math.floor((total % 3_600) / 60),
+    seconds = total % 60;
+  const pad = (n) => String(n).padStart(2, "0");
+  const clock = `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
+  return days ? tx(`${days} 天 ${clock}`, `${days}d ${clock}`) : clock;
+}
+/* 影响方向 → BTC 文案。0 视为中性（能源类数据对 BTC 通常无直接方向）。 */
+function macroBtcDirText(dir) {
+  if (dir > 0) return { kind: "bull", text: tx("利好 BTC", "Bullish BTC") };
+  if (dir < 0) return { kind: "bear", text: tx("利空 BTC", "Bearish BTC") };
+  return { kind: "flat", text: tx("中性（无直接方向）", "Neutral (no direct read)") };
+}
+/* 「关注事件 · 实时数据」：突出倒计时与北京时间，附预期/前值/实际，
+   并给出「高于/低于锚点 → 对 BTC 属于利好还是利空」的阈值式解读。
+   锚点优先用「预期」；数据源没有免费共识时退回「前值」，并在文案里注明是前值。 */
+function renderPinnedRelease(event) {
+  const country = calendarCountry(event.country);
+  const model = calendarImpactModel(event);
+  const bias = macroEventBias(event);
+  const released = event.at <= Date.now();
+  const hasActual = released && macroHasActual(event);
+  const actualN = macroParseNumber(event.actual),
+    estimateN = macroParseNumber(event.estimate),
+    previousN = macroParseNumber(event.previous);
+  const hasNumeric = estimateN != null || previousN != null || actualN != null;
+  const isCurated = event.curated === true;
+  const val = (v) => (v === null || v === undefined || v === "" ? tx("—", "—") : calendarEscape(String(v)));
+  const bjDate = event.timePrecision === "date" ? tx("待定", "TBD") : calendarFormatBeijing(event.at, { month: "2-digit", day: "2-digit" });
+  const bjTime = event.timePrecision === "date" ? "" : calendarFormatBeijing(event.at, { hour: "2-digit", minute: "2-digit", hour12: false });
+  const impLabel = (CALENDAR_IMPORTANCE.find(([k]) => k === event.importance) || ["low", tx("低", "Low"), "Low"])[1];
+  const countdown = released ? tx("已公布", "Released") : macroCountdownClock(event.at);
+  const title = calendarEventTitle(event.title || event.name || "");
+  const source = isCurated ? tx("重大事件", "Major event") : (event.source || "--");
+  const kindMap = {
+    bull: { cls: "bull", label: tx("利好 BTC", "Bullish BTC") },
+    bear: { cls: "bear", label: tx("利空 BTC", "Bearish BTC") },
+  };
+  const kind = kindMap[event.kind] || { cls: "flat", label: tx("中性", "Neutral") };
+
+  // 数值类事件：保留预期/前值/实际三列。
+  let metricsHtml = "";
+  if (hasNumeric) {
+    const status = hasActual
+      ? `<span class="ms-pin-badge ${bias ? bias.kind : "flat"}">${calendarEscape(bias ? bias.label : tx("已公布", "Released"))}</span>`
+      : `<span class="ms-pin-badge pending">${tx("待公布", "Pending")}</span>`;
+    metricsHtml = `<div class="ms-pin-metrics">
+      <span class="ms-pin-met"><i>${tx("预期", "Est")}</i><b>${val(event.estimate)}</b></span>
+      <span class="ms-pin-met"><i>${tx("前值", "Prev")}</i><b>${val(event.previous)}</b></span>
+      <span class="ms-pin-met actual"><i>${tx("实际", "Act")}</i><b class="${hasActual ? "on" : "empty"}">${hasActual ? val(event.actual) : tx("待更新", "Pending")}</b>${status}</span>
+    </div>`;
+  }
+
+  // 解读区：curated 重大事件优先展示人工 judge；数值类事件展示阈值模型。
+  let analysis;
+  if (isCurated && event.judge) {
+    analysis = `<div class="ms-pin-analysis">
+      <p class="ms-pin-note">${tx("事件解读", "Read-through")}<em class="${kind.cls}">${calendarEscape(kind.label)}</em></p>
+      <p class="ms-pin-tip">${calendarEscape(event.judge)}</p>
+    </div>`;
+  } else if (model && hasNumeric) {
+    const anchorRaw = estimateN != null ? event.estimate : previousN != null ? event.previous : null;
+    const anchorIsEstimate = estimateN != null;
+    const highWording = anchorIsEstimate ? tx("高于预期", "above consensus") : tx("高于前值", "above prior");
+    const lowWording = anchorIsEstimate ? tx("低于预期", "below consensus") : tx("低于前值", "below prior");
+    const liveKey = hasActual && actualN != null && estimateN != null && Math.abs(actualN - estimateN) > 1e-9
+      ? (actualN > estimateN ? "high" : "low")
+      : null;
+    const hi = macroBtcDirText(model.high.btc),
+      lo = macroBtcDirText(model.low.btc);
+    const anchorLabel = anchorIsEstimate ? tx("预期", "Est") : tx("前值", "Prev");
+    analysis = `<div class="ms-pin-analysis">
+      <p class="ms-pin-note">${tx("市场解读", "Read-through")}<em>${calendarEscape(model.label)}</em></p>
+      <ul>
+        <li class="${liveKey === "high" ? "is-live" : ""}">${tx(`实际 > ${anchorRaw}（${anchorLabel}）→ ${highWording}，通常 `, `Actual > ${anchorRaw} (${anchorLabel}) → ${highWording}, typically `)}<b class="${hi.kind}">${hi.text}</b></li>
+        <li class="${liveKey === "low" ? "is-live" : ""}">${tx(`实际 < ${anchorRaw}（${anchorLabel}）→ ${lowWording}，通常 `, `Actual < ${anchorRaw} (${anchorLabel}) → ${lowWording}, typically `)}<b class="${lo.kind}">${lo.text}</b></li>
+        <li class="is-flat">${tx(`实际 = ${anchorRaw}（符合${anchorLabel}），通常影响有限`, `Actual = ${anchorRaw} (in line with ${anchorLabel}), usually limited impact`)}</li>
+      </ul>
+      <p class="ms-pin-tip">${calendarEscape(model.note)}</p>
+    </div>`;
+  } else {
+    const tip = bias?.tip || event.directional || "";
+    analysis = tip ? `<div class="ms-pin-analysis"><p class="ms-pin-tip">${calendarEscape(tip)}</p></div>` : "";
+  }
+
+  // 非数值的 curated 事件：在倒计时下方直接展示「利好/利空/中性」标签。
+  const kindbar = isCurated && !hasNumeric
+    ? `<div class="ms-pin-kindbar"><span class="ms-pin-badge ${kind.cls}">${calendarEscape(kind.label)}</span></div>`
+    : "";
+
+  return `<article class="ms-pin ${bias ? bias.kind : ""} ${kind.cls}${released ? " is-released" : ""}">
+    <header class="ms-pin-head">
+      <span class="cal-flag ${country.cls}" title="${calendarEscape(country.label)}">${country.flag}</span>
+      <div class="ms-pin-title"><b>${calendarEscape(title)}</b><span>${calendarEscape(source)}</span></div>
+      <span class="cal-impact imp-${event.importance}" title="${tx("重要等级", "Importance")}: ${calendarEscape(impLabel)}">${calendarImportanceDots(event)}<em>${calendarEscape(impLabel)}</em></span>
+    </header>
+    <div class="ms-pin-when">
+      <div class="ms-pin-clock"><b data-macro-at="${Number(event.at)}" data-macro-format="bare">${countdown}</b><span>${released ? tx("已公布", "Released") : tx("倒计时", "Countdown")}</span></div>
+      <div class="ms-pin-datetime"><span>${tx("北京时间", "Beijing")}</span><b>${calendarEscape(bjDate)} ${calendarEscape(bjTime)}</b>${event.timePrecision === "date" ? "" : `<span>${tx("当地", "Local")} ${calendarEscape(calendarFormatInZone(event.at, calendarLocalZone(event.country), { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }))}</span>`}</div>
+    </div>
+    ${metricsHtml}
+    ${kindbar}
+    ${analysis}
+  </article>`;
+}
+/* 左下栏很窄，用竖排紧凑行代替双行 macro-cmp，避免标题/时间被挤成省略号。 */
+function renderReleasedRow(event) {
+  const country = calendarCountry(event.country);
+  const bias = macroEventBias(event);
+  const when = event.timePrecision === "date"
+    ? tx("日期待定", "Date TBD")
+    : `${calendarFormatBeijing(event.at, { month: "2-digit", day: "2-digit" })} ${calendarFormatBeijing(event.at, { hour: "2-digit", minute: "2-digit", hour12: false })}`;
+  const val = (v) => (v === null || v === undefined || v === "") ? "—" : calendarEscape(String(v));
+  const title = calendarEscape(calendarEventTitle(event.title));
+  const impLabel = (CALENDAR_IMPORTANCE.find(([k]) => k === event.importance) || ["low", tx("低", "Low"), "Low"])[1];
+  return `<article class="ms-rel ${bias ? bias.kind : ""}">
+    <div class="ms-rel-top"><span class="cal-flag ${country.cls}" title="${calendarEscape(country.label)}">${country.flag}</span><span class="ms-rel-title" title="${title}">${title}</span><span class="ms-rel-imp cal-impact imp-${event.importance}" title="${tx("重要等级", "Importance")}: ${calendarEscape(impLabel)}">${calendarImportanceDots(event)}<em>${calendarEscape(impLabel)}</em></span></div>
+    <div class="ms-rel-metrics">
+      <span class="ms-rel-met is-act"><i>${tx("实际", "Act")}</i><b class="${macroHasActual(event) ? "on" : "empty"}">${val(event.actual)}</b></span>
+      <span class="ms-rel-met"><i>${tx("预期", "Est")}</i><b>${val(event.estimate)}</b></span>
+      <span class="ms-rel-met"><i>${tx("前值", "Prev")}</i><b>${val(event.previous)}</b></span>
+    </div>
+    <div class="ms-rel-foot"><span class="ms-rel-when">${calendarEscape(when)} ${tx("北京", "Beijing")}</span>${bias ? `<span class="macro-cmp-tag ${bias.kind}" title="${calendarEscape(bias.tip)}">${calendarEscape(bias.label)}</span>` : ""}</div>
+  </article>`;
+}
+function refreshMacroCompareCountdowns() {
+  const now = Date.now();
+  const stillUpcoming = new Set();
+  let justReleased = false;
+  document.querySelectorAll("[data-macro-at]").forEach((el) => {
+    const at = Number(el.dataset.macroAt);
+    if (!Number.isFinite(at)) return;
+    const key = String(at);
+    if (at > now) {
+      stillUpcoming.add(key);
+      el.textContent =
+        el.dataset.macroFormat === "bare"
+          ? macroCountdownClock(at)
+          : `${tx("距今", "In ")} ${macroCountdown(at)}`;
+    } else {
+      el.textContent = tx("已公布", "Released");
+      if (macroUpcomingIds.has(key)) justReleased = true;
+    }
+  });
+  macroUpcomingIds = stillUpcoming;
+  // 有数据刚刚公布：立刻强制重取一次，把实际值回填到「宏观经济数据」。
+  if (justReleased) {
+    loadInvestmentCalendar(true).then(() => { renderFearGreedGauge(); renderReleasedDataCard(); });
+    manageMacroLiveFetch();
+  }
+  // 当前展示的事件如果已过期超过 30 分钟，重新渲染以自动移除。
+  const liveEvent = macroCalendarPickedLiveEvent();
+  if (liveEvent) {
+    const currentAt = Number($("fearGreedGauge")?.querySelector("[data-macro-at]")?.dataset.macroAt);
+    if (Number.isFinite(currentAt) && currentAt !== liveEvent.at) renderFearGreedGauge();
+  }
+}
+function renderReleasedDataCard() {
+  let card = $("releasedDataCard");
   if (!card) {
-    card = document.createElement("article");
-    card.id = "fearGreedGauge";
-    card.className = "card fear-greed-gauge-card";
-    const indicatorCard = $("indicatorDetailsCard"),
-      dashboardGrid = document.querySelector(".grid");
-    if (indicatorCard) indicatorCard.after(card);
-    else dashboardGrid?.append(card);
+    card = document.createElement("section");
+    card.id = "releasedDataCard";
+    card.className = "card released-data-card";
+    // 放在「BTC 多因子研究」下方；investmentCalendarCard 会再跟在它后面。
+    // 研究卡异步加载，若尚未就绪则先放入主流程安全位置，避免落入右侧 side-stack。
+    const research = $("researchOutlookCard");
+    if (research) research.after(card);
+    else {
+      const pattern = $("patternAnalysis"),
+        terminal = document.querySelector(".terminal-layout"),
+        main = document.querySelector("main");
+      if (pattern) pattern.after(card);
+      else if (terminal) terminal.after(card);
+      else main?.append(card);
+    }
   }
   if (!card) return;
-  card.hidden = false;
-  const macroEvents = macroCalendarData?.events || [],
-    now = Date.now();
-  const released = macroEvents.find(
-    (event) =>
-      event.actual && event.at <= now && now - event.at < 24 * 3_600_000,
-  );
-  const future = macroEvents.find((event) => event.at >= now);
-  const macroEvent = released || future;
-  const macroEventTime = (event) =>
-    new Intl.DateTimeFormat(uiLang === "zh" ? "zh-CN" : "en-US", {
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      timeZone: "Asia/Shanghai",
-    }).format(event.at);
-  const macroEventList = macroEvents
-    .filter((event) => event !== macroEvent && event.at >= now - 24 * 3_600_000)
-    .slice(0, 3)
-    .map(
-      (event) =>
-        `<li><span>${tname(MACRO_EVENT_NAMES, event.key)}</span><time>${macroEventTime(event)}</time></li>`,
-    )
-    .join("");
-  const macroTile = macroEvent
-    ? `<section class="fear-greed-compact-tile macro-event-tile ${released ? "released" : "upcoming"}"><span>${tx("近期宏观日历", "Upcoming macro calendar")}</span><b class="${released ? "bull" : "flat"}">${tname(MACRO_EVENT_NAMES, macroEvent.key)}</b><strong>${released ? safeText(macroEvent.actual?.value || tx("数据确认中", "Verifying data")) : `${macroEventTime(macroEvent)} · ${tx("距事件 ", "In ")}${macroCountdown(macroEvent.at)}`}</strong><ul class="macro-event-list">${macroEventList}</ul><small>${released ? safeText(macroEvent.actual?.source || "") : tx("事件窗口内降低杠杆与仓位集中度", "Reduce leverage and concentration around the release")}</small></section>`
-    : `<section class="fear-greed-compact-tile macro-event-tile ${macroCalendarError ? "is-error" : ""}"><span>${tx("近期宏观日历", "Upcoming macro calendar")}</span><b>${macroCalendarError ? tx("日历暂不可用", "Calendar unavailable") : tx("日历加载中", "Loading calendar")}</b><small>${macroCalendarError ? tx("CPI、FOMC 与非农将在 1 分钟后自动重试。", "CPI, FOMC and payrolls retry automatically in one minute.") : tx("正在获取 CPI、FOMC 利率决议与非农就业日历。", "Fetching CPI, FOMC-rate-decision and payroll calendars.")}</small>${macroCalendarError ? `<button type="button" class="macro-calendar-retry">${tx("重试", "Retry")}</button>` : ""}</section>`;
-  if (!Number.isFinite(sentiment?.value)) {
-    card.className = "card fear-greed-gauge-card fear-greed-compact flat";
-    const unavailable = fearGreedError;
-    card.innerHTML = `<div class="fear-greed-head"><h2>${tx("宏观与情绪", "Macro & sentiment")}</h2><span>${tx("慢速背景", "Slow context")}</span></div><div class="fear-greed-compact-grid"><section class="fear-greed-compact-tile ${unavailable ? "is-error" : ""}"><span class="fear-greed-label">${tx("恐惧贪婪", "Fear & Greed")}</span><b>${unavailable ? tx("暂不可用", "Unavailable") : tx("正在加载", "Loading")}</b><small>${tx("不单独交易", "Not a standalone signal")}</small>${unavailable ? `<button type="button" class="fear-greed-retry">${tx("重试", "Retry")}</button>` : ""}</section>${macroTile}</div>`;
-    card
-      .querySelector(".fear-greed-retry")
-      ?.addEventListener("click", () => loadFearGreedSentiment(true));
-    card
-      .querySelector(".macro-calendar-retry")
-      ?.addEventListener("click", () => loadFedMonitor());
-    addHelp(
-      card.querySelector(".fear-greed-head h2"),
-      tx(
-        "恐惧与贪婪指数是日频市场情绪读数，范围 0–100。极端恐惧或贪婪更适合提醒不要追单；它不单独预测短线涨跌。",
-        "Fear & Greed is a daily 0–100 market-sentiment reading. Extreme values warn against chasing moves; it does not predict short-term direction by itself.",
-      ),
-    );
-    return;
+
+  const filters = {
+    regions: releasedDataRegions,
+    categories: releasedDataCategories,
+    importance: releasedDataImportance,
+  };
+
+  // 筛选器候选池：过去 14 天到未来 14 天的宏观事件，计数不受当前筛选影响。
+  const now = Date.now();
+  const pool = (investmentCalendarData?.events || [])
+    .filter((event) => event.category === "macro")
+    .filter((event) => event.at >= now - 14 * CALENDAR_DAY && event.at <= now + 14 * CALENDAR_DAY);
+  const countBy = (list, pick) => list.reduce((acc, event) => { const key = pick(event); acc.set(key, (acc.get(key) || 0) + 1); return acc; }, new Map());
+  const countryCounts = countBy(pool, (event) => event.country || "GLOBAL");
+  const categoryCounts = countBy(pool, (event) => event.category || "macro");
+  const importanceCounts = countBy(pool, (event) => event.importance || "low");
+
+  const countryOrder = ["US","CN","EU","JP","UK","DE","FR","BR","AU","CA","KR","IN","RU","CH","IT","ES","MX","TR","ZA","NZ","SG","HK","TW","OPEC","GLOBAL","BTC","OIL"];
+  const countryOptions = [...countryCounts.entries()].sort((a, b) => {
+    const ia = countryOrder.indexOf(a[0]), ib = countryOrder.indexOf(b[0]);
+    const ra = ia < 0 ? 1e9 : ia, rb = ib < 0 ? 1e9 : ib;
+    return ra !== rb ? ra - rb : String(a[0]).localeCompare(String(b[0]));
+  }).map(([code, count]) => {
+    const info = calendarCountry(code);
+    return { key:code, label:info.label, count, html:`${info.emoji?`<i class="ic-opt-flag">${info.emoji}</i>`:""}<span>${calendarEscape(info.label)}</span>` };
+  });
+  const categoryOptions = CALENDAR_CATEGORIES.filter(([key]) => categoryCounts.get(key)).map(([key, zh, en, cls]) => ({
+    key, label:tx(zh,en), count:categoryCounts.get(key), html:`<i class="ic-opt-dot ${cls}"></i><span>${tx(zh,en)}</span>`,
+  }));
+  const importanceOptions = CALENDAR_IMPORTANCE.filter(([key]) => importanceCounts.get(key)).map(([key, zh, en]) => ({
+    key, label:tx(zh,en), count:importanceCounts.get(key),
+    html:`<i class="ic-opt-stars imp-${key}">${[1,2,3].map((n) => `<i class="ic-dot${n<=(key==="high"?3:key==="medium"?2:1)?" on":""}"></i>`).join("")}</i><span>${tx(zh,en)}</span>`,
+  }));
+
+  const actualsEvents = releasedMacroEvents(12, filters);
+  const impactEvents = calendarImpactEvents(6, filters);
+
+  const actualsBody = actualsEvents.length
+    ? `<section class="released-actuals-section"><h3 class="released-actuals-head">${tx("已公布实际值","Released actuals")}</h3><div class="released-data-grid">${actualsEvents.map(renderReleasedRow).join("")}</div></section>`
+    : "";
+  const impactBody = impactEvents.length
+    ? `<section class="released-impact-section"><div class="ic-impact-head"><h3>${tx("数据公布影响预测","Data-reaction playbook")}</h3><p>${tx("按“公布值 vs 预期”的预期差推断方向：通胀 / 利率 / 就业高于预期多为紧缩（利空风险资产），增长与库存另有映射。属经验规律，非确定性结论。","Directions are inferred from the surprise vs consensus: inflation, rates and jobs above expectation are typically hawkish (bearish risk assets). Heuristic, not a certainty.")}</p></div><div class="ic-impact-grid released-impact-grid">${impactEvents.map((event) => renderImpactCard(event)).join("")}</div></section>`
+    : "";
+  const bodyHtml = actualsBody || impactBody ? `${actualsBody}${impactBody}` : "";
+  const emptyHtml = !bodyHtml
+    ? `<div class="released-data-body"><p class="macro-cmp-empty">${investmentCalendarData ? tx("当前筛选条件下暂无宏观事件，可调整筛选器或等待新数据公布。", "No macro events match the current filters.") : tx("日历加载中…", "Loading calendar…")}</p></div>`
+    : "";
+  const filtersHtml = `
+    <div class="released-data-toolbar">
+      <button type="button" class="ic-filter-toggle" data-released-toggle-filters>${releasedDataShowFilters ? tx("隐藏筛选器","Hide filters") : tx("显示筛选器","Show filters")}<i class="ic-caret${releasedDataShowFilters?" up":""}"></i></button>
+    </div>
+    ${releasedDataShowFilters ? `<div class="ic-fields released-data-fields">
+      ${renderReleasedDataField("region", tx("国家及地区","Country / region"), countryOptions, releasedDataRegions)}
+      ${renderReleasedDataField("category", tx("类别领域","Category"), categoryOptions, releasedDataCategories)}
+      ${renderReleasedDataField("importance", tx("重要性","Importance"), importanceOptions, releasedDataImportance)}
+    </div>` : ""}`;
+
+  card.innerHTML = `<div class="released-data-head"><h2>${tx("宏观经济数据", "Macroeconomic data")}</h2><span>${tx("实际值实时回填", "Actuals filled live")}</span></div>${filtersHtml}${bodyHtml ? `<div class="released-data-body">${bodyHtml}</div>` : emptyHtml}`;
+
+  // —— Toolbar wiring ——
+  card.querySelector("[data-released-toggle-filters]")?.addEventListener("click", () => {
+    releasedDataShowFilters = !releasedDataShowFilters;
+    releasedDataOpenMenu = null;
+    renderReleasedDataCard();
+  });
+  // —— Filter menus ——
+  card.querySelectorAll("[data-released-menu-toggle]").forEach((button) => button.addEventListener("click", () => {
+    const kind = button.dataset.releasedMenuToggle;
+    releasedDataOpenMenu = releasedDataOpenMenu === kind ? null : kind;
+    renderReleasedDataCard();
+  }));
+  card.querySelectorAll("[data-released-menu-search]").forEach((input) => input.addEventListener("input", () => {
+    const kind = input.dataset.releasedMenuSearch, query = input.value.trim().toLowerCase();
+    releasedDataMenuSearch[kind] = input.value;
+    input.closest(".ic-menu")?.querySelectorAll("li[data-search-text]").forEach((row) => {
+      row.hidden = Boolean(query) && !row.dataset.searchText.includes(query);
+    });
+  }));
+  card.querySelectorAll("[data-released-opt-field]").forEach((box) => box.addEventListener("change", () => {
+    const kind = box.dataset.releasedOptField, key = box.dataset.releasedOptKey;
+    const target = kind === "region" ? releasedDataRegions : kind === "category" ? releasedDataCategories : releasedDataImportance;
+    if (box.checked) target.add(key); else target.delete(key);
+    renderReleasedDataCard();
+  }));
+  card.querySelectorAll("[data-released-menu-all]").forEach((button) => button.addEventListener("click", () => {
+    const kind = button.dataset.releasedMenuAll;
+    const target = kind === "region" ? releasedDataRegions : kind === "category" ? releasedDataCategories : releasedDataImportance;
+    const query = String(releasedDataMenuSearch[kind] || "").trim().toLowerCase();
+    button.closest(".ic-menu")?.querySelectorAll("[data-released-opt-key]").forEach((box) => {
+      const row = box.closest("li[data-search-text]");
+      if (query && row?.hidden) return;
+      target.add(box.dataset.releasedOptKey);
+    });
+    renderReleasedDataCard();
+  }));
+  card.querySelectorAll("[data-released-menu-clear]").forEach((button) => button.addEventListener("click", () => {
+    const kind = button.dataset.releasedMenuClear;
+    const target = kind === "region" ? releasedDataRegions : kind === "category" ? releasedDataCategories : releasedDataImportance;
+    const query = String(releasedDataMenuSearch[kind] || "").trim().toLowerCase();
+    if (!query) { target.clear(); renderReleasedDataCard(); return; }
+    button.closest(".ic-menu")?.querySelectorAll("[data-released-opt-key]").forEach((box) => {
+      const row = box.closest("li[data-search-text]");
+      if (row?.hidden) return;
+      target.delete(box.dataset.releasedOptKey);
+    });
+    renderReleasedDataCard();
+  }));
+
+  if (!window.__btcReleasedDataOutsideClickBound) {
+    window.__btcReleasedDataOutsideClickBound = true;
+    document.addEventListener("click", (event) => {
+      if (!releasedDataOpenMenu) return;
+      const path = typeof event.composedPath === "function" ? event.composedPath() : [];
+      const insideField = path.some((node) => node && node.classList && node.classList.contains("rd-field"));
+      if (insideField) return;
+      releasedDataOpenMenu = null;
+      renderReleasedDataCard();
+    });
   }
-  const value = Math.max(0, Math.min(100, Number(sentiment.value))),
-    view = fearGreedView(value),
-    sentimentTip = tx(
-      `当前恐惧贪婪指数为 ${value}/100，属于“${view.label}”。它把市场情绪浓缩成 0–100：数值越低代表参与者越害怕、越不愿承担风险；数值越高代表参与者越乐观、越愿意追逐风险。${value >= 75 ? "现在处于极度贪婪，通常应避免追多，并防范拥挤后的回撤。" : value >= 56 ? "现在市场偏乐观；不表示价格一定会跌，但追多前应提高确认门槛并留意资金费率。" : value <= 24 ? "现在市场处于极度恐慌；不表示价格一定反弹，但不宜在恐慌中追空。" : value <= 44 ? "现在市场偏恐慌；应等待价格与成交量的进一步确认。" : "现在市场情绪较均衡，单靠情绪不能提供明确方向。"} 区间：0–24 极度恐慌、25–44 恐慌、45–55 中性、56–74 贪婪、75–100 极度贪婪。它是慢速环境提示，不是单独的买卖信号。`,
-      `The current Fear & Greed reading is ${value}/100 (${view.label}). It compresses market mood into 0–100: low values reflect fear and lower risk appetite; high values reflect optimism and a willingness to chase risk. ${value >= 75 ? "This is extreme greed: avoid chasing longs and watch for crowded pullbacks." : value >= 56 ? "Sentiment is optimistic; that does not guarantee a decline, but it raises the bar for chasing longs and calls for attention to funding." : value <= 24 ? "This is extreme fear: it does not guarantee a rebound, but avoid chasing shorts." : value <= 44 ? "Sentiment is fearful; wait for further price and volume confirmation." : "Sentiment is balanced, so it offers no clear direction on its own."} Bands: 0–24 extreme fear, 25–44 fear, 45–55 neutral, 56–74 greed, 75–100 extreme greed. It is slow context, not a standalone trading signal.`,
-    );
-  card.className = `card fear-greed-gauge-card fear-greed-compact ${view.kind}`;
-  card.innerHTML = `<div class="fear-greed-head"><h2>${tx("宏观与情绪", "Macro & sentiment")}</h2><span>${tx("慢速背景", "Slow context")}</span></div><div class="fear-greed-compact-grid"><section class="fear-greed-compact-tile"><span class="fear-greed-label">${tx("恐惧贪婪", "Fear & Greed")}</span><b class="${view.kind}">${value} · ${view.label}</b><small>${tx("不单独交易", "Not a standalone signal")}</small></section>${macroTile}</div>`;
-  card
-    .querySelector(".macro-calendar-retry")
-    ?.addEventListener("click", () => loadFedMonitor());
+}
+function renderFearGreedGauge() {
+  const card = ensureFearGreedCard();
+  if (!card) return;
+  card.hidden = false;
+  // 卡片内直接展示关注宏观事件的实时数据：最近勾选、且未公布或公布后 30 分钟内的事件。
+  const pinnedNow = macroCalendarPickedLiveEvent();
+  const emptyText = pinnedNow
+    ? tx("该事件已公布超过 30 分钟，已自动移除。在投资日历或「重大事件」卡片勾选新的事件即可继续查看实时数据。", "This release was published more than 30 minutes ago and has been removed. Pin a new macro or major event in the investment calendar to see live data again.")
+    : tx("在投资日历列表或「重大事件」卡片勾选关注的宏观/重大事件，北京时间、倒计时、预期/前值/实际与阈值式解读会显示在这里", "Pin a macro or major event in the investment calendar to see its Beijing time, countdown, estimate/previous/actual and threshold read-through here");
+  const body = pinnedNow
+    ? renderPinnedRelease(pinnedNow)
+    : `<p class="macro-cmp-empty">${emptyText}</p>`;
+  card.className = "card fear-greed-gauge-card fear-greed-compact";
+  card.innerHTML = `<div class="fear-greed-head"><h2>${tx("关注宏观事件实时数据", "Pinned macro release")}</h2><span>${tx("实时数据", "Live data")}</span></div><div class="fear-greed-compact-grid macro-sentiment-grid">${body}</div>`;
   addHelp(
     card.querySelector(".fear-greed-head h2"),
-    "恐惧与贪婪指数是日频市场情绪读数，范围 0–100。极端读数更适合提醒不要追单；它不单独预测短线涨跌。",
-    "Fear & Greed is a daily 0–100 market-sentiment reading. Extremes warn against chasing moves; it does not predict short-term direction by itself.",
+    "这里直接展示你最近勾选的宏观事件或重大事件实时数据：北京时间、倒计时、预期/前值/实际，以及「高于/低于锚点分别对 BTC 属于利好还是利空」的阈值式解读。可在投资日历列表或「重大事件」卡片中勾选关注；事件公布超过 30 分钟后会自动移除；未公布事件在公布前后 2 分钟内会高频刷新，第一时间抓取实际值。恐惧贪婪指数已从该卡移除；宏观经济数据已独立成卡，位于「BTC 多因子研究」与「投资日历」之间。",
+    "This card shows the pinned macro or major event live data: Beijing time, countdown, estimate/previous/actual, and a threshold read-through (above/below the anchor → bullish or bearish for BTC). You can pin events either from the investment calendar list or from the Major events card; released events are removed after 30 minutes, and upcoming events are polled every 15 seconds around release time to capture actuals as soon as they appear. The Fear & Greed index has been removed from this card; macroeconomic data now lives in its own card between the BTC multi-factor research and the investment calendar.",
   );
-  addHelp(card.querySelector(".fear-greed-label"), sentimentTip, sentimentTip);
+  if (!macroCountdownTimer) {
+    // 秒级刷新，让「关注事件」的倒计时真正在跳。
+    macroCountdownTimer = setInterval(refreshMacroCompareCountdowns, 1000);
+  }
+  manageMacroLiveFetch();
 }
+// 热点新闻板块已移除（用户要求）：保留 fetch/render 帮助函数与 /api/news 路由，
+// 但不再自动拉取，避免无谓请求。
+// The market-news tile was removed by request; the helpers and /api/news route are
+// kept for reuse, but nothing fetches them automatically anymore.
 function renderFearGreedSentiment() {
   if (!fearGreedSentiment) return;
   renderFearGreedGauge();
@@ -11210,8 +12771,13 @@ loadCurrent = async function () {
             ` · This range needs ${state.rangeRequiredPoints} candles; showing the available ${windowText(actualCoverageMs)} (${displayed.length})`,
           )
       : "";
+    const coverStamp = (ms) =>
+      new Date(displayed[0].time).getFullYear() !==
+      new Date(displayed.at(-1).time).getFullYear()
+        ? timeFull(ms)
+        : time(ms);
     coverage.textContent = displayed.length
-      ? `${tx("查看范围", "Visible range")} ${txInterval(state.range || "--")} · ${tx("图表覆盖", "Chart coverage")}：${time(displayed[0].time)} ${tx("至", "to")} ${time(displayed.at(-1).time)} · ${displayed.length} ${tx("根", "candles")} · ${tx("数据粒度", "Granularity")} ${density}（${perHour.toLocaleString("en-US", { maximumFractionDigits: 2 })} ${tx("根/小时", "candles/hour")}）${availableNote} · ${tx("仅此范围参与回测", "only this range is used in backtest")}`
+      ? `${tx("查看范围", "Visible range")} ${txInterval(state.range || "--")} · ${tx("图表覆盖", "Chart coverage")}：${coverStamp(displayed[0].time)} ${tx("至", "to")} ${coverStamp(displayed.at(-1).time)} · ${displayed.length} ${tx("根", "candles")} · ${tx("数据粒度", "Granularity")} ${density}（${perHour.toLocaleString("en-US", { maximumFractionDigits: 2 })} ${tx("根/小时", "candles/hour")}）${availableNote} · ${tx("仅此范围参与回测", "only this range is used in backtest")}`
       : "--";
   }
   if (chartError) {
@@ -11480,26 +13046,79 @@ function ensurePeriodChangeCard() {
 }
 function ensureFearGreedCard() {
   let card = $("fearGreedGauge");
-  if (card) return card;
-  card = document.createElement("section");
-  card.id = "fearGreedGauge";
-  card.className = "card fear-greed-gauge-card fear-greed-compact flat";
-  card.innerHTML = `<div class="fear-greed-head"><h2>${tx("宏观与情绪", "Macro & sentiment")}</h2><span>${tx("慢速背景", "Slow context")}</span></div><div class="fear-greed-compact-grid"><section class="fear-greed-compact-tile"><span>${tx("恐惧贪婪", "Fear & Greed")}</span><b>${tx("正在加载", "Loading")}</b><small>${tx("不单独交易", "Not a standalone signal")}</small></section></div>`;
+  const side = document.querySelector(".terminal-layout .side-stack"),
+    main = document.querySelector("main");
+  // 清理可能残留的旧占位卡（缓存 HTML 里的 hidden 占位），确保唯一且位于 side-stack。
+  document.querySelectorAll("#fearGreedGauge").forEach((node) => {
+    if (node !== card) node.remove();
+  });
+  if (!card) {
+    card = document.createElement("section");
+    card.id = "fearGreedGauge";
+    card.className = "card fear-greed-gauge-card fear-greed-compact";
+    card.innerHTML = `<div class="fear-greed-head"><h2>${tx("关注宏观事件实时数据", "Pinned macro release")}</h2><span>${tx("实时数据", "Live data")}</span></div><div class="fear-greed-compact-grid macro-sentiment-grid"><section class="fear-greed-compact-tile ms-block ms-pick-release"><span class="macro-tile-label">${tx("关注事件 · 实时数据", "Pinned release")}<em>${tx("最近勾选的事件", "Most recent pick")}</em></span><p class="macro-cmp-empty">${tx("在投资日历勾选事件后，该事件的时间、倒计时与数据解读会显示在这里", "Pin an event in the investment calendar to see its time, countdown and read-through here")}</p></section></div>`;
+  }
+  // 占位卡优先放进右侧 side-stack；桌面端 arrange() 会保留它，
+  // 移动端 arrange() 会把它移到 layout 之后，避免被 hidden 的 side-stack 吞掉。
+  if (side) {
+    if (!side.contains(card)) side.append(card);
+  } else if (!card.isConnected) {
+    main?.append(card);
+  }
   return card;
 }
+function ensureReleasedDataCard() {
+  let card = $("releasedDataCard");
+  if (card) return card;
+  card = document.createElement("section");
+  card.id = "releasedDataCard";
+  card.className = "card released-data-card";
+  card.innerHTML = `<div class="released-data-head"><h2>${tx("宏观经济数据", "Macroeconomic data")}</h2><span>${tx("实际值实时回填", "Actuals filled live")}</span></div><div class="released-data-body"><p class="macro-cmp-empty">${tx("日历加载中…", "Loading calendar…")}</p></div>`;
+  // 放在「BTC 多因子研究」下方；investmentCalendarCard 会再跟在它后面。
+  // 研究卡异步加载，若尚未就绪则先放入主流程安全位置，避免落入右侧 side-stack。
+  const research = $("researchOutlookCard");
+  if (research) research.after(card);
+  else {
+    const pattern = $("patternAnalysis"),
+      terminal = document.querySelector(".terminal-layout"),
+      main = document.querySelector("main");
+    if (pattern) pattern.after(card);
+    else if (terminal) terminal.after(card);
+    else main?.append(card);
+  }
+  return card;
+}
+let sentimentContentFill = false;
 function placePeriodAndSentimentCards() {
   const period = ensurePeriodChangeCard(),
     micro = $("okxMicrostructureCard"),
     layout = document.querySelector(".terminal-layout"),
     sentiment = ensureFearGreedCard(),
-    indicators = $("indicatorDetailsCard");
+    released = ensureReleasedDataCard();
   // 周期涨幅保持独立卡片外观，但紧贴在 OKX 微观结构之后，不能被右列高度推到下一行。
   // Keep period returns visually independent, directly after microstructure,
   // so the right column never creates an empty area in the chart column.
-  if (micro && period.parentElement !== micro.parentElement) micro.after(period);
-  if (sentiment && indicators && indicators.nextElementSibling !== sentiment)
-    indicators.after(sentiment);
+  // 周期涨幅始终放在 OKX 微观结构卡片之后（两者都在 #mainChartCard 内），
+  // 避免被右侧 side-stack 高度推到下一行产生左列空白。
+  if (micro) micro.after(period);
+  else if (!chart.contains(period)) chart?.append(period);
+  // 宏观与情绪的位置统一交给 responsive arrange()：桌面端在右侧 side-stack，
+  // 移动端在 terminal-layout 之后。避免多处代码反复移动导致闪烁。
+  window.arrangeTerminalLayout?.();
   scheduleMicrostructureAlignment();
+  // 布局重排（arrange 里的 side.replaceChildren）会丢弃“早于它插入”的情绪卡，
+  // 使卡片停在「正在加载」占位状态。布局稳定后补渲染一次内容（带重入保护）。
+  // Layout rearrangement drops the sentiment card when it was inserted too early,
+  // leaving the placeholder. Re-render its content once the layout has settled.
+  if (!sentimentContentFill && sentiment && !sentiment.querySelector(".macro-sentiment-grid")) {
+    sentimentContentFill = true;
+    try {
+      renderFearGreedGauge();
+      renderReleasedDataCard();
+    } finally {
+      sentimentContentFill = false;
+    }
+  }
 }
 let microstructureAlignmentFrame = 0;
 function scheduleMicrostructureAlignment() {
@@ -11563,7 +13182,7 @@ function ensureResearchOutlookCard() {
     card.id = "researchOutlookCard";
     card.className = "card research-outlook-card";
   }
-  // Keep the reading order: resonance → pattern interpretation → research.
+  // Keep the reading order: resonance → pattern interpretation → research → macro data → calendar.
   const pattern = $("patternAnalysis"),
     resonance =
     document.querySelector("main > .optional") ||
@@ -11571,6 +13190,9 @@ function ensureResearchOutlookCard() {
   if (pattern) pattern.after(card);
   else if (resonance) resonance.after(card);
   else document.querySelector("main")?.append(card);
+  // 若宏观经济数据卡已提前创建，确保它紧跟在研究卡后面。
+  const released = $("releasedDataCard");
+  if (released && card.nextElementSibling !== released) card.after(released);
   return card;
 }
 function researchDirectionText(direction) {
@@ -12786,3 +14408,585 @@ positionCalc = function () {
     side: risk.sign,
   };
 };
+
+/* ===== v2.10.10 强平概率计算器：快捷填充 / 持仓价快选 / 手动计算 / 长周期触及概率 =====
+   这一层只在运行时接上操作条、替换渲染函数并扩展历史窗口，不改写旧卡片的 DOM 外壳。
+   Shortcut layer only: it wires an action bar, swaps the renderer and widens the historical
+   windows without rewriting the legacy card markup. */
+(function () {
+  /* 做多 / 做空持仓价的本地记录（用户每次确认持仓或改开仓均价时更新）。 */
+  const ENTRY_BOOK_KEY = "btc_position_entry_book";
+  /* 日线样本少于这个根数时不展示长周期窗口，避免用十几个样本凑出一个假概率。 */
+  const MIN_DAILY_SAMPLES = 200;
+  const MIRRORED_FIELDS = ["exchange", "side", "amount", "leverage", "entry"];
+
+  function readEntryBook() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(ENTRY_BOOK_KEY) || "{}");
+      return {
+        long: Number(raw.long) > 0 ? Number(raw.long) : null,
+        short: Number(raw.short) > 0 ? Number(raw.short) : null,
+      };
+    } catch {
+      return { long: null, short: null };
+    }
+  }
+  let entryBook = readEntryBook();
+  function saveEntryBook() {
+    try {
+      localStorage.setItem(ENTRY_BOOK_KEY, JSON.stringify(entryBook));
+    } catch {
+      /* 隐私模式下 localStorage 可能不可写，记录失败不影响本次会话使用。 */
+    }
+  }
+
+  let liqDailyCandles = [],
+    liqDirty = false,
+    dailyLoading = false,
+    flashTimer = 0;
+
+  function isValidCandle(candle) {
+    return (
+      !!candle &&
+      Number.isFinite(candle.close) &&
+      Number.isFinite(candle.low) &&
+      Number.isFinite(candle.high)
+    );
+  }
+  /* 按方向取整段样本的极值：做多关心最低、做空关心最高。 */
+  function extremeOf(candles, side) {
+    if (!candles.length) return NaN;
+    let value = side > 0 ? candles[0].low : candles[0].high;
+    for (const candle of candles) {
+      if (side > 0) {
+        if (candle.low < value) value = candle.low;
+      } else if (candle.high > value) value = candle.high;
+    }
+    return value;
+  }
+  /* 统一按北京时间标注样本区间，避免 UTC 与本地日期混用。 */
+  function sampleDay(ms) {
+    if (!Number.isFinite(ms)) return "--";
+    return new Intl.DateTimeFormat(uiLang === "zh" ? "zh-CN" : "en-US", {
+      timeZone: "Asia/Shanghai",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(new Date(ms));
+  }
+
+  function setDirty(value) {
+    liqDirty = !!value;
+    const hint = $("liqProbDirtyHint"),
+      button = $("liqProbCompute");
+    if (hint) hint.hidden = !liqDirty;
+    if (button) button.classList.toggle("is-dirty", liqDirty);
+  }
+  function flash(message) {
+    const el = $("liqProbFlash");
+    if (!el) return;
+    el.textContent = message;
+    el.hidden = false;
+    clearTimeout(flashTimer);
+    flashTimer = setTimeout(() => {
+      el.hidden = true;
+    }, 2400);
+  }
+
+  /* 渲染：窗口统计 + 分组展示，仍然是「经验估算」而非交易所强平引擎。 */
+  function renderLiqProbability() {
+    const form = $("liqProbabilityForm"),
+      out = $("liqProbabilityOutput");
+    if (!form || !out) return;
+    setDirty(false);
+    const p = liqProbState,
+      livePrice = state.ticker?.last || state.candles.at(-1)?.close || 0,
+      rawEntry = Number(p.entry),
+      requestedEntry = rawEntry >= 10_000 ? rawEntry : livePrice,
+      requestedLeverage = Math.min(
+        100,
+        Math.max(1, Math.round(Number(p.leverage) || 1)),
+      );
+    const risk = calculatePositionRisk({
+      ...p,
+      entry: requestedEntry,
+      mark: requestedEntry,
+      margin: (Number(p.amount) || 0) / requestedLeverage,
+    });
+    const entry = risk.entry,
+      amount = risk.notional,
+      lev = risk.leverage,
+      side = risk.sign,
+      liq = risk.liquidation,
+      fee = risk.feeRate,
+      distance = entry ? Math.abs(liq - entry) / entry : NaN,
+      direction = side > 0 ? tx("做多", "Long") : tx("做空", "Short");
+    /* 空的开仓价先跟上实时价，但不要抢用户正在输入的输入框。 */
+    if (
+      form.elements.entry &&
+      rawEntry < 10_000 &&
+      livePrice &&
+      document.activeElement !== form.elements.entry
+    ) {
+      p.entry = livePrice;
+      form.elements.entry.value = livePrice.toFixed(2);
+      localStorage.setItem("btc_liq_probability", JSON.stringify(p));
+    }
+    if (
+      form.elements.leverage &&
+      String(lev) !== String(p.leverage) &&
+      document.activeElement !== form.elements.leverage
+    ) {
+      p.leverage = lev;
+      form.elements.leverage.value = lev;
+      localStorage.setItem("btc_liq_probability", JSON.stringify(p));
+    }
+    const shortHistory =
+        liqHistoricalCandles.length >= 100
+          ? liqHistoricalCandles
+          : state.candles.filter(isValidCandle),
+      longHistory =
+        liqDailyCandles.length >= MIN_DAILY_SAMPLES ? liqDailyCandles : [],
+      shortWindows = [
+        ["12h", 48],
+        ["24h", 96],
+        ["48h", 192],
+        [tx("1 周", "1 week"), 672],
+      ],
+      longWindows = [
+        [tx("半个月", "15 days"), 15],
+        [tx("一个月", "1 month"), 30],
+        [tx("半年", "6 months"), 180],
+        [tx("一年", "1 year"), 365],
+      ],
+      build = (windows, candles) =>
+        windows.map(([label, window]) => ({
+          label,
+          window,
+          ...liqTouchStats(candles, side, distance, window),
+        })),
+      shortItems = build(shortWindows, shortHistory),
+      longItems = build(longWindows, longHistory),
+      windowCards = (items) =>
+        items
+          .map((item) =>
+            item.total
+              ? `<div class="liq-prob-window"><small>${item.label} ${tx("历史触及概率", "historical touch")}</small><b class="${liqRiskKind(item.probability)}">${item.probability.toFixed(2)}%</b><em>n=${item.total}</em></div>`
+              : `<div class="liq-prob-window"><small>${item.label} ${tx("历史触及概率", "historical touch")}</small><b class="flat">--</b><em>${tx("样本不足", "too few samples")}</em></div>`,
+          )
+          .join("");
+    /* 样本区间必须写清楚：短线只有约十天，长线是日线，否则「n=953」会被误读成长期统计。 */
+    const rangeLabel = (candles) =>
+        candles.length
+          ? `${candles.length} ${tx("根", "bars")}（${sampleDay(candles[0].time)} → ${sampleDay(candles.at(-1).time)}）`
+          : tx("暂不可用", "unavailable"),
+      shortUnit =
+        liqHistoricalCandles.length >= 100
+          ? tx("15 分钟 K 线", "15m candles")
+          : txInterval(state.interval),
+      sampleNote = `${tx("短线样本", "Short samples")} ${shortUnit} ${rangeLabel(shortHistory)}；${
+        longHistory.length
+          ? `${tx("长线样本", "long samples")} ${tx("日线", "daily")} ${rangeLabel(longHistory)}`
+          : tx("长线样本（日线）暂不可用", "long samples (daily) unavailable")
+      }`;
+    out.innerHTML =
+      `<div><small>${tx("理论强平价", "Theoretical liquidation")}</small><b class="bear">${money(liq)}</b></div>` +
+      `<div><small>${tx("历史极值价格", "Historical extreme price")}</small><b class="${side > 0 ? "bear" : "bull"}">${money(extremeOf(shortHistory, side))}</b></div>` +
+      `<div><small>${tx("距成本价", "Distance from entry")}</small><b>${Number.isFinite(distance) ? (distance * 100).toFixed(2) : "--"}%</b></div>` +
+      `<div><small>${tx("手续费参考（开+平）", "Fee reference (in + out)")}</small><b>${money(amount * fee * 2)}</b></div>` +
+      `<div class="liq-prob-windows">` +
+      `<div class="liq-prob-window-group"><h4>${tx("短线窗口 · 15 分钟 K 线", "Short windows · 15m candles")}</h4><div class="liq-prob-window-grid">${windowCards(shortItems)}</div></div>` +
+      `<div class="liq-prob-window-group"><h4>${tx("长线窗口 · 日线", "Long windows · daily candles")}</h4><div class="liq-prob-window-grid">${windowCards(longItems)}</div></div>` +
+      `</div>` +
+      `<p class="${liqRiskKind(shortItems[0]?.probability || 0)}">${direction} · ${tx("以成本价", "Uses entry")} ${money(entry)} · ${lev}× · ${sampleNote}。${tx("历史窗口互相重叠，长周期样本相关性高，且杠杆越高强平距离越近、长窗口越容易饱和到 100%；仅作风险研究，不代表未来真实概率或交易所强平价。", "Windows overlap, so long-horizon samples are highly correlated, and higher leverage means a shorter liquidation distance that saturates long windows at 100%; risk research only, not a future probability or an exchange liquidation price.")}</p>`;
+  }
+
+  /* 独立的日线取数通道：不复用旧版 intraday 加载器，避免两个请求互相把对方挡在 loading 上。 */
+  async function loadDailyHistory(attempt = 0) {
+    if (dailyLoading || liqDailyCandles.length >= MIN_DAILY_SAMPLES) return;
+    dailyLoading = true;
+    try {
+      const response = await apiFetch("/api/forecast-history", 20_000),
+        data = await response.json();
+      if (!response.ok) throw new Error(data.error || "history unavailable");
+      liqDailyCandles = (data.daily || []).filter(isValidCandle);
+      if (!liqDirty) renderLiqProbability();
+    } catch {
+      /* 保留已有样本；下一次尝试再补。 */
+    } finally {
+      dailyLoading = false;
+    }
+    if (liqDailyCandles.length < MIN_DAILY_SAMPLES && attempt < 3) {
+      setTimeout(() => loadDailyHistory(attempt + 1), 4_000);
+    }
+  }
+
+  function entryMenu() {
+    return $("liqProbEntryMenu");
+  }
+  /* 顶部「我的持仓」两个舱段的原始数据：price / amount / margin / leverage(开仓杠杆) / side。
+     保证金优先，缺失时用 持仓量÷开仓杠杆 反推；有效杠杆 = 持仓量÷保证金，与顶部卡片
+     显示的理论强平价同一口径（见 personalEntrySlot 与 v2.10.7 的强平价修复）。 */
+  function topSlots() {
+    const list = Array.isArray(window.btcPersonalEntries)
+      ? window.btcPersonalEntries
+      : [];
+    const positive = (value) => (Number(value) > 0 ? Number(value) : null);
+    return [0, 1].map((index) => {
+      const entry = list[index] || {},
+        price = positive(entry.price),
+        amount = positive(entry.amount),
+        margin = positive(entry.margin),
+        configured = positive(entry.leverage),
+        collateral =
+          margin || (amount && configured ? amount / configured : null),
+        effective = amount && collateral ? amount / collateral : configured;
+      return {
+        index,
+        side: entry.side === "short" ? "short" : "long",
+        price,
+        amount,
+        margin,
+        collateral,
+        configured,
+        effective,
+      };
+    });
+  }
+  const slotSideLabel = (side) =>
+    side === "short" ? tx("做空", "Short") : tx("做多", "Long");
+  function slotMeta(slot) {
+    const bits = [];
+    if (slot.amount) bits.push(`${tx("持仓", "Size")} ${money(slot.amount)}`);
+    if (slot.collateral)
+      bits.push(`${tx("保证金", "Margin")} ${money(slot.collateral)}`);
+    if (slot.effective)
+      bits.push(`${tx("有效杠杆", "Effective")} ${slot.effective.toFixed(2)}×`);
+    if (
+      slot.configured &&
+      slot.effective &&
+      Math.abs(slot.configured - slot.effective) > 0.005
+    )
+      bits.push(`${tx("开仓杠杆", "Entry")} ${slot.configured.toFixed(2)}×`);
+    return bits.join(" · ");
+  }
+  /* 把某个舱段折算成计算器的字段：方向 / 开仓均价 / 持仓量 / 有效杠杆。 */
+  function slotFields(slot) {
+    const fields = { side: slot.side, entry: slot.price };
+    if (slot.amount) fields.amount = Math.round(slot.amount * 100) / 100;
+    if (slot.effective && slot.effective >= 1)
+      fields.leverage = Math.min(100, Math.round(slot.effective * 100) / 100);
+    return fields;
+  }
+  /* 顶部卡片改动后把舱段价格抄进本地记录，让历史记录始终跟得上。 */
+  function refreshEntryBookFromSlots() {
+    let changed = false;
+    for (const slot of topSlots())
+      if (slot.price && entryBook[slot.side] !== slot.price) {
+        entryBook[slot.side] = slot.price;
+        changed = true;
+      }
+    if (changed) saveEntryBook();
+  }
+  function syncEntryMenu() {
+    const menu = entryMenu();
+    if (!menu) return;
+    refreshEntryBookFromSlots();
+    const slots = topSlots(),
+      slotRow = (slot) =>
+        `<button type="button" data-liq-slot="${slot.index}" class="${slot.side}"${slot.price ? "" : " disabled"}>` +
+        `<span class="liq-entry-title"><em>${tx("顶部舱段", "Top slot")} ${slot.index + 1}</em><i>${slotSideLabel(slot.side)}</i></span>` +
+        `<b>${slot.price ? money(slot.price) : "--"}</b>` +
+        `<small>${
+          slot.price
+            ? slotMeta(slot) || tx("只有开仓均价", "Entry price only")
+            : tx("顶部持仓卡还没填这一格", "This top slot is still empty")
+        }</small></button>`;
+    /* 已填价格的舱段优先；某方向没有舱段数据时，退回上一次记录下的持仓价。 */
+    const covered = new Set(slots.filter((slot) => slot.price).map((slot) => slot.side)),
+      fallback = ["long", "short"]
+        .filter((side) => !covered.has(side) && entryBook[side])
+        .map(
+          (side) =>
+            `<button type="button" data-liq-entry="${side}" class="${side}">` +
+            `<span class="liq-entry-title"><em>${tx("历史记录", "Saved")}</em><i>${slotSideLabel(side)}${tx("持仓价", " entry")}</i></span>` +
+            `<b>${money(entryBook[side])}</b></button>`,
+        )
+        .join("");
+    menu.innerHTML = slots.map(slotRow).join("") + fallback;
+  }
+  function closeEntryMenu() {
+    const menu = entryMenu(),
+      trigger = document.querySelector("[data-liq-action='entry']");
+    if (menu && !menu.hidden) menu.hidden = true;
+    if (trigger) trigger.setAttribute("aria-expanded", "false");
+  }
+  function toggleEntryMenu() {
+    const menu = entryMenu();
+    if (!menu) return;
+    syncEntryMenu();
+    const open = menu.hidden;
+    menu.hidden = !open;
+    const trigger = document.querySelector("[data-liq-action='entry']");
+    if (trigger) trigger.setAttribute("aria-expanded", String(open));
+  }
+
+  /* 记录用户自己的做多 / 做空持仓价。 */
+  function recordPositionEntry() {
+    const form = $("positionForm");
+    if (!form || !form.elements.entry || !form.elements.side) return;
+    const price = Number(form.elements.entry.value);
+    if (!Number.isFinite(price) || price <= 0) return;
+    const side = form.elements.side.value === "short" ? "short" : "long";
+    if (entryBook[side] === price) return;
+    entryBook[side] = price;
+    saveEntryBook();
+    syncEntryMenu();
+  }
+
+  /* 写回计算器字段：同时镜像到旧持仓卡并重算，保证上下两块数字一致。 */
+  function writeLiqFields(fields, note) {
+    const form = $("liqProbabilityForm");
+    if (!form) return;
+    for (const [field, value] of Object.entries(fields)) {
+      if (value === undefined || value === null || value === "") continue;
+      liqProbState[field] = value;
+      if (form.elements[field]) form.elements[field].value = value;
+    }
+    localStorage.setItem("btc_liq_probability", JSON.stringify(liqProbState));
+    syncRiskInputs("probability");
+    renderLiqProbability();
+    if (note) flash(note);
+  }
+
+  /* 「引用顶部持仓数据」：优先取顶部持仓卡里与当前方向一致、且已填价格的舱段。 */
+  function pullPositionData() {
+    const filled = topSlots().filter((slot) => slot.price),
+      wanted = liqProbState.side === "short" ? "short" : "long",
+      slot = filled.find((item) => item.side === wanted) || filled[0];
+    if (slot) {
+      writeLiqFields(
+        slotFields(slot),
+        `${tx("已引用", "Applied")} ${tx("顶部舱段", "top slot")} ${slot.index + 1} · ${slotSideLabel(slot.side)} ${
+          slotMeta(slot) || money(slot.price)
+        }`,
+      );
+      return;
+    }
+    /* 顶部卡片还没填时，退回旧的「我的持仓与盈亏估算」卡片。 */
+    const fields = {};
+    for (const field of MIRRORED_FIELDS) {
+      const value = positionState[field];
+      if (value === undefined || value === null || value === "") continue;
+      if (
+        ["amount", "leverage", "entry"].includes(field) &&
+        !(Number(value) > 0)
+      )
+        continue;
+      fields[field] = value;
+    }
+    writeLiqFields(
+      fields,
+      tx(
+        "顶部持仓卡还没填数据，已改用旧的持仓卡",
+        "Top card is empty; used the older position card",
+      ),
+    );
+  }
+
+  /* 选中某个顶部舱段：一次填好方向 / 开仓均价 / 持仓量 / 有效杠杆。 */
+  function applySlot(index) {
+    closeEntryMenu();
+    const slot = topSlots().find((item) => item.index === index);
+    if (!slot || !slot.price) {
+      flash(tx("该舱段还没有开仓均价", "That slot has no entry price yet"));
+      return;
+    }
+    writeLiqFields(
+      slotFields(slot),
+      `${tx("已填入", "Filled")} ${tx("顶部舱段", "top slot")} ${index + 1} · ${slotSideLabel(slot.side)} ${money(slot.price)}${
+        slotMeta(slot) ? ` · ${slotMeta(slot)}` : ""
+      }`,
+    );
+  }
+
+  function applyEntryPrice(side) {
+    closeEntryMenu();
+    const price = entryBook[side];
+    if (!price) {
+      flash(tx("还没有记录到该方向的持仓价", "No entry price recorded yet"));
+      return;
+    }
+    writeLiqFields(
+      { side, entry: price },
+      `${tx("已填入", "Filled")} ${
+        side === "short"
+          ? tx("做空持仓价", "short entry")
+          : tx("做多持仓价", "long entry")
+      } ${money(price)}`,
+    );
+  }
+
+  /* 表单一改动就做「待计算」，把计算时机交回给「计算」按钮。 */
+  function bindManualForm() {
+    const form = $("liqProbabilityForm");
+    if (!form || form.dataset.liqManual === "1") return;
+    form.dataset.liqManual = "1";
+    form.oninput = null;
+    form.addEventListener("input", (event) => {
+      if (event.target && event.target.name)
+        liqProbState[event.target.name] = event.target.value;
+      localStorage.setItem("btc_liq_probability", JSON.stringify(liqProbState));
+      setDirty(true);
+    });
+  }
+
+  function installActions() {
+    const card = $("liqProbabilityCard"),
+      form = $("liqProbabilityForm");
+    if (!card || !form) return false;
+    if ($("liqProbActions")) {
+      syncEntryMenu();
+      return true;
+    }
+    const bar = document.createElement("div");
+    bar.id = "liqProbActions";
+    bar.className = "liq-prob-actions";
+    bar.innerHTML =
+      `<button type="button" data-liq-action="pull">${tx("引用顶部持仓数据", "Use position above")}</button>` +
+      `<div class="liq-entry-picker"><button type="button" data-liq-action="entry" aria-haspopup="true" aria-expanded="false">${tx("填入我的持仓价", "Fill my entry price")} ▾</button>` +
+      `<div id="liqProbEntryMenu" class="liq-entry-menu" hidden role="menu"></div></div>` +
+      `<button type="button" id="liqProbCompute" class="liq-prob-compute" data-liq-action="compute">${tx("计算", "Calculate")}</button>` +
+      `<span id="liqProbFlash" class="liq-prob-flash" hidden></span>`;
+    const hint = document.createElement("p");
+    hint.id = "liqProbDirtyHint";
+    hint.className = "liq-prob-hint";
+    hint.hidden = true;
+    hint.textContent = tx(
+      "参数已修改，点击「计算」更新结果。",
+      "Inputs changed - press Calculate to refresh.",
+    );
+    /* 有效杠杆常带小数（如 19.93×），放宽步长以免被浏览器判成非法值。 */
+    const levInput = form.elements.leverage;
+    if (levInput) levInput.step = "0.01";
+    form.after(bar);
+    bar.after(hint);
+    bar.addEventListener("click", (event) => {
+      const target = event.target;
+      if (target.closest("[data-liq-action='entry']")) {
+        /* 必须拦下冒泡：document 上的关闭监听会把刚打开的浮层当场关掉。 */
+        event.stopPropagation();
+        toggleEntryMenu();
+        return;
+      }
+      const slot = target.closest("[data-liq-slot]");
+      if (slot) {
+        event.stopPropagation();
+        applySlot(Number(slot.dataset.liqSlot));
+        return;
+      }
+      const item = target.closest("[data-liq-entry]");
+      if (item) {
+        event.stopPropagation();
+        applyEntryPrice(item.dataset.liqEntry);
+        return;
+      }
+      if (target.closest("[data-liq-action='pull']")) {
+        event.stopPropagation();
+        pullPositionData();
+        return;
+      }
+      if (target.closest("[data-liq-action='compute']")) {
+        event.stopPropagation();
+        closeEntryMenu();
+        renderLiqProbability();
+      }
+    });
+    document.addEventListener("click", closeEntryMenu);
+    bindManualForm();
+    syncEntryMenu();
+    return true;
+  }
+
+  function relabelShortcuts() {
+    const pull = document.querySelector("[data-liq-action='pull']"),
+      pick = document.querySelector("[data-liq-action='entry']"),
+      compute = $("liqProbCompute"),
+      hint = $("liqProbDirtyHint");
+    if (pull) pull.textContent = tx("引用顶部持仓数据", "Use position above");
+    if (pick)
+      pick.textContent = `${tx("填入我的持仓价", "Fill my entry price")} ▾`;
+    if (compute) compute.textContent = tx("计算", "Calculate");
+    if (hint)
+      hint.textContent = tx(
+        "参数已修改，点击「计算」更新结果。",
+        "Inputs changed - press Calculate to refresh.",
+      );
+    syncEntryMenu();
+    if (!liqDirty) renderLiqProbability();
+  }
+
+  /* 旧版会在两个卡片之间自动镜像输入；保留镜像，但不再顺带重算，交给「计算」按钮。 */
+  const syncRiskInputsBaseline = syncRiskInputs;
+  syncRiskInputs = function (source) {
+    const positionForm = $("positionForm"),
+      probabilityForm = $("liqProbabilityForm");
+    if (!positionForm || !probabilityForm) return;
+    const from = source === "position" ? positionState : liqProbState;
+    for (const field of MIRRORED_FIELDS) {
+      positionState[field] = from[field];
+      liqProbState[field] = from[field];
+      if (
+        positionForm.elements[field] &&
+        document.activeElement !== positionForm.elements[field]
+      )
+        positionForm.elements[field].value = from[field];
+      if (
+        probabilityForm.elements[field] &&
+        document.activeElement !== probabilityForm.elements[field]
+      )
+        probabilityForm.elements[field].value = from[field];
+    }
+    localStorage.setItem("btc_position_state", JSON.stringify(positionState));
+    localStorage.setItem("btc_liq_probability", JSON.stringify(liqProbState));
+    renderPosition();
+    setDirty(true);
+  };
+  void syncRiskInputsBaseline;
+
+  /* 接管渲染入口：所有旧调用点（决策层刷新、实时价更新）都走新的分组渲染。 */
+  calcLiqProbability = renderLiqProbability;
+
+  /* 中英文切换时同步操作条文案。 */
+  const applyLanguageBeforeShortcuts = applyLanguage;
+  applyLanguage = function () {
+    applyLanguageBeforeShortcuts();
+    relabelShortcuts();
+  };
+
+  /* 记录做多 / 做空持仓价：改开仓均价（失焦）或点确认持仓时更新。 */
+  const positionForm = $("positionForm");
+  if (positionForm) {
+    positionForm.addEventListener("change", recordPositionEntry);
+    /* 首次进入时若已有持仓价而记录为空，补一次种子值。 */
+    const seeded = positionState.side === "short" ? "short" : "long",
+      seededPrice = Number(positionState.entry);
+    if (seededPrice > 0 && !entryBook[seeded]) {
+      entryBook[seeded] = seededPrice;
+      saveEntryBook();
+    }
+  }
+  $("confirmPosition")?.addEventListener("click", recordPositionEntry);
+
+  /* 顶部两张持仓卡一改动就刷新浮层与本地记录，菜单里不再出现旧值。 */
+  window.addEventListener("btc:personal-entries-changed", () => {
+    refreshEntryBookFromSlots();
+    syncEntryMenu();
+  });
+
+  function boot() {
+    if (installActions()) loadDailyHistory();
+  }
+  setTimeout(boot, 0);
+  setTimeout(boot, 600);
+})();

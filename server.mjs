@@ -196,6 +196,12 @@ async function verifyApiCredential(provider) {
     apiCredentials._verification={...(apiCredentials._verification||{}),[provider]:{valid:true,verifiedAt:Date.now()}}; saveApiCredentialsFile();
     return { valid:true, message:`${provider==='qwen'?`千问（${credential.model}）`:provider==='finnhub'?'Finnhub':provider==='eia'?'EIA':'CoinGecko'} 验证通过。`, ...(provider==='qwen'?{endpoint:credential.baseUrl,model:credential.model}:{}) };
   } catch(error) {
+    // A failed check must revoke any earlier success immediately; otherwise an
+    // expired or replaced key would continue to expose and authorize AI chat.
+    if (apiCredentials._verification?.[provider]) {
+      delete apiCredentials._verification[provider];
+      saveApiCredentialsFile();
+    }
     // 千问 401 最常见的真实原因不是 Key 错，而是 Key 与端点不配套。
     // The most common cause of a Qwen 401 is not a bad key but a key/endpoint mismatch.
     let detail;
@@ -1193,6 +1199,31 @@ async function fearGreedSentiment({ refresh = false } = {}) {
 const monthIndex = { january:0,february:1,march:2,april:3,may:4,june:5,july:6,august:7,september:8,october:9,november:10,december:11,jan:0,feb:1,mar:2,apr:3,jun:5,jul:6,aug:7,sep:8,sept:8,oct:9,nov:10,dec:11 };
 function plainText(html) { return String(html).replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/gi, ' ').replace(/\s+/g, ' ').trim(); }
 function dateAtNoon(year, month, day) { return new Date(Date.UTC(year, month, day, 17, 0, 0)); }
+// 「墙钟时间」→ UTC 毫秒。BLS / 美联储日历给的是美国东部时间（ET，含夏令时），
+// 不能当成 UTC 直接存，否则会整体偏早 4 小时（CPI 8:30 ET 应是北京时间 20:30，而非 16:30）。
+// Convert a wall-clock time in `timeZone` to its true UTC instant. BLS/Fed calendars publish in
+// US Eastern Time; treating it as UTC would shift every release ~4h early.
+function tzOffsetMs(timeZone, date) {
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone, hour12:false, year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit' }).formatToParts(date);
+  const m = {}; for (const p of parts) m[p.type] = p.value;
+  const asUTC = Date.UTC(+m.year, +m.month - 1, +m.day, +m.hour % 24, +m.minute, +m.second);
+  return asUTC - date.getTime();
+}
+function wallToUtc(year, month, day, hour, minute, timeZone = 'America/New_York') {
+  const wallUtc = Date.UTC(year, month, day, hour, minute, 0);
+  let t = wallUtc;
+  const fmt = new Intl.DateTimeFormat('en-US', { timeZone, hour12:false, year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit' });
+  // 迭代求出「在某个时区下墙钟显示为 wall 的 UTC 瞬间」。每轮：把该瞬间在目标时区里
+  // 显示出的本地时间当作 UTC 还原成 shown，再用 wallUtc - shown 修正。两轮即可跨 DST 收敛。
+  // Iterate to the UTC instant whose local time in `timeZone` equals the wall clock.
+  for (let i = 0; i < 2; i++) {
+    const parts = fmt.formatToParts(new Date(t));
+    const m = {}; for (const p of parts) m[p.type] = p.value;
+    const shown = Date.UTC(+m.year, +m.month - 1, +m.day, +m.hour % 24, +m.minute, +m.second);
+    t += (wallUtc - shown);
+  }
+  return t;
+}
 function nearestDate(text, { range = false } = {}) {
   const now = Date.now(), candidates = [];
   const exp = range ? /\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2})(?:\s*(?:-|–|—|to)\s*\d{1,2})?(?:,?\s*(20\d{2}))?/gi : /\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2})(?:,?\s*(20\d{2}))?/gi;
@@ -1205,9 +1236,39 @@ function nearestDate(text, { range = false } = {}) {
   }
   candidates.sort((a, b) => a.at - b.at); return candidates[0] || null;
 }
+// Parse FOMC meeting rows from the Fed page instead of scanning all visible
+// dates. The page also contains minutes release dates and next year's calendar;
+// a page-wide "nearest date" scan can therefore attach an unrelated date to
+// the FOMC event. Monetary-policy decisions are released on the final meeting
+// day at 14:00 ET.
+function nearestFomcDecision(html, now = Date.now()) {
+  const source = String(html || ''), candidates = [];
+  const headings = [...source.matchAll(/\b(20\d{2}) FOMC Meetings\b/g)];
+  for (let sectionIndex = 0; sectionIndex < headings.length; sectionIndex++) {
+    const year = Number(headings[sectionIndex][1]);
+    const start = headings[sectionIndex].index + headings[sectionIndex][0].length;
+    const end = headings[sectionIndex + 1]?.index ?? source.length;
+    const section = source.slice(start, end);
+    const rowRe = /fomc-meeting__month[^>]*>\s*<strong>([^<]+)<\/strong>[\s\S]*?fomc-meeting__date[^>]*>\s*([^<]+)/gi;
+    for (const match of section.matchAll(rowRe)) {
+      const monthLabel = match[1].trim(), dateLabel = match[2].replace(/<[^>]+>/g, '').trim();
+      const months = monthLabel.split('/').map(value => monthIndex[value.trim().toLowerCase()]).filter(Number.isInteger);
+      const days = [...dateLabel.matchAll(/\d{1,2}/g)].map(value => Number(value[0]));
+      if (!months.length || !days.length) continue;
+      const decisionDay = days.at(-1);
+      const decisionMonth = months.length > 1 && days.length > 1 && decisionDay < days[0] ? months.at(-1) : months[0];
+      const at = wallToUtc(year, decisionMonth, decisionDay, 14, 0, 'America/New_York');
+      if (at >= now - 86_400_000 && at < now + 400 * 86_400_000) {
+        candidates.push({ at, label:`${monthLabel} ${dateLabel.replace(/\*/g, '')}, ${year}` });
+      }
+    }
+  }
+  candidates.sort((a, b) => a.at - b.at);
+  return candidates[0] || null;
+}
 // BLS publishes a canonical ICS calendar; parse its Employment Situation event instead of guessing from page prose.
 // BLS 提供权威 ICS 日历；非农直接解析 Employment Situation 事件，不再从网页正文猜测日期。
-function nearestIcsEvent(text, summaryPattern) { const now=Date.now(), candidates=[];for(const block of String(text).split(/BEGIN:VEVENT/i).slice(1)){const summary=(block.match(/SUMMARY:(.+)/i)||[])[1]||'',date=(block.match(/DTSTART(?:;[^:]*)?:(\d{8})(?:T(\d{2})(\d{2}))?/i)||[]);if(!summaryPattern.test(summary)||!date[1])continue;const year=Number(date[1].slice(0,4)),month=Number(date[1].slice(4,6))-1,day=Number(date[1].slice(6,8)),hour=Number(date[2]||17),minute=Number(date[3]||0),at=Date.UTC(year,month,day,hour,minute);if(at>=now-86_400_000&&at<now+400*86_400_000)candidates.push({at,label:`${year}-${String(month+1).padStart(2,'0')}-${String(day).padStart(2,'0')}`})}candidates.sort((a,b)=>a.at-b.at);return candidates[0]||null }
+function nearestIcsEvent(text, summaryPattern) { const now=Date.now(), candidates=[];for(const block of String(text).split(/BEGIN:VEVENT/i).slice(1)){const summary=(block.match(/SUMMARY:(.+)/i)||[])[1]||'',date=(block.match(/DTSTART(?:;[^:]*)?:(\d{8})(?:T(\d{2})(\d{2}))?/i)||[]);if(!summaryPattern.test(summary)||!date[1])continue;const year=Number(date[1].slice(0,4)),month=Number(date[1].slice(4,6))-1,day=Number(date[1].slice(6,8)),hour=Number(date[2]||17),minute=Number(date[3]||0),at=wallToUtc(year,month,day,hour,minute,'America/New_York');if(at>=now-86_400_000&&at<now+400*86_400_000)candidates.push({at,label:`${year}-${String(month+1).padStart(2,'0')}-${String(day).padStart(2,'0')}`})}candidates.sort((a,b)=>a.at-b.at);return candidates[0]||null }
 // Fallback only when BLS cannot be reached: Employment Situation is normally released on the first Friday of the following month at 08:30 ET.
 // 仅当 BLS 不可达时的回退：非农通常在次月第一个周五 08:30 ET 发布。
 function payrollCadenceFallback(now=Date.now()) { const date=new Date(now), year=date.getUTCFullYear(), month=date.getUTCMonth()+1;let candidate=new Date(Date.UTC(year,month,1,12,30));candidate.setUTCDate(1+((5-candidate.getUTCDay()+7)%7));if(candidate.getTime()<now-86_400_000){candidate=new Date(Date.UTC(year,month+1,1,12,30));candidate.setUTCDate(1+((5-candidate.getUTCDay()+7)%7))}return {at:candidate.getTime(),label:`${candidate.getUTCFullYear()}-${String(candidate.getUTCMonth()+1).padStart(2,'0')}-${String(candidate.getUTCDate()).padStart(2,'0')}`,fallback:true} }
@@ -1239,7 +1300,7 @@ async function refreshFedCalendar(now = Date.now()) {
       ]);
       const textAt = index => pages[index].status === 'fulfilled' ? plainText(pages[index].value) : '', rawAt=index=>pages[index].status === 'fulfilled'?String(pages[index].value):'';
       let events = [
-        { key:'fomc', name:'FOMC 利率决议', source:'Federal Reserve', ...nearestDate(textAt(0), { range:true }) },
+        { key:'fomc', name:'FOMC 利率决议', source:'Federal Reserve', ...nearestFomcDecision(rawAt(0), now) },
         // CPI 与非农都优先解析 BLS 统一 ICS 日历，网页明细仅作为兼容回退。
         // Parse both CPI and payrolls from BLS's canonical ICS calendar first; use detail pages only as compatibility fallbacks.
         { key:'cpi', name:'美国 CPI', source:'U.S. Bureau of Labor Statistics', ...(nearestIcsEvent(rawAt(3),/Consumer Price Index/i) || nearestDate(textAt(1)) || cpiCadenceFallback(now)) },
@@ -1455,7 +1516,7 @@ function blsMacroEvents(ics, now) {
     if (!summary || !rawDate || !relevant.test(summary)) return null;
     const parts=rawDate.match(/(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2}))?/);
     if (!parts) return null;
-    const at=Date.UTC(+parts[1], +parts[2]-1, +parts[3], +(parts[4] || 12), +(parts[5] || 0));
+    const at=wallToUtc(+parts[1], +parts[2]-1, +parts[3], +(parts[4] || 12), +(parts[5] || 0), 'America/New_York');
     if (at < now - 24 * 3_600_000 || at > now + 50 * 86_400_000) return null;
     const importance=/consumer price index|employment situation/i.test(summary) ? 'high' : /producer price index/i.test(summary) ? 'medium' : 'low';
     return { id:`bls-${at}-${index}`, at, country:'US', category:'macro', title:summary, importance,
@@ -1549,27 +1610,191 @@ function deribitExpiryEvents(payload, now) {
   return selected.map(at => ({ id:`deribit-btc-expiry-${at}`, at, country:'BTC', category:'crypto', title:'Deribit BTC 期权到期', importance:new Date(at).getUTCDate() > 24 ? 'high' : 'medium', actual:null, estimate:null, previous:null,
     source:'Deribit public API', directional:'到期日可能放大短线对冲与 Gamma 影响；需结合未平仓量和隐含波动率，不预设方向' }));
 }
-async function investmentCalendar() {
+// Domestic, key-free, comprehensive macro calendar via Eastmoney's public
+// data-center endpoint. Times arrive as Beijing wall-clock strings (no DST in
+// China), so convert to UTC by subtracting a fixed 8 hours.
+function parseShanghaiDateTime(value) {
+  const match = String(value || '').match(/(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/);
+  if (!match) return NaN;
+  const [, y, mo, d, h, mi, s] = match;
+  return Date.UTC(+y, +mo - 1, +d, +h, +mi, +(s || 0)) - 8 * 3_600_000;
+}
+const EASTMONEY_COUNTRY = {
+  '美国':'US','中国':'CN','中国香港':'HK','中国台湾':'TW','欧盟':'EU','欧元区':'EU','日本':'JP','英国':'UK','德国':'DE','法国':'FR','巴西':'BR','澳大利亚':'AU','新加坡':'SG','加拿大':'CA','韩国':'KR','印度':'IN','俄罗斯':'RU','OPEC':'OPEC','瑞士':'CH','意大利':'IT','西班牙':'ES','墨西哥':'MX','土耳其':'TR','南非':'ZA','新西兰':'NZ',
+};
+function normalizeEastmoneyCountry(city) {
+  const c = String(city || '').trim();
+  if (EASTMONEY_COUNTRY[c]) return EASTMONEY_COUNTRY[c];
+  if (/[一-龥]/.test(c)) return 'CN';
+  if (/^[A-Za-z]{2,4}$/.test(c)) return c.toUpperCase();
+  return 'GLOBAL';
+}
+function cleanEastmoneyTitle(name) {
+  return String(name || '').replace(/\(报告期[^)]*\)/g, '').replace(/:/g, ' · ').replace(/\s+/g, ' ').trim();
+}
+// Eastmoney returns the same macro release split into multiple indicator variants
+// (e.g. "美国 · 核心CPI · 季调 · 环比", "美国 · CPI · 非季调 · 同比"). Collapse
+// these into a single, recognizable headline so the calendar does not silently
+// drop the release behind a wall of near-duplicate rows.
+function canonicalEastmoneyTitle(title) {
+  const t = String(title || '');
+  if (/^美国.*CPI/i.test(t)) return '美国 · CPI · Consumer Price Index';
+  if (/^美国.*PPI/i.test(t)) return '美国 · PPI · Producer Price Index';
+  if (/^美国.*非农/i.test(t)) return '美国 · 非农就业 · Nonfarm Payrolls';
+  if (/^美国.*核心PCE|美国.*PCE/i.test(t)) return '美国 · 核心PCE · Personal Consumption Expenditures';
+  if (/^中国.*CPI/i.test(t)) return '中国 · CPI · 消费者价格指数';
+  if (/^中国.*PPI/i.test(t)) return '中国 · PPI · 生产者价格指数';
+  if (/^欧元区.*CPI/i.test(t)) return '欧元区 · CPI · Harmonised Index of Consumer Prices';
+  if (/^英国.*CPI/i.test(t)) return '英国 · CPI · Consumer Price Index';
+  if (/^加拿大.*CPI/i.test(t)) return '加拿大 · CPI · Consumer Price Index';
+  return title;
+}
+// The source tags conferences and forums as "important" (STD_TYPE_CODE 1), which
+// is noise for a BTC risk calendar. Re-rank by macro relevance so the high-impact
+// filter and the risk callout surface actual data releases and central-bank moves.
+function eastmoneyImportance(title) {
+  const t = String(title || '');
+  if (/cpi|消费者价格|非农|失业率|初请|就业人口|就业|pce|gdp|零售销售|利率决议|货币政策|美联储|联储|欧央行|央行|通胀|核心|物价指数|议息|降息|加息/i.test(t)) return 'high';
+  if (/贸易帐|pmi|工业产出|新屋|营建|耐用品|消费者信心|收支|进出口|原油库存|api|eia|国债|收益率|制造业|服务业|景气|外储|外匯|m[012]|m[12]供应|社融|信贷/i.test(t)) return 'medium';
+  return 'low';
+}
+async function eastmoneyCalendarEvents(now) {
+  const fmt = (d) => `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}-${String(d.getUTCDate()).padStart(2,'0')}`;
+  const start = new Date(now - 7 * 86_400_000), end = new Date(now + 45 * 86_400_000);
+  const filter = `(END_DATE>='${fmt(start)}')(START_DATE<'${fmt(end)}')`;
+  const url = `https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_CPH_FECALENDAR&columns=ALL&pageSize=300&sortColumns=START_DATE&sortTypes=1&source=WEB&client=WEB&filter=${encodeURIComponent(filter)}`;
+  const payload = await request(url, 9_000, { 'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36' });
+  const rows = (payload && payload.result && payload.result.data) || [];
+  return rows.filter(row => row && row.START_DATE && row.FE_NAME).map((row, index) => {
+    const at = parseShanghaiDateTime(row.START_DATE);
+    if (!Number.isFinite(at) || at < now - 5 * 86_400_000) return null;
+    const title = canonicalEastmoneyTitle(cleanEastmoneyTitle(row.FE_NAME));
+    const importance = eastmoneyImportance(title);
+    const titleCountry = inferCountryFromTitle(title);
+    return {
+      id:`em-${row.FE_CODE || at}-${index}`, at, country:titleCountry !== 'GLOBAL' ? titleCountry : normalizeEastmoneyCountry(row.CITY),
+      category:'macro',
+      title, importance, actual:null, estimate:null, previous:null,
+      source:'东方财富 数据研究中心',
+      directional:'发布前后关注实际值相对市场预期的偏差；数据本身不构成 BTC 方向信号，结合美元、实际利率与风险偏好综合判断',
+    };
+  }).filter(Boolean).sort((a,b) => a.at - b.at);
+}
+function normalizeTvCountry(code) {
+  const map = { GB:'UK', UK:'UK', EU:'EU', US:'US', CN:'CN', JP:'JP', DE:'DE', FR:'FR', CA:'CA', AU:'AU', KR:'KR', IN:'IN', RU:'RU', CH:'CH', IT:'IT', ES:'ES', MX:'MX', TR:'TR', ZA:'ZA', NZ:'NZ', SG:'SG', HK:'HK', TW:'TW', BR:'BR' };
+  const c = String(code || '').toUpperCase();
+  return map[c] || (c.length <= 4 ? c : 'GLOBAL');
+}
+// A shared keyword signature lets us de-duplicate the same macro release across
+// the domestic feed and the supplementary global feeds (TradingView / FinanceCalendar),
+// even when their titles differ in language or wording.
+const MACRO_KEYWORDS = [
+  ['cpi', /cpi|消费者价格|通胀|物价指数|物价|consumer price index|retail price index/i],
+  ['ppi', /ppi|生产者价格|生产者物价|producer price index/i],
+  ['nfp', /nonfarm|non-farm|payroll|非农|就业人口|employment situation|就业/i],
+  ['gdp', /gdp|国内生产总值|gross domestic product/i],
+  ['pce', /pce|personal consumption expenditures/i],
+  ['retail', /retail|零售/i],
+  ['fomc', /fomc|利率决议|rate decision|policy rate|货币政策|interest rate|议息/i],
+  ['trade', /trade balance|贸易帐|贸易/i],
+  ['pmi', /pmi|制造业|服务业景气|商业活动/i],
+  ['jobs', /jobless|初请|失业|claims|失业率/i],
+  ['housing', /housing|新屋|营建|房屋|hpi|房价|楼/i],
+];
+function macroKeyword(title) {
+  const t = String(title || '');
+  for (const [k, re] of MACRO_KEYWORDS) if (re.test(t)) return k;
+  return '';
+}
+function macroSig(event) {
+  const at = Number(event.at);
+  if (!Number.isFinite(at)) return '';
+  const kw = macroKeyword(event.title);
+  if (!kw) return '';
+  const day = new Date(at).toISOString().slice(0, 10);
+  return `${String(event.country || 'GLOBAL').toUpperCase()}|${kw}|${day}`;
+}
+function inferCountryFromTitle(title) {
+  const t = String(title || '');
+  if (/美国|U\.?S\.?(\s|$)|federal reserve|fomc|wall street/i.test(t)) return 'US';
+  if (/ecb|欧元区|eurozone|euro area|欧洲央行/i.test(t)) return 'EU';
+  if (/英国|U\.?K\.?(\s|$)|bank of england|boe/i.test(t)) return 'UK';
+  if (/中国|china|pboc|人民银行/i.test(t)) return 'CN';
+  if (/日本|japan|boj|日银/i.test(t)) return 'JP';
+  if (/德国|germany|buba/i.test(t)) return 'DE';
+  if (/加拿大|canada/i.test(t)) return 'CA';
+  if (/澳洲|australia|rba/i.test(t)) return 'AU';
+  return 'GLOBAL';
+}
+// TradingView's public economic-calendar endpoint is key-free and returns actual /
+// forecast / previous values the domestic feed lacks. We use it to enrich the
+// domestic macro rows and to surface genuinely new high-impact releases.
+async function tradingViewEvents(now) {
+  const from = new Date(now - 7 * 86_400_000).toISOString();
+  const to = new Date(now + 30 * 86_400_000).toISOString();
+  const url = `https://economic-calendar.tradingview.com/events?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&countries=`;
+  const payload = await request(url, 12_000, { 'user-agent':'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36', 'origin':'https://www.tradingview.com' });
+  const rows = (payload && payload.result) || [];
+  return rows.filter(r => r && r.date && r.importance !== -1).map((r, index) => {
+    const at = Date.parse(r.date);
+    if (!Number.isFinite(at) || at < now - 10 * 86_400_000 || at > now + 45 * 86_400_000) return null;
+    const title = String(r.title || '').trim();
+    return {
+      id:`tv-${r.id || at}-${index}`, at, country:normalizeTvCountry(r.country), category:'macro',
+      title, importance:eastmoneyImportance(title),
+      actual: r.actual != null && r.actual !== '' ? String(r.actual) : null,
+      estimate: r.forecast != null && r.forecast !== '' ? String(r.forecast) : null,
+      previous: r.previous != null && r.previous !== '' ? String(r.previous) : null,
+      source:'TradingView 经济日历',
+      directional:'TradingView 全球宏观事件；关注实际值相对预期的偏差，结合美元、实际利率与风险偏好，不单独构成 BTC 方向信号',
+    };
+  }).filter(Boolean);
+}
+async function financeCalendarEvents(now) {
+  const from = new Date(now - 1 * 86_400_000).toISOString().slice(0, 10);
+  const to = new Date(now + 45 * 86_400_000).toISOString().slice(0, 10);
+  const url = `https://www.financecalendar.com/wp-json/fc/v1/calendar?from=${from}&to=${to}&impact=high,medium,low&limit=200`;
+  const payload = await request(url, 10_000, { 'user-agent':'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36' });
+  const rows = (payload && payload.events) || [];
+  return rows.map((r, index) => {
+    const at = Date.parse(r.time_utc || r.date);
+    if (!Number.isFinite(at) || at < now - 10 * 86_400_000 || at > now + 45 * 86_400_000) return null;
+    const title = String(r.title || r.name || '').trim();
+    const imp = String(r.impact || '').toLowerCase() === 'high' ? 'high' : String(r.impact || '').toLowerCase() === 'medium' ? 'medium' : 'low';
+    return {
+      id:`fc-${r.url || at}-${index}`, at, country:inferCountryFromTitle(title), category:'macro',
+      title, importance:imp,
+      actual: r.actual != null && r.actual !== '' ? String(r.actual) : null,
+      estimate: r.consensus != null && r.consensus !== '' ? String(r.consensus) : null,
+      previous: r.prior != null && r.prior !== '' ? String(r.prior) : null,
+      source:'FinanceCalendar',
+      directional:'FinanceCalendar 整理的央行决议与关键宏观发布；关注实际值与市场共识的偏差',
+    };
+  }).filter(Boolean);
+}
+async function investmentCalendar({ refresh = false } = {}) {
   const key = 'investment-calendar', hit = cache.get(key), now = Date.now();
-  if (hit && now - hit.time < INVESTMENT_CALENDAR_TTL) return cacheResult(hit, now);
+  if (!refresh && hit && now - hit.time < INVESTMENT_CALENDAR_TTL) return cacheResult(hit, now);
   return coalesce(key, async () => {
     const official = await fedCalendar();
     const officialEvents = (official.events || []).map(event => ({
       id:`official-${event.key}-${event.at}`, at:event.at, country:'US', category:'macro',
-      title:event.name, importance:'high', actual:event.actual?.value || null, estimate:null, previous:null,
+      key:event.key, title:event.name, importance:'high', actual:event.actual?.value || null, estimate:null, previous:null,
       source:event.source, fallback:Boolean(event.fallback),
       directional:'发布前后波动可能放大；等待实际值与预期的偏差确认',
     }));
     const requests = [
       request('https://mempool.space/api/v1/difficulty-adjustment', 8_000),
-      FINNHUB_API_KEY ? request(`https://finnhub.io/api/v1/calendar/economic?from=${new Date(now).toISOString().slice(0,10)}&to=${new Date(now + 31 * 86_400_000).toISOString().slice(0,10)}&token=${encodeURIComponent(FINNHUB_API_KEY)}`, 8_000) : Promise.resolve(null),
       requestText('https://www.bls.gov/schedule/news_release/bls.ics', 8_000),
       treasuryCalendarEvents(now),
       requestText('https://www.eia.gov/petroleum/supply/weekly/schedule.php', 8_000),
       EIA_API_KEY ? request(`https://api.eia.gov/v2/petroleum/pri/spt/data/?api_key=${encodeURIComponent(EIA_API_KEY)}&frequency=weekly&data[0]=value&length=1`,8_000) : Promise.resolve(null),
       request('https://www.deribit.com/api/v2/public/get_instruments?currency=BTC&kind=option&expired=false', 8_000),
+      eastmoneyCalendarEvents(now),
+      tradingViewEvents(now),
+      financeCalendarEvents(now),
     ];
-    const [difficulty, finnhub, blsIcs, treasury, eia, eiaActual, deribit] = await Promise.allSettled(requests);
+    const [difficulty, blsIcs, treasury, eia, eiaActual, deribit, eastmoney, tradingView, financecal] = await Promise.allSettled(requests);
     const chainEvents = [];
     if (difficulty.status === 'fulfilled') {
       const raw = difficulty.value || {}, at = Number(raw.estimatedRetargetDate);
@@ -1579,8 +1804,6 @@ async function investmentCalendar() {
         previous:null, source:'mempool.space', directional:'链上供给节奏事件；不单独构成方向信号',
       });
     }
-    const premium = finnhub.status === 'fulfilled' && finnhub.value
-      ? normalizeFinnhubCalendar(finnhub.value.economicCalendar || finnhub.value.calendar || [], now) : [];
     const macroEvents=blsIcs.status === 'fulfilled' ? blsMacroEvents(blsIcs.value, now) : [];
     const liquidityEvents=treasury.status === 'fulfilled' ? treasury.value : [];
     const policyEvents=treasuryLongEndBuybackPolicyEvent(now);
@@ -1592,14 +1815,97 @@ async function investmentCalendar() {
     const cotAt=nextWeekdayAt(now, 5, '15:30');
     const positioningEvents=[{ id:`cftc-cot-${cotAt}`, at:cotAt, country:'GLOBAL', category:'risk', title:'CFTC COT · 黄金/WTI 持仓', importance:'low', actual:null, estimate:null, previous:null,
       source:'U.S. Commodity Futures Trading Commission · publication cadence', directional:'周度持仓用于识别拥挤与跨资产风险偏好，发布滞后于持仓截点，不能作为即时信号' }];
-    // Finnhub is authoritative for consensus fields when configured; retain
-    // official dates for items it does not return or while the feed is absent.
-    const events = [...premium, ...officialEvents.filter(item => !premium.some(row => Math.abs(row.at - item.at) < 18 * 3_600_000 && /cpi|payroll|fomc|fed/i.test(`${row.title} ${item.title}`))), ...macroEvents, ...policyEvents, ...liquidityEvents, ...energyEvents, ...positioningEvents, ...chainEvents, ...derivativesEvents]
-      .filter((event, index, rows) => !rows.slice(0,index).some(row => Math.abs(row.at-event.at) < 3_600_000 && row.category===event.category && (row.title===event.title || (event.category==='macro' && row.source===event.source))))
-      .sort((a,b) => a.at - b.at).slice(0, 48);
+
+    // The domestic Eastmoney feed is the comprehensive, key-free primary source.
+    // Official US Fed/BLS events are merged only to attach released values and,
+    // when the domestic feed is unavailable, as a full fallback.
+    const domesticEvents = eastmoney.status === 'fulfilled' ? (eastmoney.value || []) : [];
+    // Some broad calendars publish the first day of a two-day FOMC meeting,
+    // while the market-moving rate decision is on the final day. Prefer the
+    // Fed's official decision timestamp and canonical title when the dates are
+    // close enough to describe the same meeting.
+    const officialFomc = officialEvents.find(event => event.key === 'fomc');
+    if (officialFomc) {
+      for (const event of domesticEvents) {
+        if (macroKeyword(event.title) !== 'fomc' || Math.abs(event.at - officialFomc.at) > 48 * 3_600_000) continue;
+        event.at = officialFomc.at;
+        event.country = 'US';
+        event.title = '美国 · FOMC 利率决议';
+        if (!event.source.includes(officialFomc.source)) event.source = `${event.source} · ${officialFomc.source}`;
+      }
+    }
+    const domesticAvailable = domesticEvents.length > 0;
+    const macroKeywordRe = /cpi|非农|就业|失业率|pce|gdp|零售|利率|fomc|fed|物价|通胀|央行/i;
+
+    // Supplementary global feeds (TradingView, FinanceCalendar) are key-free and
+    // add actual / forecast / previous values the domestic feed lacks, plus a few
+    // releases the domestic feed does not carry. De-duplicate by macro signature.
+    const supplement = [
+      ...(tradingView.status === 'fulfilled' ? (tradingView.value || []) : []),
+      ...(financecal.status === 'fulfilled' ? (financecal.value || []) : []),
+    ];
+    const domesticSigs = new Set(domesticEvents.map(macroSig).filter(Boolean));
+    for (const ev of domesticEvents) {
+      const sig = macroSig(ev);
+      if (!sig) continue;
+      const match = supplement.find(s => macroSig(s) === sig);
+      if (!match) continue;
+      const had = ev.actual ?? ev.estimate ?? ev.previous;
+      ev.actual = ev.actual ?? match.actual ?? null;
+      ev.estimate = ev.estimate ?? match.estimate ?? null;
+      ev.previous = ev.previous ?? match.previous ?? null;
+      if (!had && (ev.actual ?? ev.estimate ?? ev.previous) && !ev.source.includes(match.source)) {
+        ev.source = `${ev.source} · ${match.source}`;
+      }
+    }
+    const newSupplement = [];
+    for (const s of supplement) {
+      const sig = macroSig(s);
+      if (!sig) continue;
+      if (domesticSigs.has(sig)) continue;
+      if (s.importance !== 'high' && s.importance !== 'medium') continue;
+      domesticSigs.add(sig);
+      newSupplement.push(s);
+    }
+
+    const merged = [];
+    const usedOfficial = new Set();
+    if (domesticEvents.length) {
+      for (const ev of domesticEvents) {
+        const idx = officialEvents.findIndex((o, i) => !usedOfficial.has(i) && Math.abs(o.at - ev.at) < 12 * 3_600_000 && macroKeywordRe.test(`${o.title} ${ev.title}`));
+        if (idx >= 0) {
+          usedOfficial.add(idx);
+          ev.actual = ev.actual ?? officialEvents[idx].actual;
+          ev.estimate = ev.estimate ?? officialEvents[idx].estimate;
+          ev.previous = ev.previous ?? officialEvents[idx].previous;
+        }
+        merged.push(ev);
+      }
+    }
+    const extraOfficial = domesticEvents.length
+      ? officialEvents.filter((o, i) => !usedOfficial.has(i) && !merged.some(row => Math.abs(row.at - o.at) < 18 * 3_600_000 && macroKeywordRe.test(`${row.title} ${o.title}`)))
+      : officialEvents;
+    const events = [...merged, ...extraOfficial, ...newSupplement, ...macroEvents, ...policyEvents, ...liquidityEvents, ...energyEvents, ...positioningEvents, ...chainEvents, ...derivativesEvents]
+      .filter((event, index, rows) => !rows.slice(0,index).some(row =>
+        (Math.abs(row.at-event.at) < 3_600_000 && row.category===event.category && (row.title===event.title || (event.category==='macro' && row.source===event.source)))
+        || (event.category==='macro' && row.category==='macro' && macroSig(row) && macroSig(row)===macroSig(event))))
+      // Keep a short history window so the client's 昨天 / 本周 views have data,
+      // then order strictly by wall clock (the client groups rows by Beijing day
+      // and sorts ascending, so a plain ascending sort is what it needs).
+      .filter((event) => Number(event.at) >= now - 4 * 86_400_000)
+      .sort((a, b) => a.at - b.at)
+      // Some official calendars list the same macro release at a placeholder time
+      // (e.g. midnight) while the domestic feed has the exact Beijing time. After
+      // sorting, drop later duplicates that share country + keyword + Beijing day.
+      .filter((event, index, rows) => {
+        if (event.category !== "macro") return true;
+        const sig = `${event.country || "GLOBAL"}|${macroKeyword(event.title)}|${new Date(event.at + 8 * 3_600_000).toISOString().slice(0, 10)}`;
+        return !(sig.includes("|") && !sig.endsWith("|") && rows.slice(0, index).some(row => row.category === "macro" && `${row.country || "GLOBAL"}|${macroKeyword(row.title)}|${new Date(row.at + 8 * 3_600_000).toISOString().slice(0, 10)}` === sig));
+      })
+      .slice(0, 360);
     const result = { events, fetchedAt:now, refreshMs:INVESTMENT_CALENDAR_TTL, cached:false,
-      provider:{ finnhubConfigured:Boolean(FINNHUB_API_KEY), finnhubAvailable:Boolean(FINNHUB_API_KEY) && finnhub.status === 'fulfilled', officialSources:official.sources || [], treasuryAvailable:treasury.status === 'fulfilled', energyAvailable:eia.status === 'fulfilled', eiaKeyAvailable:Boolean(EIA_API_KEY) && eiaActual.status === 'fulfilled', derivativesAvailable:deribit.status === 'fulfilled', chainAvailable:difficulty.status === 'fulfilled' },
-      disclaimer:'日历用于识别风险窗口与宏观驱动，不构成投资建议。财政部日程为暂定表，操作规模以当日官方公告为准；所有时间均以 UTC 保存，界面默认显示北京时间，也可切换 UTC。' };
+      provider:{ domesticSource:'东方财富 数据研究中心', domesticAvailable, officialSources:official.sources || [], treasuryAvailable:treasury.status === 'fulfilled', energyAvailable:eia.status === 'fulfilled', eiaKeyAvailable:Boolean(EIA_API_KEY) && eiaActual.status === 'fulfilled', derivativesAvailable:deribit.status === 'fulfilled', chainAvailable:difficulty.status === 'fulfilled', finnhubConfigured:false, tradingViewAvailable:tradingView.status === 'fulfilled', financeCalendarAvailable:financecal.status === 'fulfilled' },
+      disclaimer:'日历用于识别风险窗口与宏观驱动，不构成投资建议。国内宏观事件由东方财富免费公开接口提供（北京时间），覆盖全球主要经济体数据发布、央行决议与重要会议；TradingView 与 FinanceCalendar 作为全球宏观补充源，回填实际值／预期／前值并补充个别未覆盖的发布；美联储／BLS 官方日程作为补充并回填已公布数值。财政部日程为暂定表，操作规模以当日官方公告为准；所有时间均以 UTC 保存，界面默认显示北京时间，也可切换 UTC/美东。' };
     remember(key, result); return result;
   });
 }
@@ -2090,6 +2396,7 @@ async function market(interval, limit, preferred) {
 const aiChat = createAiChat({
   market, liveQuote, marketContext, fearGreedSentiment, fedMonitor, investmentCalendar,
   getCredential: (provider) => (provider === 'qwen' ? qwenCredential() : null),
+  getVerification: (provider) => Boolean(apiCredentials._verification?.[provider]?.valid),
   setModel: (model) => setQwenModel(model)
 });
 const mime = { '.html':'text/html; charset=utf-8', '.js':'text/javascript; charset=utf-8', '.css':'text/css; charset=utf-8', '.svg':'image/svg+xml', '.png':'image/png', '.ico':'image/x-icon' };
@@ -2273,8 +2580,13 @@ http.createServer((req, res) => requestTiming.run({ started:performance.now(), u
     return;
   }
   if (url.pathname === '/api/investment-calendar') {
-    try { json(res, 200, await investmentCalendar()); }
+    try { json(res, 200, await investmentCalendar({ refresh:url.searchParams.get('refresh') === '1' })); }
     catch (e) { json(res, 503, { error:'Investment calendar unavailable', detail:e.message }); }
+    return;
+  }
+  if (url.pathname === '/api/news') {
+    try { json(res, 200, await bitcoinNews({ refresh:url.searchParams.get('refresh') === '1' })); }
+    catch (e) { json(res, 503, { error:'Bitcoin news unavailable', detail:e.message }); }
     return;
   }
   if (url.pathname === '/api/forecast-history') {
