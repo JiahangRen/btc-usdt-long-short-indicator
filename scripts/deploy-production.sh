@@ -49,6 +49,12 @@ recreate_services() {
 }
 
 rollback() {
+  # Surface the candidate containers' logs so a failed health check is
+  # diagnosable from the GitHub Actions output (we cannot SSH the host).
+  echo '--- app container logs (diagnostic) ---' >&2
+  docker compose logs --tail=200 app >&2 || true
+  echo '--- alert-worker container logs (diagnostic) ---' >&2
+  docker compose logs --tail=200 alert-worker >&2 || true
   if [ "$changed" != true ]; then
     echo 'Candidate image build failed before replacing the running release.' >&2
     return

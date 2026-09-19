@@ -9,6 +9,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { Communicate } from 'edge-tts.js';
 import { createAiChat, DEFAULT_MODEL as QWEN_DEFAULT_MODEL } from './ai-chat.mjs';
 import { createAlertStore } from './alert-store.mjs';
+import { evaluateAlertRule } from './shared/alert-rule-eval.mjs';
 
 // BTC 指标服务端：负责静态页面、公开数据源、SQLite 快照与实时 OKX 连接。
 // BTC indicator backend: serves the UI, public data sources, SQLite snapshots, and the live OKX connection.
