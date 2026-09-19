@@ -1,4 +1,25 @@
+import { emaSeriesPadded as ema, rsiSeriesPadded as rsi, atrSeriesPadded as atr } from '/shared/indicators.mjs';
 const $ = (id) => document.getElementById(id);
+/* 极值辅助：用循环代替 Math.max(...arr) / Math.min(...arr) 的展开写法。
+   当 arr 很大时，spread 会把每个元素当作函数实参展开，可能触发调用栈溢出
+   （RangeError: maximum call stack size exceeded）。空数组行为与 Math 一致：
+   maxOf([]) === -Infinity，minOf([]) === Infinity，因此可直接替换、语义不变。 */
+function maxOf(arr) {
+  let m = -Infinity;
+  for (let i = 0; i < arr.length; i++) if (arr[i] > m) m = arr[i];
+  return m;
+}
+function minOf(arr) {
+  let m = Infinity;
+  for (let i = 0; i < arr.length; i++) if (arr[i] < m) m = arr[i];
+  return m;
+}
+/* 前端常量：从散落魔法数字集中提取，便于审阅与统一调整（F4）。
+   只收录语义清晰、用途单一的散落数字；坐标等绘图常量保持就近声明。 */
+const VOICE_LIST_POPULATE_DELAY_MS = 350;        // 启动后延迟拉取语音列表，避开初始化竞争
+const LONG_TERM_INTERVAL_MIN = 240;              // “长周期”阈值：>= 4h（240 分钟）
+const DAILY_HISTORY_MAX_RETRIES = 3;             // 日线历史拉取失败后的最大重试次数
+const DAILY_HISTORY_RETRY_DELAY_MS = 4_000;      // 日线历史重试间隔（4s，避开上游限频）
 /* Use the application's dialog style instead of browser-native prompts. */
 function showAppDialog({
   title = "提示",
@@ -49,6 +70,11 @@ function showAppDialog({
   modal.hidden = false;
 }
 window.alert = (message) => showAppDialog({ message });
+// 桥接：经典脚本（cloud-alerts.js）以裸名 showAppDialog 调用；模块模式下顶层函数不再挂全局，故显式暴露到 window。
+window.showAppDialog = showAppDialog;
+// 显式声明历史上以“隐式全局”形式存在的可变状态（calcLiqProbability 全文件无任何 var/let/const/function 声明，
+// 是真正的隐式全局），使其可在 ES Module（strict 模式）下安全赋值；其余同名符号原本已在模块顶层以 function/const 声明，无需重复。
+var calcLiqProbability;
 // 前端控制器：维护首屏状态、定时请求、图表绘制和所有用户交互。
 // Frontend controller: owns initial state, scheduled requests, chart drawing, and user interactions.
 var quoteStripBusy = false;
@@ -139,57 +165,6 @@ function sma(values, p) {
       : values.slice(i - p + 1, i + 1).reduce((a, b) => a + b, 0) / p,
   );
 }
-function ema(values, p) {
-  const out = Array(values.length).fill(NaN),
-    k = 2 / (p + 1);
-  if (values.length < p) return out;
-  out[p - 1] = values.slice(0, p).reduce((a, b) => a + b, 0) / p;
-  for (let i = p; i < values.length; i++)
-    out[i] = values[i] * k + out[i - 1] * (1 - k);
-  return out;
-}
-function rsi(values, p = 14) {
-  const out = Array(values.length).fill(NaN);
-  if (values.length <= p) return out;
-  let g = 0,
-    l = 0;
-  for (let i = 1; i <= p; i++) {
-    const d = values[i] - values[i - 1];
-    if (d >= 0) g += d;
-    else l -= d;
-  }
-  let ag = g / p,
-    al = l / p;
-  out[p] = al === 0 ? 100 : 100 - 100 / (1 + ag / al);
-  for (let i = p + 1; i < values.length; i++) {
-    const d = values[i] - values[i - 1];
-    ag = (ag * (p - 1) + Math.max(d, 0)) / p;
-    al = (al * (p - 1) + Math.max(-d, 0)) / p;
-    out[i] = al === 0 ? 100 : 100 - 100 / (1 + ag / al);
-  }
-  return out;
-}
-function atr(data, p = 14) {
-  const out = Array(data.length).fill(NaN);
-  if (data.length <= p) return out;
-  let s = 0;
-  for (let i = 1; i <= p; i++)
-    s += Math.max(
-      data[i].high - data[i].low,
-      Math.abs(data[i].high - data[i - 1].close),
-      Math.abs(data[i].low - data[i - 1].close),
-    );
-  out[p] = s / p;
-  for (let i = p + 1; i < data.length; i++) {
-    const tr = Math.max(
-      data[i].high - data[i].low,
-      Math.abs(data[i].high - data[i - 1].close),
-      Math.abs(data[i].low - data[i - 1].close),
-    );
-    out[i] = (out[i - 1] * (p - 1) + tr) / p;
-  }
-  return out;
-}
 /* livePrice is optional: when given, the panel stops lagging one full candle.
    Pass the live quote only for the headline signal, not for confirmation
    intervals, so cross-interval checks stay on a consistent closed-candle basis. */
@@ -216,6 +191,8 @@ function metrics(data, livePrice) {
   score += Number.isFinite(e200[i]) ? (closes[i] > e200[i] ? 20 : -20) : 0;
   /* ATR-normalised. The old close*0.0015 denominator (~118 at 78k) pinned this
      term near zero on BTC, so MACD never moved the score. */
+  /* 对称钳位：把 MACD / RSI / 布林三项贡献分别夹在 ±15 / ±10 / ±10，避免任一
+     单项在极端行情下独大、淹没趋势与均线给出的信号（F4：把“为什么这么夹”写明）。 */
   score += Math.max(-15, Math.min(15, (macd / (atrV * 1.2)) * 15));
   score += Math.max(-10, Math.min(10, (rs[i] - 50) / 2.5));
   score += Math.max(-10, Math.min(10, (bb - 0.5) * 20));
@@ -854,8 +831,8 @@ function renderLeverageGuard(m) {
     swings = [];
   for (let i = 19; i < data.length; i++) {
     const window = data.slice(i - 19, i + 1),
-      hi = Math.max(...window.map((x) => x.high)),
-      lo = Math.min(...window.map((x) => x.low));
+      hi = maxOf(window.map((x) => x.high)),
+      lo = minOf(window.map((x) => x.low));
     swings.push((hi - lo) / data[i].close);
   }
   const sorted = swings.sort((a, b) => a - b),
@@ -1947,8 +1924,8 @@ function draw() { if (chartPaused) return; renderChart(); }
       a = Math.min(chartSelection.start, chartSelection.end),
       b = Math.max(chartSelection.start, chartSelection.end),
       s = d.slice(a, b + 1),
-      hi = Math.max(...s.map((v) => v.high)),
-      lo = Math.min(...s.map((v) => v.low)),
+      hi = maxOf(s.map((v) => v.high)),
+      lo = minOf(s.map((v) => v.low)),
       change = (s.at(-1).close / s[0].open - 1) * 100;
     const el = $("selectionStats");
     if (el)
@@ -2162,7 +2139,7 @@ renderLeverageGuard = function (m) {
   for (let i = 19; i < data.length; i++) {
     const w = data.slice(i - 19, i + 1);
     swings.push(
-      (Math.max(...w.map((x) => x.high)) - Math.min(...w.map((x) => x.low))) /
+      (maxOf(w.map((x) => x.high)) - minOf(w.map((x) => x.low))) /
         data[i].close,
     );
   }
@@ -2796,6 +2773,7 @@ setTimeout(() => {
   let settings = {
     enabled: false,
     livePriceEnabled: false,
+    livePriceConcise: false,
     interval: 60,
     lastSpokenAt: 0,
     voiceURI: "",
@@ -2888,6 +2866,8 @@ setTimeout(() => {
     audioContext = null,
     currentAudio = null,
     isSpeaking = false,
+    /* 正在/最近一次播报的规则名：设置面板状态行据此显示「正在播报：xxx」。 */
+    speakingLabel = null,
     speechSequence = 0,
     lastLiveSpokenPrice = null;
   let setSpeaking = () => {};
@@ -2971,7 +2951,7 @@ setTimeout(() => {
     await audio.play();
     return true;
   };
-  const say = (text, { force = false, chimeType, onStarted, onEnded, onFailure } = {}) => {
+  const say = (text, { force = false, chimeType, label, onStarted, onEnded, onFailure } = {}) => {
     if (!settings.enabled && !force) return false;
     // Edge TTS does not depend on the browser's system speech API.  Some
     // embedded browsers omit speechSynthesis entirely, so only touch it when
@@ -2981,7 +2961,7 @@ setTimeout(() => {
     currentAudio?.pause();
     const started = () => {
         if (sequence !== speechSequence) return;
-        setSpeaking(true);
+        setSpeaking(true, label);
         onStarted?.();
       },
       /* 被更高优先级的插队打断时也要回调 onEnded/onFailure，语音队列才能继续。 */
@@ -3065,6 +3045,12 @@ setTimeout(() => {
       ? `当前价格，${current}。${comparisons.join("")}`
       : `Current price, ${current}. ${comparisons.join(" ")}`;
   };
+  /* 精简版播报语：只报「当前实时价 + 数字」这一句，不带结尾句号和持仓对比。
+     数字不加千分位（76287.5 而非 76,287.5），避免 TTS 把逗号读成停顿。 */
+  const concisePriceText = (value) =>
+    uiLang === "zh"
+      ? `当前实时价 ${Number(value).toLocaleString("en-US", { maximumFractionDigits: 2, useGrouping: false })}`
+      : `Live price ${Number(value).toLocaleString("en-US", { maximumFractionDigits: 2, useGrouping: false })}`;
   const trigger = document.createElement("button");
   trigger.id = "voiceQuickToggle";
   trigger.type = "button";
@@ -3073,21 +3059,25 @@ setTimeout(() => {
   trigger.setAttribute("aria-expanded", "false");
   trigger.innerHTML = `<span class="voice-pulse voice-pulse-one" aria-hidden="true"></span><span class="voice-pulse voice-pulse-two" aria-hidden="true"></span><svg viewBox="0 0 64 64" aria-hidden="true"><path d="M8 25h13l18-14v42L21 39H8z"/><path class="voice-wave" d="M46 23c5 5 5 13 0 18M52 16c10 10 10 22 0 32"/><line class="voice-mute" x1="9" y1="10" x2="55" y2="54"/></svg><span class="voice-quick-toggle-label" aria-hidden="true"></span>`;
   priceCard.append(trigger);
-  setSpeaking = (playing) => {
+  setSpeaking = (playing, label = null) => {
     isSpeaking = Boolean(playing);
+    /* speakingLabel 只在拿到新 label 时更新；播报结束后保留，
+       状态行才能持续显示「已播报：<规则名>」。 */
+    if (isSpeaking && label) speakingLabel = label;
     trigger.classList.toggle("is-speaking", isSpeaking);
     trigger.classList.toggle("is-muted", !settings.enabled);
     trigger.disabled = !voicePlaybackAvailable;
-    const label = !voicePlaybackAvailable
+    const label2 = !voicePlaybackAvailable
       ? tx("当前环境不支持语音播报", "Voice broadcast is unavailable")
       : isSpeaking
         ? tx("语音播报设置（正在播报）", "Voice settings (speaking)")
         : tx("打开语音播报设置", "Open voice settings");
-    trigger.setAttribute("aria-label", label);
-    trigger.title = label;
+    trigger.setAttribute("aria-label", label2);
+    trigger.title = label2;
     trigger.querySelector(".voice-quick-toggle-label").textContent = isSpeaking
       ? tx("播报中", "Speaking")
       : "";
+    paintVoiceSpeaking();
   };
   const settingsModal = document.createElement("div");
   settingsModal.id = "voiceSettingsModal";
@@ -3098,7 +3088,7 @@ setTimeout(() => {
   const settingsBody = settingsModal.querySelector(".voice-settings-body");
   const panel = document.createElement("section");
   panel.className = "voice-alert-panel";
-  panel.innerHTML = `<div class="voice-panel-head"><div><b>${tx("语音播报", "Voice alerts")}</b><small id="voiceAlertStatus"></small></div></div><div class="voice-panel-grid"><section class="voice-panel-group voice-panel-toggles"><label class="voice-switch"><input id="voiceAlertEnabled" type="checkbox"><span>${tx("语音总开关", "Voice master")}</span></label><label class="voice-switch"><input id="voiceLivePriceEnabled" type="checkbox"><span>${tx("定时播报实时价", "Speak live price")}</span></label><label class="voice-live-interval">${tx("播报间隔", "Interval")}<select id="voiceAlertInterval"><option value="15">15 ${tx("秒", "sec")}</option><option value="30">30 ${tx("秒", "sec")}</option><option value="60">1 ${tx("分钟", "min")}</option><option value="300">5 ${tx("分钟", "min")}</option></select><small id="voiceLastSpokenAt" class="voice-last-spoken"></small></label></section><section class="voice-panel-group"><label>${tx("播报引擎", "Engine")}<select id="voiceAlertEngine"><option value="edge">${tx("Edge 神经语音（免费）", "Edge neural (free)")}</option><option value="system">${tx("本机系统语音", "System voice")}</option></select></label><label>${tx("音色", "Voice")}<select id="voiceAlertEdgeVoice"><optgroup label="${tx("自然女声", "Female (natural)")}"><option value="zh-CN-XiaoxiaoNeural">${tx("小晓 · 普通话", "Xiaoxiao · Mandarin")}</option><option value="zh-CN-XiaoyiNeural">${tx("小艺 · 普通话", "Xiaoyi · Mandarin")}</option><option value="zh-CN-liaoning-XiaobeiNeural">${tx("小北 · 辽宁口音", "Xiaobei · Liaoning")}</option><option value="zh-CN-shaanxi-XiaoniNeural">${tx("小妮 · 陕西口音", "Xiaoni · Shaanxi")}</option><option value="zh-TW-HsiaoChenNeural">${tx("晓臻 · 台湾国语", "HsiaoChen · Taiwanese")}</option><option value="zh-HK-HiuGaaiNeural">${tx("晓佳 · 粤语", "HiuGaai · Cantonese")}</option></optgroup><optgroup label="${tx("自然男声", "Male (natural)")}"><option value="zh-CN-YunxiNeural">${tx("云希 · 普通话", "Yunxi · Mandarin")}</option><option value="zh-CN-YunyangNeural">${tx("云扬 · 普通话", "Yunyang · Mandarin")}</option></optgroup></select></label><label class="system-voice-label">${tx("系统回退", "System fallback")}<select id="voiceAlertVoice"><option>${tx("正在加载系统语音…", "Loading system voices…")}</option></select></label><label>${tx("提示音音量", "Chime volume")}<span class="voice-volume-row"><input id="voiceChimeVolume" type="range" min="0" max="200" step="1"><output id="voiceChimeVolumeValue"></output></span></label><label>${tx("语音音量", "Speech volume")}<span class="voice-volume-row"><input id="voiceSpeechVolume" type="range" min="0" max="100" step="1"><output id="voiceSpeechVolumeValue"></output></span></label></section><section class="voice-panel-group voice-panel-actions"><button type="button" id="voiceAlertAddRule">＋ ${tx("配置语音规则", "Voice rules")}</button><button type="button" id="voiceAlertTest">${tx("试听", "Test voice")}</button></section></div><small class="voice-rule-note">${tx("语音规则支持价格达到、上涨、下跌及爆仓价；在“添加预警”中勾选“触发时语音播报”。", "Voice rules support reached, rise, fall and liquidation prices; enable Speak when triggered in Add alert.")}</small>`;
+  panel.innerHTML = `<div class="voice-panel-head"><div><b>${tx("语音播报", "Voice alerts")}</b><small id="voiceAlertStatus"></small></div></div><div class="voice-panel-grid"><section class="voice-panel-group voice-panel-toggles"><label class="voice-switch"><input id="voiceAlertEnabled" type="checkbox"><span>${tx("语音总开关", "Voice master")}</span></label><label class="voice-switch"><input id="voiceLivePriceEnabled" type="checkbox"><span>${tx("定时播报实时价", "Speak live price")}</span></label><label class="voice-switch voice-switch-sub" title="${tx("开启后定时播报只报一句播报语（如「当前实时价 76287.5」），不带持仓对比", "When on, timed speech says only one short phrase (e.g. 'Live price 76287.5'), without position comparison")}"><input id="voiceLivePriceConcise" type="checkbox"><span>${tx("定时播报实时价精简版", "Concise live price")}</span></label><label class="voice-live-interval">${tx("播报间隔", "Interval")}<select id="voiceAlertInterval"><option value="15">15 ${tx("秒", "sec")}</option><option value="30">30 ${tx("秒", "sec")}</option><option value="60">1 ${tx("分钟", "min")}</option><option value="300">5 ${tx("分钟", "min")}</option></select><small id="voiceLastSpokenAt" class="voice-last-spoken"></small></label></section><section class="voice-panel-group"><label>${tx("播报引擎", "Engine")}<select id="voiceAlertEngine"><option value="edge">${tx("Edge 神经语音（免费）", "Edge neural (free)")}</option><option value="system">${tx("本机系统语音", "System voice")}</option></select></label><label>${tx("音色", "Voice")}<select id="voiceAlertEdgeVoice"><optgroup label="${tx("自然女声", "Female (natural)")}"><option value="zh-CN-XiaoxiaoNeural">${tx("小晓 · 普通话", "Xiaoxiao · Mandarin")}</option><option value="zh-CN-XiaoyiNeural">${tx("小艺 · 普通话", "Xiaoyi · Mandarin")}</option><option value="zh-CN-liaoning-XiaobeiNeural">${tx("小北 · 辽宁口音", "Xiaobei · Liaoning")}</option><option value="zh-CN-shaanxi-XiaoniNeural">${tx("小妮 · 陕西口音", "Xiaoni · Shaanxi")}</option><option value="zh-TW-HsiaoChenNeural">${tx("晓臻 · 台湾国语", "HsiaoChen · Taiwanese")}</option><option value="zh-HK-HiuGaaiNeural">${tx("晓佳 · 粤语", "HiuGaai · Cantonese")}</option></optgroup><optgroup label="${tx("自然男声", "Male (natural)")}"><option value="zh-CN-YunxiNeural">${tx("云希 · 普通话", "Yunxi · Mandarin")}</option><option value="zh-CN-YunyangNeural">${tx("云扬 · 普通话", "Yunyang · Mandarin")}</option></optgroup></select></label><label class="system-voice-label">${tx("系统回退", "System fallback")}<select id="voiceAlertVoice"><option>${tx("正在加载系统语音…", "Loading system voices…")}</option></select></label><label>${tx("提示音音量", "Chime volume")}<span class="voice-volume-row"><input id="voiceChimeVolume" type="range" min="0" max="200" step="1"><output id="voiceChimeVolumeValue"></output></span></label><label>${tx("语音音量", "Speech volume")}<span class="voice-volume-row"><input id="voiceSpeechVolume" type="range" min="0" max="100" step="1"><output id="voiceSpeechVolumeValue"></output></span></label></section><section class="voice-panel-group voice-panel-actions"><button type="button" id="voiceAlertAddRule">＋ ${tx("配置语音规则", "Voice rules")}</button><button type="button" id="voiceAlertTest">${tx("试听", "Test voice")}</button></section></div><small class="voice-rule-note">${tx("语音规则支持价格达到、上涨、下跌及爆仓价；在“添加预警”中勾选“触发时语音播报”。", "Voice rules support reached, rise, fall and liquidation prices; enable Speak when triggered in Add alert.")}</small>`;
   settingsBody.append(panel);
   const voicePanelGrid = panel.querySelector(".voice-panel-grid"),
     voicePanelToggles = panel.querySelector(".voice-panel-toggles"),
@@ -3205,6 +3195,7 @@ setTimeout(() => {
   renderPriority();
   const enabled = $("voiceAlertEnabled"),
     livePriceEnabled = $("voiceLivePriceEnabled"),
+    livePriceConcise = $("voiceLivePriceConcise"),
     engine = $("voiceAlertEngine"),
     edgeVoice = $("voiceAlertEdgeVoice"),
     interval = $("voiceAlertInterval"),
@@ -3216,6 +3207,39 @@ setTimeout(() => {
     speechVolumeValue = $("voiceSpeechVolumeValue"),
     status = $("voiceAlertStatus"),
     test = $("voiceAlertTest");
+  /* 面板头部状态行：默认显示引擎/音色摘要；播报进行中改显「正在播报：<规则名>」，
+     播报结束保留「已播报：<规则名>」，总开关关闭时始终显示「已静音」。 */
+  const voiceStatusLine = () => {
+      const selected = voices.find(
+          (voice) => voice.voiceURI === settings.voiceURI,
+        ),
+        name =
+          settings.engine === "edge"
+            ? edgeVoice.options[edgeVoice.selectedIndex]?.text
+            : selected?.name || tx("系统语音", "system voice");
+      return settings.enabled
+        ? `${tx("已开启：", "On: ")}${name}${settings.livePriceEnabled ? ` · ${tx("定时价位播报", "Live price on")}` : ""}`
+        : tx("已静音", "Muted");
+    },
+    paintVoiceSpeaking = () => {
+      if (!status) return;
+      if (isSpeaking && speakingLabel) {
+        status.textContent = tx(
+          `正在播报：${speakingLabel}`,
+          `Speaking: ${speakingLabel}`,
+        );
+        status.classList.add("is-speaking-label");
+      } else if (speakingLabel && settings.enabled) {
+        status.textContent = tx(
+          `已播报：${speakingLabel}`,
+          `Spoke: ${speakingLabel}`,
+        );
+        status.classList.remove("is-speaking-label");
+      } else {
+        status.textContent = voiceStatusLine();
+        status.classList.remove("is-speaking-label");
+      }
+    };
   edgeVoice.insertAdjacentHTML(
     "beforeend",
     '<optgroup data-voice-language="en" label="American English · Female"><option value="en-US-AvaNeural">Ava · American female</option><option value="en-US-EmmaNeural">Emma · American female</option><option value="en-US-AnaNeural">Ana · American female</option><option value="en-US-AriaNeural">Aria · American female</option><option value="en-US-JennyNeural">Jenny · American female</option><option value="en-US-MichelleNeural">Michelle · American female</option></optgroup><optgroup data-voice-language="en" label="American English · Male"><option value="en-US-AndrewNeural">Andrew · American male</option><option value="en-US-BrianNeural">Brian · American male</option><option value="en-US-ChristopherNeural">Christopher · American male</option><option value="en-US-EricNeural">Eric · American male</option><option value="en-US-GuyNeural">Guy · American male</option><option value="en-US-RogerNeural">Roger · American male</option><option value="en-US-SteffanNeural">Steffan · American male</option></optgroup>',
@@ -3328,6 +3352,7 @@ setTimeout(() => {
   const render = () => {
     enabled.checked = Boolean(settings.enabled);
     livePriceEnabled.checked = Boolean(settings.livePriceEnabled);
+    livePriceConcise.checked = Boolean(settings.livePriceConcise);
     engine.value = settings.engine;
     edgeVoice.value = settings.edgeVoice;
     interval.value = String(settings.interval);
@@ -3357,17 +3382,9 @@ setTimeout(() => {
     panel.classList.toggle("is-enabled", Boolean(settings.enabled));
     /* 定时播报关闭时，播报间隔一并置灰，避免“调了却不生效”的困惑。 */
     interval.disabled = !settings.livePriceEnabled;
+    livePriceConcise.disabled = !settings.livePriceEnabled;
     panel.classList.toggle("uses-edge", settings.engine === "edge");
-    const selected = voices.find(
-        (voice) => voice.voiceURI === settings.voiceURI,
-      ),
-      name =
-        settings.engine === "edge"
-          ? edgeVoice.options[edgeVoice.selectedIndex]?.text
-          : selected?.name || tx("系统语音", "system voice");
-    status.textContent = settings.enabled
-      ? `${tx("已开启：", "On: ")}${name}${settings.livePriceEnabled ? ` · ${tx("定时价位播报", "Live price on")}` : ""}`
-      : tx("已静音", "Muted");
+    /* 状态行文字统一由 paintVoiceSpeaking 决定（含「正在播报/已播报」态）。 */
     setSpeaking(isSpeaking);
   };
   const speakPrice = (force) => {
@@ -3389,10 +3406,17 @@ setTimeout(() => {
           : current > lastLiveSpokenPrice
             ? settings.riseChimeType
             : settings.dropChimeType;
+      /* 精简版：只报「当前实时价 76287.5」这类播报语，不带持仓对比。 */
+      const spokenText = settings.livePriceConcise
+        ? concisePriceText(current)
+        : priceText(current);
       if (
         enqueueSpeech(
-          priceText(current),
-          { chimeType },
+          spokenText,
+          {
+            chimeType,
+            label: tx("定时播报实时价", "Timed live price"),
+          },
           speechRankOfKey("live"),
         )
       ) {
@@ -3417,6 +3441,16 @@ setTimeout(() => {
     save();
     render();
     syncVoiceToServer();
+    if (settings.enabled && settings.livePriceEnabled) {
+      primeAudioContext();
+      speakPrice(true);
+    }
+  };
+  /* 精简版只影响本地播报文本格式，无需同步服务端。 */
+  livePriceConcise.onchange = () => {
+    settings.livePriceConcise = livePriceConcise.checked;
+    save();
+    render();
     if (settings.enabled && settings.livePriceEnabled) {
       primeAudioContext();
       speakPrice(true);
@@ -3541,9 +3575,13 @@ setTimeout(() => {
       status.textContent = tx("实时价格尚未加载", "Live price is not loaded");
       return;
     }
+    /* 试听也尊重「精简版」开关：开启时只报「当前实时价 76287.5」这句播报语。 */
+    const previewText = settings.livePriceConcise
+      ? concisePriceText(current)
+      : priceText(current);
     const wasEnabled = settings.enabled;
     settings.enabled = true;
-    say(priceText(current), {
+    say(previewText, {
       onStarted: () => {
         status.textContent = tx("正在播放试听", "Playing test");
       },
@@ -4212,18 +4250,30 @@ setTimeout(() => {
     renderVoiceRules();
   };
   $("voiceAlertAddRule").onclick = () => showVoiceRuleModal(true);
-  const voiceMatched = (rule, from, to, now) => {
-    const amount = Number(rule.targetPrice);
-    if (rule.kind === "theoretical_liquidation_gap") {
-      const liquidation = theoreticalLiquidation(
-        rule.positionSide === "short" ? "short" : "long",
-      );
+  // 各规则种类的「命中」判定：抽出为查表，替代长 if 链（见 CODE_AUDIT_REPORT.md Step 5）。
+  // 表内每个分支与原有 if 块逐字节等价；表外的默认兜底处理 price_above /
+  // price_below / long_liquidation / short_liquidation 这一组「价格越过类」规则，
+  // 语义与原 if 链完全一致。
+  const VOICE_MATCHERS = {
+    theoretical_liquidation_gap(rule, from, to, now, amount) {
+      const side = rule.positionSide === "short" ? "short" : "long",
+        liquidation = theoreticalLiquidation(side);
       if (!Number.isFinite(liquidation)) return false;
-      return rule.positionSide === "short"
-        ? to >= liquidation - amount
-        : to <= liquidation + amount;
-    }
-    if (rule.kind === "price_move") {
+      const satisfied =
+        side === "short" ? to >= liquidation - amount : to <= liquidation + amount;
+      if (!satisfied) return false;
+      // 双仓场景：若反方向也接近强平，只播报当前价格离得更近（更危险）的一边，
+      // 避免价格上涨时做空盈利一边的语音播报干扰。
+      const otherSide = side === "short" ? "long" : "short",
+        otherLiquidation = theoreticalLiquidation(otherSide);
+      if (Number.isFinite(otherLiquidation)) {
+        const myGap = Math.abs(to - liquidation),
+          otherGap = Math.abs(to - otherLiquidation);
+        if (otherGap < myGap) return false;
+      }
+      return true;
+    },
+    price_move(rule, from, to, now, amount) {
       const anchor = Number(rule.anchorPrice),
         delta = to - anchor;
       return (
@@ -4234,8 +4284,8 @@ setTimeout(() => {
             ? delta <= -amount
             : delta >= amount)
       );
-    }
-    if (rule.kind === "price_speed") {
+    },
+    price_speed(rule, from, to, now, amount) {
       const cutoff =
           now -
           Math.min(60, Math.max(1, Number(rule.windowSeconds) || 3)) * 1_000,
@@ -4249,23 +4299,29 @@ setTimeout(() => {
             ? delta <= -amount
             : delta >= amount)
       );
-    }
-    if (rule.kind === "price_tick_move") {
+    },
+    price_tick_move(rule, from, to, now, amount) {
       const delta = to - from;
       return rule.direction === "both"
         ? Math.abs(delta) >= amount
         : rule.direction === "down"
           ? delta <= -amount
           : delta >= amount;
-    }
-    /* 价格越过类规则按“状态”而非“穿越瞬间”判定：创建规则时价格已在目标之外
-       （例如现价已高于“上涨至 79865”的目标）也必须立即播报，否则规则会静默失效。 */
-    if (rule.kind === "price_reached")
+    },
+    price_reached(rule, from, to, now, amount) {
       return (
         from === rule.targetPrice ||
         to === rule.targetPrice ||
         (from - rule.targetPrice) * (to - rule.targetPrice) < 0
       );
+    },
+  };
+  const voiceMatched = (rule, from, to, now) => {
+    const amount = Number(rule.targetPrice);
+    const matcher = VOICE_MATCHERS[rule.kind];
+    if (matcher) return matcher(rule, from, to, now, amount);
+    /* 价格越过类规则按“状态”而非“穿越瞬间”判定：创建规则时价格已在目标之外
+       （例如现价已高于“上涨至 79865”的目标）也必须立即播报，否则规则会静默失效。 */
     const up = rule.kind === "price_above" || rule.kind === "short_liquidation";
     return up ? to >= rule.targetPrice : to <= rule.targetPrice;
   };
@@ -4296,13 +4352,15 @@ setTimeout(() => {
     }
     return to >= from ? "up" : "down";
   };
+  // 强平类规则（含理论强平）共用一套提示音；其余按涨跌方向选音。
+  // Centralised so the kind list isn't duplicated across the voice engine.
+  const LIQUIDATION_KINDS = new Set([
+    "long_liquidation",
+    "short_liquidation",
+    "theoretical_liquidation_gap",
+  ]);
   const voiceChimeFor = (rule, direction) => {
-    if (
-      rule.kind === "long_liquidation" ||
-      rule.kind === "short_liquidation" ||
-      rule.kind === "theoretical_liquidation_gap"
-    )
-      return settings.liquidationChimeType;
+    if (LIQUIDATION_KINDS.has(rule.kind)) return settings.liquidationChimeType;
     return direction === "down" ? settings.dropChimeType : settings.riseChimeType;
   };
   const voiceRuleMessage = (rule, current, direction) => {
@@ -4322,9 +4380,48 @@ setTimeout(() => {
               maximumFractionDigits: 2,
             })
           : "--";
+      // 若持仓填写了名义金额，可估算当前亏损。
+      const entry = (
+          Array.isArray(window.btcPersonalEntries)
+            ? window.btcPersonalEntries
+            : typeof personalEntries !== "undefined"
+              ? personalEntries
+              : []
+        ).find(
+          (item) => item?.side === side && Number(item?.price) > 0,
+        ),
+        entryPrice = entry ? Number(entry.price) : null,
+        notional =
+          entry &&
+          Number.isFinite(Number(entry.amount)) &&
+          Number(entry.amount) > 0
+            ? Number(entry.amount)
+            : null;
+      let lossText = "";
+      if (
+        Number.isFinite(entryPrice) &&
+        entryPrice > 0 &&
+        Number.isFinite(notional) &&
+        notional > 0
+      ) {
+        const pnl =
+          side === "short"
+            ? (notional * (entryPrice - current)) / entryPrice
+            : (notional * (current - entryPrice)) / entryPrice;
+        const loss = -pnl;
+        if (loss > 0) {
+          const lossAmount = loss.toLocaleString("en-US", {
+            maximumFractionDigits: 2,
+          });
+          lossText =
+            uiLang === "zh"
+              ? `约亏损 ${lossAmount} 美元。`
+              : `Estimated loss ${lossAmount} USD. `;
+        }
+      }
       message = uiLang === "zh"
-        ? `${side === "short" ? "做空" : "做多"}理论强平价警告。理论强平价 ${Number.isFinite(liquidation) ? liquidation.toLocaleString("en-US", { maximumFractionDigits: 2 }) : "暂不可用"}。当前价格 ${currentText}，距强平价 ${gap}。`
-        : `${side === "short" ? "Short" : "Long"} theoretical liquidation warning. The theoretical liquidation price is ${Number.isFinite(liquidation) ? liquidation.toLocaleString("en-US", { maximumFractionDigits: 2 }) : "unavailable"}. Current price is ${currentText}, ${gap} from liquidation.`;
+        ? `${side === "short" ? "做空" : "做多"}理论强平价警告。理论强平价 ${Number.isFinite(liquidation) ? liquidation.toLocaleString("en-US", { maximumFractionDigits: 2 }) : "暂不可用"}。当前价格 ${currentText}，距强平价 ${gap}。${lossText}`
+        : `${side === "short" ? "Short" : "Long"} theoretical liquidation warning. The theoretical liquidation price is ${Number.isFinite(liquidation) ? liquidation.toLocaleString("en-US", { maximumFractionDigits: 2 }) : "unavailable"}. Current price is ${currentText}, ${gap} from liquidation. ${lossText}`;
     } else if (rule.kind === "price_tick_move")
       message = uiLang === "zh"
         ? `价格跳动提醒。当前价格，${currentText}。较前一次报价${direction === "down" ? "下跌" : "上涨"} ${target}。`
@@ -4343,15 +4440,14 @@ setTimeout(() => {
         : `Price alert. Current price is ${currentText}. ${voiceRuleName(rule.kind)} ${target} triggered.`;
     return comparisonText ? `${message}${comparisonText}` : message;
   };
+  /* 规则的展示名（与规则列表标题一致）：「正在播报/已播报」状态行复用。 */
+  const voiceRuleLabel = (rule) =>
+    `${voiceRuleName(rule.kind, rule.direction, rule.positionSide)} ${Number(rule.targetPrice).toLocaleString("en-US", {
+      maximumFractionDigits: 2,
+    })}`;
   /* 规则真实触发时更新状态文字；播报按钮由实际播放开始／结束事件同步。 */
   const announceVoiceTrigger = (rule) => {
-    const label =
-      voiceRuleName(rule.kind, rule.direction, rule.positionSide) +
-      " " +
-      Number(rule.targetPrice).toLocaleString("en-US", {
-        maximumFractionDigits: 2,
-    });
-    status.textContent = tx(`已播报：${label}`, `Spoke: ${label}`);
+    status.textContent = tx(`已播报：${voiceRuleLabel(rule)}`, `Spoke: ${voiceRuleLabel(rule)}`);
   };
   const testVoiceRule = (rule) => {
     const current = Number(state?.ticker?.last);
@@ -4369,9 +4465,7 @@ setTimeout(() => {
     settings.enabled = true;
     say(voiceRuleMessage(rule, current, direction), {
       chimeType: voiceChimeFor(rule, direction),
-      onStarted: () => {
-        status.textContent = tx("规则测试正在播放", "Rule test playing");
-      },
+      label: voiceRuleLabel(rule),
       onFailure: () => {
         status.textContent = tx(
           "规则测试失败：请检查本机音量或切换系统语音。",
@@ -4436,6 +4530,7 @@ setTimeout(() => {
       .forEach(({ rule, direction, rank }) => {
         enqueueSpeech(voiceRuleMessage(rule, current, direction), {
           chimeType: voiceChimeFor(rule, direction),
+          label: voiceRuleLabel(rule),
         }, rank);
         announceVoiceTrigger(rule);
       });
@@ -4461,12 +4556,13 @@ setTimeout(() => {
         : "up";
     say(voiceRuleMessage({ ...rule, direction }, current, direction), {
       chimeType: voiceChimeFor(rule, direction),
+      label: voiceRuleLabel({ ...rule, direction }),
     });
   });
   if (supported) {
     window.speechSynthesis.addEventListener?.("voiceschanged", populateVoices);
     populateVoices();
-    setTimeout(populateVoices, 350);
+    setTimeout(populateVoices, VOICE_LIST_POPULATE_DELAY_MS);
   }
   setInterval(() => speakPrice(false), 1_000);
   filterEdgeVoices();
@@ -4574,8 +4670,8 @@ $("chart")?.addEventListener("pointerup", () => {
     a = Math.min(chartSelection.start, chartSelection.end),
     b = Math.max(chartSelection.start, chartSelection.end),
     s = d.slice(a, b + 1),
-    hi = Math.max(...s.map((v) => v.high)),
-    lo = Math.min(...s.map((v) => v.low)),
+    hi = maxOf(s.map((v) => v.high)),
+    lo = minOf(s.map((v) => v.low)),
     ret = (s.at(-1).close / s[0].open - 1) * 100,
     duration = Math.max(0, s.at(-1).time - s[0].time) / 60000,
     el = $("selectionStats");
@@ -5099,6 +5195,61 @@ function chartPlotGeom(rect) {
   return { cw, ch, priceHeight: Math.max(80, ch - CHART_TIME_AXIS_H) };
 }
 
+/* 主图每次绘制都会写入当前价格标尺。极值标签与 hover 命中判定共用这一标尺，
+   标注点才会落在 K 线真实位置，而不是另一套估算出来的坐标上。 */
+let chartPriceScale = null;
+
+/* Range extrema follow the plotted series: a candle chart exposes its wick
+   high/low, while a close-line chart has no wick and therefore stays on closes.
+   极值跟随实际绘制的图形：K 线取影线高低，收盘线只有收盘价。
+   影线在聚合周期上是守恒的（15 分线的低点必然包含内部 5 分线低点），
+   所以同一段行情切换到不同周期时，读到的是同一个极值。 */
+function rangeExtremeValue(v, kind) {
+  const series = state.chartSeries || { candles: true, close: false };
+  if (series.candles === false) return v.close;
+  return kind === "high" ? v.high : v.low;
+}
+function rangeExtremeIndices(d) {
+  let hiI = 0,
+    loI = 0;
+  for (let i = 1; i < d.length; i++) {
+    if (rangeExtremeValue(d[i], "high") > rangeExtremeValue(d[hiI], "high"))
+      hiI = i;
+    if (rangeExtremeValue(d[i], "low") < rangeExtremeValue(d[loI], "low"))
+      loI = i;
+  }
+  return { hiI, loI };
+}
+/* 坐标换算与主图保持一致；主图还没画过时退回独立的范围估算。 */
+function chartPlotMapper(rect, d) {
+  const n = Math.max(1, d.length - 1),
+    { cw, priceHeight } = chartPlotGeom(rect);
+  let lo,
+    hi;
+  if (chartPriceScale) ({ lo, hi } = chartPriceScale);
+  else {
+    const values = d.flatMap((v) => [v.low, v.high]),
+      closes = d.map((v) => v.close);
+    [ema(closes, 20), ema(closes, 50), ema(closes, 200)].forEach((a) =>
+      a.forEach((v) => {
+        if (Number.isFinite(v)) values.push(v);
+      }),
+    );
+    lo = minOf(values);
+    hi = maxOf(values);
+    const pad = (hi - lo || 1) * 0.075;
+    lo -= pad;
+    hi += pad;
+  }
+  return {
+    cw,
+    priceHeight,
+    x: (i) => CHART_PAD.l + (i / n) * cw,
+    y: (v) =>
+      CHART_PAD.t + priceHeight - ((v - lo) / (hi - lo || 1)) * priceHeight,
+  };
+}
+
 function drawCandlestickChart() {
   const cv = $("chart"),
     rect = cv?.getBoundingClientRect(),
@@ -5170,8 +5321,8 @@ function drawCandlestickChart() {
       if (Number.isFinite(v)) values.push(v);
     }),
   );
-  const marketLow = Math.min(...values),
-    marketHigh = Math.max(...values),
+  const marketLow = minOf(values),
+    marketHigh = maxOf(values),
     marketSpan = marketHigh - marketLow || 1;
   // An entry well outside the current market structure is an annotation, not
   // chart data. Keeping it out of the scale preserves readable candles.
@@ -5231,11 +5382,13 @@ function drawCandlestickChart() {
   liqLevelsWithPlacement
     .filter((entry) => entry.placement === "inside")
     .forEach((entry) => values.push(entry.price));
-  let lo = Math.min(...values),
-    hi = Math.max(...values),
+  let lo = minOf(values),
+    hi = maxOf(values),
     margin = (hi - lo || 1) * 0.075;
   lo -= margin;
   hi += margin;
+  /* Publish the scale so the floating extrema labels land on the same pixels. */
+  chartPriceScale = { lo, hi };
   const x = (i) => P.l + (i / Math.max(1, d.length - 1)) * cw,
     y = (v) => P.t + priceHeight - ((v - lo) / (hi - lo)) * priceHeight;
   c.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -5385,77 +5538,151 @@ function drawCandlestickChart() {
     c.setLineDash([]);
     c.restore();
   }
-  entryLevelsWithPlacement.forEach((entry, index) => {
-    const color = entry.side === "short" ? "#ff5b7b" : "#19d3b0",
-      edgeOffset = Math.floor(index / 2) * 20,
+  /* 行号按 placement+side 分组独立计：否则另一侧贴边线会占掉行号，
+     把本侧标签挤到别人的行里造成重叠。 */
+  const groupRowOf = (levels) => {
+    const counts = {},
+      rowOf = new Map();
+    levels.forEach((e) => {
+      const key = `${e.placement}:${e.side}`;
+      rowOf.set(e, counts[key] || 0);
+      counts[key] = (counts[key] || 0) + 1;
+    });
+    return rowOf;
+  };
+  const entryRowOf = groupRowOf(entryLevelsWithPlacement),
+    liqRowOf = groupRowOf(liqLevelsWithPlacement);
+  /* ── 标签统一布局（买入 + 爆仓一起参与碰撞消解）──
+     过去买入/爆仓两组各自独立定位、互不知情：贴顶的爆仓标签固定在
+     画布顶部前几行，而「区间内」但价格靠近顶部的买入标签会跟随价格线
+     落在同一纵向条带里，两组标签叠字。这里先收集所有标签的期望位置，
+     再做全局碰撞消解（横向有交叠才避让；向下顺延，底部放不下向上找），
+     最后先画全部参考线、再画全部标签。 */
+  c.font = "700 10px ui-sans-serif,system-ui";
+  const LABEL_H = 17,
+    LABEL_ROW = 19,
+    midPrice = (marketLow + marketHigh) / 2,
+    levelDraws = [];
+  entryLevelsWithPlacement.forEach((entry) => {
+    const isShort = entry.side === "short",
+      edgeOffset = entryRowOf.get(entry) * 20,
       yy =
         entry.placement === "top"
-          ? P.t + 9 + edgeOffset
+          ? Math.max(P.t + 9, 30) + edgeOffset
           : entry.placement === "bottom"
             ? P.t + priceHeight - 9 - edgeOffset
             : y(entry.price),
-      label = `${entry.side === "short" ? tx("做空买入价", "Short entry") : tx("做多买入价", "Long entry")} ${money(entry.price)}${entry.placement === "top" ? " ↑" : entry.placement === "bottom" ? " ↓" : ""}`;
-    c.save();
-    c.strokeStyle = color;
-    c.lineWidth = 1.6;
-    c.setLineDash([7, 5]);
-    c.beginPath();
-    c.moveTo(P.l, yy);
-    c.lineTo(P.l + cw, yy);
-    c.stroke();
-    c.setLineDash([]);
-    c.font = "700 10px ui-sans-serif,system-ui";
-    c.textAlign = "left";
-    const width = Math.min(c.measureText(label).width + 12, cw - 10),
-      labelY =
+      label = `${isShort ? tx("做空买入价", "Short entry") : tx("做多买入价", "Long entry")} ${money(entry.price)}${entry.placement === "top" ? " ↑" : entry.placement === "bottom" ? " ↓" : ""}`,
+      width = Math.min(c.measureText(label).width + 12, cw - 10),
+      /* 买入价标签贴线的内侧：边缘线朝价格区一侧，区间内线朝当前价一侧。 */
+      innerAbove =
         entry.placement === "top"
-          ? Math.min(P.t + priceHeight - 20, yy + 5)
+          ? false
           : entry.placement === "bottom"
-            ? Math.max(P.t + 3, yy - 20)
-            : Math.max(P.t + 3, Math.min(P.t + priceHeight - 20, yy - (index ? 0 : 18)));
-    c.fillStyle =
-      entry.side === "short" ? "rgba(255,91,123,.18)" : "rgba(25,211,176,.18)";
-    c.fillRect(P.l + 5, labelY, width, 17);
-    c.fillStyle = color;
-    c.fillText(label, P.l + 11, labelY + 12);
-    c.restore();
+            ? true
+            : entry.price < midPrice;
+    levelDraws.push({
+      isShort,
+      color: isShort ? "#ff5b7b" : "#19d3b0",
+      colorBg: isShort ? "rgba(255,91,123,.18)" : "rgba(25,211,176,.18)",
+      lineDash: [7, 5],
+      lineWidth: 1.6,
+      yy,
+      label,
+      width,
+      labelY: innerAbove ? yy - 20 : yy + 5,
+    });
   });
-  /* 理论爆仓价线：做空=亮橙、做多=黄绿，均为其他线条未占用的警示色；
-     左右只画到图表主体（P.l ~ P.l+cw），不超出；
-     离图表数据很远时贴画布最上/最下边缘（第一条线紧贴边），带 ↑/↓ 箭头。 */
-  liqLevelsWithPlacement.forEach((entry, index) => {
+  liqLevelsWithPlacement.forEach((entry) => {
     const isShort = entry.side === "short",
-      color = isShort ? "#ff9d2b" : "#c0eb2a",
-      colorBg = isShort ? "rgba(255,157,43,.18)" : "rgba(192,235,42,.16)",
       yy =
         entry.placement === "top"
-          ? 2 + index * 18
+          ? 22 + liqRowOf.get(entry) * 18
           : entry.placement === "bottom"
-            ? h - 26 - index * 18
+            ? h - 26 - liqRowOf.get(entry) * 18
             : y(entry.price),
-      label = `${isShort ? tx("做空爆仓价", "Short liquidation") : tx("做多爆仓价", "Long liquidation")} ${money(entry.price)}${entry.placement === "top" ? " ↑" : entry.placement === "bottom" ? " ↓" : ""}`;
+      label = `${isShort ? tx("做空爆仓价", "Short liquidation") : tx("做多爆仓价", "Long liquidation")} ${money(entry.price)}${entry.placement === "top" ? " ↑" : entry.placement === "bottom" ? " ↓" : ""}`,
+      width = Math.min(c.measureText(label).width + 12, cw - 10),
+      /* 爆仓价标签贴线的外侧：与买入价标签分居线的两侧。 */
+      outerAbove =
+        entry.placement === "top"
+          ? true
+          : entry.placement === "bottom"
+            ? false
+            : entry.price > midPrice;
+    levelDraws.push({
+      isShort,
+      color: isShort ? "#ff9d2b" : "#c0eb2a",
+      colorBg: isShort ? "rgba(255,157,43,.18)" : "rgba(192,235,42,.16)",
+      lineDash: [3, 3],
+      lineWidth: 1.5,
+      yy,
+      label,
+      width,
+      labelY: outerAbove ? yy - 20 : yy + 5,
+    });
+  });
+  const labelXOf = (d) => (d.isShort ? P.l + cw / 2 - d.width / 2 : P.l + 5),
+    clampLabelY = (v) =>
+      Math.max(P.t + 3, Math.min(P.t + priceHeight - LABEL_H - 3, v)),
+    placedRects = [],
+    rectHits = (x0, y0, w0) =>
+      placedRects.some(
+        (r) =>
+          x0 < r.x + r.w &&
+          r.x < x0 + w0 &&
+          y0 < r.y + LABEL_H &&
+          r.y < y0 + LABEL_H,
+      );
+  levelDraws.forEach((d) => {
+    d.labelX = labelXOf(d);
+    let yv = clampLabelY(d.labelY);
+    if (rectHits(d.labelX, yv, d.width)) {
+      const bottomLimit = P.t + priceHeight - LABEL_H - 3;
+      let probe = yv,
+        found = false;
+      while (probe < bottomLimit) {
+        probe = Math.min(probe + LABEL_ROW, bottomLimit);
+        if (!rectHits(d.labelX, probe, d.width)) {
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        probe = clampLabelY(d.labelY);
+        while (probe > P.t + 3) {
+          probe = Math.max(probe - LABEL_ROW, P.t + 3);
+          if (!rectHits(d.labelX, probe, d.width)) {
+            found = true;
+            break;
+          }
+        }
+      }
+      if (found) yv = probe;
+    }
+    placedRects.push({ x: d.labelX, y: yv, w: d.width });
+    d.drawY = yv;
+  });
+  levelDraws.forEach((d) => {
     c.save();
-    c.strokeStyle = color;
-    c.lineWidth = 1.5;
-    c.setLineDash([3, 3]);
+    c.strokeStyle = d.color;
+    c.lineWidth = d.lineWidth;
+    c.setLineDash(d.lineDash);
     c.beginPath();
-    c.moveTo(P.l, yy);
-    c.lineTo(P.l + cw, yy);
+    c.moveTo(P.l, d.yy);
+    c.lineTo(P.l + cw, d.yy);
     c.stroke();
     c.setLineDash([]);
+    c.restore();
+  });
+  levelDraws.forEach((d) => {
+    c.save();
     c.font = "700 10px ui-sans-serif,system-ui";
     c.textAlign = "left";
-    const width = Math.min(c.measureText(label).width + 12, cw - 10),
-      labelY =
-        entry.placement === "top"
-          ? Math.min(P.t + priceHeight - 20, yy + 5)
-          : entry.placement === "bottom"
-            ? Math.max(P.t + 3, yy - 20)
-            : Math.max(P.t + 3, Math.min(P.t + priceHeight - 20, yy + 5));
-    c.fillStyle = colorBg;
-    c.fillRect(P.l + 5, labelY, width, 17);
-    c.fillStyle = color;
-    c.fillText(label, P.l + 11, labelY + 12);
+    c.fillStyle = d.colorBg;
+    c.fillRect(d.labelX, d.drawY, d.width, LABEL_H);
+    c.fillStyle = d.color;
+    c.fillText(d.label, d.labelX + 6, d.drawY + 12);
     c.restore();
   });
   const highValue = (v) => v.close,
@@ -5557,13 +5784,22 @@ function drawCandlestickChart() {
   }
   /* X 轴时间刻度：随可见 K 线范围、缩放与周期动态调整密度/格式。 */
   c.save();
-  const spanMs = d[d.length - 1].time - d[0].time;
   const intervalMins = intervalMinutes[state.interval] || 1;
-  const isLongTerm = intervalMins >= 240; // 4h+
-  const showDate = isLongTerm || spanMs > 86_400_000;
+  const isLongTerm = intervalMins >= LONG_TERM_INTERVAL_MIN; // 4h+
+  const firstDate = new Date(d[0].time),
+    lastDate = new Date(d[d.length - 1].time),
+    crossesCalendarDay =
+      firstDate.getFullYear() !== lastDate.getFullYear() ||
+      firstDate.getMonth() !== lastDate.getMonth() ||
+      firstDate.getDate() !== lastDate.getDate(),
+    configuredRangeMinutes = viewRanges[state.range]?.minutes || 0;
+  /* “1D” 的首尾点通常只相差 23:55 或 23:45，不能用严格的 24 小时时差判断。
+     选择范围达到一天，或实际数据跨了自然日时，所有时间刻度都明确带日期。 */
+  const showDate =
+    isLongTerm || configuredRangeMinutes >= 1_440 || crossesCalendarDay;
   const showYear =
     showDate &&
-    new Date(d[0].time).getFullYear() !== new Date(d[d.length - 1].time).getFullYear();
+    firstDate.getFullYear() !== lastDate.getFullYear();
   const labelMinGap = showYear ? 150 : showDate ? 110 : 72;
   const maxTimeLabels = Math.max(2, Math.floor(cw / labelMinGap));
   const timeStep = Math.max(1, Math.ceil((d.length - 1) / (maxTimeLabels - 1)));
@@ -6775,7 +7011,11 @@ setTimeout(() => {
               method: "POST",
               cache: "no-store",
               headers: { "content-type": "application/json" },
-              body: JSON.stringify({ text: "。", voice: "zh-CN-XiaoxiaoNeural" }),
+              // 探针必须是可朗读的文本：纯标点（如「。」）不含任何音素，
+              // 上游会返回 0 字节音频，接口就会误报失败。
+              // The probe must be pronounceable: punctuation-only text carries no
+              // phonemes, the upstream returns 0 bytes, and the check false-alarms.
+              body: JSON.stringify({ text: "测试", voice: "zh-CN-XiaoxiaoNeural" }),
               signal: controller.signal,
             }),
             buf = await response.arrayBuffer();
@@ -6958,21 +7198,15 @@ setTimeout(() => {
   };
 }, 0);
 
-/* “最高/最低选中价” means closing price in every display mode.  Keeping the
-   marker and hover card on that same close point prevents the 500% mismatch. */
+/* “最高/最低价” follows the plotted series (wick on candles, close on a
+   close-line chart).  The marker and hover card read the same value, so no
+   mismatch shows up between the label and the point it sits on. */
 $("chart")?.addEventListener("mousemove", () => {
   const tip = $("chartTooltip"),
     d = visibleCandles();
   if (!tip || hoverIndex === null || d.length < 2) return;
   tip.querySelector(".range-extrema-tooltip-note")?.remove();
-  const highIndex = d.reduce(
-      (best, v, i) => (v.close > d[best].close ? i : best),
-      0,
-    ),
-    lowIndex = d.reduce(
-      (best, v, i) => (v.close < d[best].close ? i : best),
-      0,
-    ),
+  const { hiI: highIndex, loI: lowIndex } = rangeExtremeIndices(d),
     kind =
       hoverIndex === highIndex
         ? "high"
@@ -6982,14 +7216,8 @@ $("chart")?.addEventListener("mousemove", () => {
   if (!kind) return;
   const label =
     kind === "high"
-      ? tx(
-          "此为当前查看范围内最高收盘价",
-          "Highest closing price in this range",
-        )
-      : tx(
-          "此为当前查看范围内最低收盘价",
-          "Lowest closing price in this range",
-        );
+      ? tx("此为当前查看范围内最高价", "Highest price in this range")
+      : tx("此为当前查看范围内最低价", "Lowest price in this range");
   tip.insertAdjacentHTML(
     "afterbegin",
     `<div class="range-extrema-tooltip-note ${kind}">${label}</div>`,
@@ -7105,8 +7333,8 @@ renderRangeExtremaPoints = function () {
       if (Number.isFinite(v)) values.push(v);
     }),
   );
-  let min = Math.min(...values),
-    max = Math.max(...values),
+  let min = minOf(values),
+    max = maxOf(values),
     pad = (max - min || 1) * 0.075;
   min -= pad;
   max += pad;
@@ -7134,7 +7362,7 @@ renderRangeExtremaPoints = function () {
   const version = document.createElement("button");
   version.type = "button";
   version.id = "appVersion";
-  version.textContent = "v2.10.18";
+  version.textContent = "v2.10.34";
   version.title = "查看更新日志";
   version.setAttribute("aria-expanded", "false");
   const sourceLabel = controls.querySelector("label");
@@ -7248,6 +7476,21 @@ renderRangeExtremaPoints = function () {
   // v2.10.18：消息推送默认折叠，并严格按已验证的大模型 Key 控制 AI 助手入口与接口权限。
   const v2117Changelog = log.innerHTML;
   log.innerHTML = `<b>v2.10.18 更新日志</b><dl><dt>消息推送默认折叠</dt><dd>「消息推送」板块默认收起，折叠外观与「高杠杆强平缓冲参考」保持一致；需要配置 SendKey 或管理预警规则时再展开，减少页面纵向占用。</dd><dt>AI 助手按有效接入显示</dt><dd>页面不再默认展示 AI 助手按钮。只有在「API 接入中心」保存大语言模型 API Key 且验证通过后才显示；未接入、未验证、验证失败、更新或清除 Key 时立即隐藏入口并关闭助手面板。</dd><dt>AI 接口权限收紧</dt><dd>模型切换与提问接口同步校验 Key 的验证状态，不能通过绕过前端使用未验证的凭据；验证失败会撤销旧的有效标记，避免已过期或已替换的 Key 继续被视为可用。</dd></dl><hr>` + v2117Changelog;
+  // v2.10.30：强平价警告语音播报新增亏损估算，双仓时只播报更接近强平的一边。
+  const v2118Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.10.30 更新日志</b><dl><dt>强平价警告播报亏损估算</dt><dd>「距理论强平价」语音规则触发时，播报内容新增当前亏损估算：基于持仓名义金额与开仓均价计算，仅当持仓处于亏损时才读出具体金额。</dd><dt>双仓只报危险的一边</dt><dd>若同时持有多空两个仓位，当两个方向都进入预警范围时，只播报当前价格离理论强平价更近的那一边，避免价格上涨时播报正在盈利的空单、或价格下跌时播报正在盈利的多单。</dd><dt>触发逻辑不变</dt><dd>规则本身的警戒差额、冷却与重复机制保持不变；仅在真正触发时按上述规则过滤并生成播报文案。</dd></dl><hr>` + v2118Changelog;
+  // v2.10.31：精简版播报改为「当前实时价 76287.5」这类整句播报语。
+  const v2119Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.10.31 更新日志</b><dl><dt>精简版播报改为播报语</dt><dd>「定时播报实时价精简版」开启后，不再只念一串裸数字，改为播报完整短句，例如「当前实时价 76287.5」，听感更清楚。</dd><dt>数字不带千分位</dt><dd>播报数字写作 76287.5 而不是 76,287.5，避免语音引擎把千分位逗号读成停顿。</dd><dt>作用范围不变</dt><dd>该开关只影响定时实时价播报与试听文案；语音规则（价格达到、涨跌幅、强平价等）的播报内容不受影响。关闭精简版后仍播报带持仓对比的完整版本。</dd></dl><hr>` + v2119Changelog;
+  // v2.10.32：修正语音播报自检恒报失败，并让接口错误原因更准确。
+  const v2120Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.10.32 更新日志</b><dl><dt>修复语音自检误报失败</dt><dd>「API 接入中心」检测语音播报时原先用单个句号「。」作为探针文本。纯标点不含任何音素，微软语音服务会返回 0 字节音频，这项自检因此长期显示 HTTP 503 失败。探针改为可朗读的短文本后恢复正常，语音播报功能本身并未损坏。</dd><dt>失败原因不再一律报 503</dt><dd>文本为空、超过 240 字、或只含标点符号时，接口返回 400 并说明具体原因；只有上游语音服务确实不可用时才返回 503，便于区分「请求写错」与「服务故障」。</dd><dt>上游抖动自动重试</dt><dd>真实播报遇到上游偶发空音频或建连抖动时，服务端会短暂退避后自动重试一次，减少偶发的语音播报失败。</dd></dl><hr>` + v2120Changelog;
+  // v2.10.33：图表最高／最低价改为按实际绘制的图形取值（K 线取影线），跨周期一致。
+  const v2121Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.10.33 更新日志</b><dl><dt>最高／最低价改用影线极值</dt><dd>原先取当前周期每根 K 线的收盘价作比较：5 分线视图能看到 02:45 那根的收盘，15 分线视图却把它并入 15 分钟大 K 线（收盘取 03:00 的价格），同一段行情在 1 日与 2 日视图下会读出两个不同的最低价。现改为按实际绘制的图形取值：K 线图取影线最高／最低，收盘线图仍取收盘价。影线在聚合时是守恒的（15 分钟 K 线的低点必然包含其内部 5 分钟 K 线的低点），因此同一时间窗切换到不同周期得到的是同一个极值。</dd><dt>标注点落在影线上</dt><dd>浮动标签与虚线圆点改用主图绘制时的价格标尺与绘图区几何定位，标注点正好落在对应 K 线的影线上，不再因另算一套坐标而偏移；鼠标靠近时的高亮判定同步复用同一坐标。</dd><dt>文案与提示同步</dt><dd>标签与悬浮提示由「最高／最低选中价」改为「最高价／最低价」，并明确是「当前查看范围内」的极值，避免被误读成其它口径。</dd></dl><hr>` + v2121Changelog;
+  // v2.10.34：修复极值悬浮卡片金额口径与右缘标记错位。
+  const v2122Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.10.34 更新日志</b><dl><dt>悬浮极值 K 线时显示极值价</dt><dd>鼠标悬浮到最低／最高点所在 K 线时，卡片大字原先固定显示该 K 线的收盘价（如 02:50 显示 $75,846.30），与蓝点标注的影线最低价 $74,896.60 对不上。现在悬浮的正是极值 K 线时，大字直接显示标记所标的最低价／最高价，口径与标注一致；悬浮其他 K 线仍显示选中价（收盘价）。</dd><dt>右缘标记不再错位</dt><dd>最低／最高点靠近图表右缘时，标签位置原先被硬性夹回边界内，蓝点被拉离真实 K 线约几十像素，导致悬浮蓝点时提示不出现、卡片定位到旁边的 K 线。现在标记点始终落在真实 K 线上，标签改为贴近右缘时向左展开，圆点仍精确锚在 K 线位置。</dd></dl><hr>` + v2122Changelog;
   // 旧版本默认收起，确保用户打开日志时首先看到当前版本的完整变更。
   // Older releases are collapsed by default so opening the log focuses on the current release.
   const collapseLegacyRelease = () => {
@@ -7375,10 +7618,6 @@ function updateTopLegend() {
   trigger.addEventListener("click", () => {
     const open = popover.classList.toggle("is-open");
     trigger.setAttribute("aria-expanded", String(open));
-  });
-  popover.addEventListener("mouseleave", () => {
-    popover.classList.remove("is-open");
-    trigger.setAttribute("aria-expanded", "false");
   });
   panel.addEventListener("click", (event) => {
     const series = event.target.dataset.series,
@@ -7780,14 +8019,7 @@ function annotateRangeExtremaTooltip() {
   const tip = $("chartTooltip"),
     d = visibleCandles();
   if (!tip || hoverIndex === null || d.length < 2) return;
-  const highIndex = d.reduce(
-      (best, v, i) => (v.close > d[best].close ? i : best),
-      0,
-    ),
-    lowIndex = d.reduce(
-      (best, v, i) => (v.close < d[best].close ? i : best),
-      0,
-    ),
+  const { hiI: highIndex, loI: lowIndex } = rangeExtremeIndices(d),
     kind =
       hoverIndex === highIndex
         ? "high"
@@ -7798,14 +8030,8 @@ function annotateRangeExtremaTooltip() {
   if (!kind) return;
   const label =
     kind === "high"
-      ? tx(
-          "此为当前查看范围内最高选中价",
-          "Highest selected price in this range",
-        )
-      : tx(
-          "此为当前查看范围内最低选中价",
-          "Lowest selected price in this range",
-        );
+      ? tx("此为当前查看范围内最高价", "Highest price in this range")
+      : tx("此为当前查看范围内最低价", "Lowest price in this range");
   tip.insertAdjacentHTML(
     "afterbegin",
     `<div class="range-extrema-tooltip-note ${kind}">${label}</div>`,
@@ -8000,59 +8226,15 @@ setTimeout(
   0,
 );
 
-/* The price path represents candle closes.  Range extrema must use that same
-   selectable price, rather than the intrabar high/low that may never touch
-   the plotted line. */
+/* Range extrema read the price the chart actually plots: wick high/low on a
+   candle chart, closes on a close-line chart.  Wick extremes are conserved when
+   candles are aggregated, so the same price window reports one extreme no
+   matter which candle interval is on screen. */
 renderRangeExtremaPoints = function () {
-  const box = $("chart")?.closest(".chart-box"),
-    cv = $("chart"),
-    d = visibleCandles();
-  if (!box || !cv || d.length < 2) return;
-  let high = $("rangeHighPoint"),
-    low = $("rangeLowPoint");
-  if (!high) {
-    high = document.createElement("div");
-    high.id = "rangeHighPoint";
-    high.className = "range-extreme high";
-    box.append(high);
-  }
-  if (!low) {
-    low = document.createElement("div");
-    low.id = "rangeLowPoint";
-    low.className = "range-extreme low";
-    box.append(low);
-  }
-  const hiI = d.reduce((best, v, i) => (v.close > d[best].close ? i : best), 0),
-    loI = d.reduce((best, v, i) => (v.close < d[best].close ? i : best), 0),
-    rect = cv.getBoundingClientRect(),
-    P = { l: 52, r: 74, t: 15, b: 30 },
-    cw = rect.width - P.l - P.r,
-    ch = rect.height - P.t - P.b,
-    volumeHeight = Math.min(118, Math.max(96, Math.round(ch * 0.21))),
-    priceHeight = ch - volumeHeight - 30,
-    closes = d.map((v) => v.close),
-    all = [...closes];
-  [ema(closes, 20), ema(closes, 50), ema(closes, 200)].forEach((a) =>
-    a.forEach((v) => {
-      if (Number.isFinite(v)) all.push(v);
-    }),
-  );
-  let loValue = Math.min(...all),
-    hiValue = Math.max(...all),
-    margin = (hiValue - loValue || 1) * 0.075;
-  loValue -= margin;
-  hiValue += margin;
-  const x = (i) => P.l + (i / (d.length - 1)) * cw,
-    y = (v) => P.t + priceHeight - ((v - loValue) / (hiValue - loValue)) * priceHeight,
-    label = txInterval(state.range || state.interval),
-    place = (el, i, kind) => {
-      const value = d[i].close;
-      el.style.left = `${Math.max(8, Math.min(rect.width - 214, x(i)))}px`;
-      el.style.top = `${Math.max(6, Math.min(P.t + priceHeight - 20, y(value) + (kind === "high" ? -20 : 6)))}px`;
-      el.textContent = `${label}${kind === "high" ? tx("最高选中价", " highest selected price") : tx("最低选中价", " lowest selected price")} ${money(value)} · ${pointTime(d[i].time)}`;
-    };
-  place(high, hiI, "high");
-  place(low, loI, "low");
+  /* 用户要求隐藏「1D最低价 …」浮动小条：悬浮卡片的提示行与大字极值
+     已覆盖同一信息，保留会造成重复。悬浮判定与卡片渲染不依赖这两个元素。 */
+  $("rangeHighPoint")?.remove();
+  $("rangeLowPoint")?.remove();
 };
 function drawCloseExtrema() {
   const cv = $("chart"),
@@ -8073,14 +8255,14 @@ function drawCloseExtrema() {
     ma20 = ema(closes, 20),
     ma50 = ema(closes, 50),
     ma200 = ema(closes, 200),
-    all = [...closes];
+    all = d.flatMap((v) => [v.low, v.high]);
   [ma20, ma50, ma200].forEach((a) =>
     a.forEach((v) => {
       if (Number.isFinite(v)) all.push(v);
     }),
   );
-  let lo = Math.min(...all),
-    hi = Math.max(...all),
+  let lo = minOf(all),
+    hi = maxOf(all),
     margin = (hi - lo || 1) * 0.075;
   lo -= margin;
   hi += margin;
@@ -8143,8 +8325,7 @@ function drawCloseExtrema() {
   c.strokeStyle = "#00d4aa";
   c.lineWidth = 2;
   c.stroke();
-  const hiI = d.reduce((best, v, i) => (v.close > d[best].close ? i : best), 0),
-    loI = d.reduce((best, v, i) => (v.close < d[best].close ? i : best), 0),
+  const { hiI, loI } = rangeExtremeIndices(d),
     mark = (i, value, label, color, above) => {
       const xx = x(i),
         yy = y(value);
@@ -8179,15 +8360,15 @@ function drawCloseExtrema() {
     };
   mark(
     hiI,
-    d[hiI].close,
-    tx("最高选中价", "Highest selected price"),
+    rangeExtremeValue(d[hiI], "high"),
+    tx("最高价", "Highest price"),
     "#ffcb65",
     true,
   );
   mark(
     loI,
-    d[loI].close,
-    tx("最低选中价", "Lowest selected price"),
+    rangeExtremeValue(d[loI], "low"),
+    tx("最低价", "Lowest price"),
     "#52d5f4",
     false,
   );
@@ -8273,8 +8454,8 @@ calcLiqProbability = function () {
     const start = d[i].close,
       extreme =
         side > 0
-          ? Math.min(...d.slice(i, i + window).map((x) => x.low))
-          : Math.max(...d.slice(i, i + window).map((x) => x.high)),
+          ? minOf(d.slice(i, i + window).map((x) => x.low))
+          : maxOf(d.slice(i, i + window).map((x) => x.high)),
       adverse =
         side > 0 ? (start - extreme) / start : (extreme - start) / start;
     hits += adverse >= Math.abs(liq - start) / start ? 1 : 0;
@@ -8282,8 +8463,8 @@ calcLiqProbability = function () {
   }
   const nearby =
       side > 0
-        ? Math.min(...d.slice(-Math.min(60, d.length)).map((x) => x.low))
-        : Math.max(...d.slice(-Math.min(60, d.length)).map((x) => x.high)),
+        ? minOf(d.slice(-Math.min(60, d.length)).map((x) => x.low))
+        : maxOf(d.slice(-Math.min(60, d.length)).map((x) => x.high)),
     gap = side > 0 ? nearby - liq : liq - nearby,
     probability = total ? (hits / total) * 100 : 0,
     level =
@@ -8326,16 +8507,16 @@ microPrediction = function (m) {
 const buttonsRebuild = buttons;
 let buttonsSignature = "";
 const viewRanges = {
-  "1时": { minutes: 60 },
-  "3时": { minutes: 180 },
-  "6时": { minutes: 360 },
-  "12时": { minutes: 720 },
-  "1D": { minutes: 1440 },
-  "2D": { minutes: 2880 },
-  "1W": { minutes: 10080 },
-  "1M": { minutes: 43200 },
-  "6M": { minutes: 262800 },
-  "1Y": { minutes: 525600 },
+  "1时": { minutes: 60, defaultInterval: "30s" },
+  "3时": { minutes: 180, defaultInterval: "1m" },
+  "6时": { minutes: 360, defaultInterval: "1m" },
+  "12时": { minutes: 720, defaultInterval: "5m" },
+  "1D": { minutes: 1440, defaultInterval: "5m" },
+  "2D": { minutes: 2880, defaultInterval: "15m" },
+  "1W": { minutes: 10080, defaultInterval: "30m" },
+  "1M": { minutes: 43200, defaultInterval: "4h" },
+  "6M": { minutes: 262800, defaultInterval: "1d" },
+  "1Y": { minutes: 525600, defaultInterval: "1d" },
 };
 // The local market gateway pages OKX history up to this bound. It is large
 // enough for the 12-hour and 1-day minute windows without an unbounded fetch.
@@ -8361,27 +8542,12 @@ const intervalMinutes = {
 function closeChartControlPopover(popover) {
   popover.classList.remove("is-open");
   popover
+    .querySelector(".control-popover-panel")
+    ?.classList.remove("is-visible");
+  popover
     .querySelector(".control-trigger")
     ?.setAttribute("aria-expanded", "false");
-  if (popover.classList.contains("range-picker"))
-    popover.querySelector(".control-popover-panel")?.remove();
 }
-const dismissChartPopoverOnPointerExit = (event) => {
-  document
-    .querySelectorAll("#mainChartCard .toolbar .control-popover.is-open")
-    .forEach((popover) => {
-      if (!popover.contains(event.target)) closeChartControlPopover(popover);
-    });
-};
-document.addEventListener("pointermove", dismissChartPopoverOnPointerExit, true);
-document.addEventListener("pointerover", dismissChartPopoverOnPointerExit, true);
-document.addEventListener("pointerover", (event) => {
-  const popover = event.target.closest?.(
-    "#mainChartCard .toolbar .control-popover.is-open",
-  );
-  if (popover && !popover.contains(event.relatedTarget))
-    closeChartControlPopover(popover);
-}, true);
 document.addEventListener("pointerdown", (event) => {
   if (event.target.closest("#mainChartCard .toolbar .control-popover")) return;
   document
@@ -8404,16 +8570,21 @@ if (state.range && !state.rangeRequiredPoints) {
       )
     : 0;
 }
-function applyVisibleRange(label) {
-  const minutes = viewRanges[label]?.minutes;
+function applyVisibleRange(label, { useDefaultInterval = true } = {}) {
+  const range = viewRanges[label],
+    minutes = range?.minutes;
   if (!minutes) return state.interval;
-  /* 视图一次最多取 MAX_VISIBLE_CANDLES 根 K 线。
+  if (useDefaultInterval && range.defaultInterval)
+    state.interval = range.defaultInterval;
+  /* 用户选择范围时先应用该范围的默认 K 线周期。用户随后手动改变周期时，
+     只在数据量无法覆盖范围或柱数少到不可读时才进行兼容性调整。
+     视图一次最多取 MAX_VISIBLE_CANDLES 根 K 线。
      范围与周期冲突时，以「查看范围」为准微调 K 线周期，保证刻度真的覆盖所选跨度：
        ① 周期过细、装不下（「1 分 × 1W」= 10080 根）：放粗到仍能装下整个范围的最细周期，
           否则刻度只会停在最近 30 小时，与「查看范围」标签不符；
        ② 周期过粗、装不满（「1 日 × 6时」= 1 根，K 线图无法阅读）：换到约 360 根的周期，
           否则从「1Y」切回短范围时会留下一根柱子代表一整段。
-     只要不冲突就不动周期（例如默认的「1 分 × 6时」= 360 根保持原样）。 */
+     手动周期只要不冲突就保持不变（例如「1 分 × 6时」= 360 根）。 */
   const currentPoints = rangePointsFor(minutes, state.interval);
   if (currentPoints > MAX_VISIBLE_CANDLES)
     state.interval = finestIntervalForRange(minutes);
@@ -8482,13 +8653,13 @@ buttons = function () {
         )
         .join("") +
       "</div></div></div>";
-    const intervalPopover = intervalBox.querySelector(".control-popover");
-    intervalPopover?.querySelector(".control-trigger")?.addEventListener("click", () =>
-      intervalPopover.classList.toggle("is-open"),
-    );
-    intervalPopover?.addEventListener("mouseleave", () =>
-      intervalPopover.classList.remove("is-open"),
-    );
+    const intervalPopover = intervalBox.querySelector(".control-popover"),
+      intervalTrigger = intervalPopover?.querySelector(".control-trigger");
+    intervalTrigger?.setAttribute("aria-expanded", "false");
+    intervalTrigger?.addEventListener("click", () => {
+      const open = intervalPopover.classList.toggle("is-open");
+      intervalTrigger.setAttribute("aria-expanded", String(open));
+    });
     intervalBox.querySelectorAll("[data-candle]").forEach(
       (b) =>
         (b.onclick = () => {
@@ -8507,12 +8678,12 @@ buttons = function () {
             state.limit = Math.max(300, MAX_VISIBLE_CANDLES);
             localStorage.removeItem("btc_visible_range");
           } else if (state.range) {
-            applyVisibleRange(state.range);
+            applyVisibleRange(state.range, { useDefaultInterval: false });
           } else {
             state.limit = Math.max(300, state.limit || 300);
           }
           buttonsSignature = "";
-          intervalPopover?.classList.remove("is-open");
+          closeChartControlPopover(intervalPopover);
           loadCurrent();
         }),
     );
@@ -8526,24 +8697,18 @@ buttons = function () {
   if (rangeBox.dataset.lang !== uiLang) {
     rangeBox.dataset.lang = uiLang;
     rangeBox.innerHTML =
-      `<div class="control-popover range-picker"><button class="control-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="rangePopoverOptions"><span class="control-label">${tx("查看范围", "Visible range")}</span><b data-current-range></b><i aria-hidden="true">▾</i></button></div>`;
+      `<div class="control-popover range-picker"><button class="control-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="rangePopoverOptions"><span class="control-label">${tx("查看范围", "Visible range")}</span><b data-current-range></b><i aria-hidden="true">▾</i></button><div id="rangePopoverOptions" class="control-popover-panel range-options" role="listbox" aria-label="${tx("查看范围", "Visible range")}">${Object.keys(viewRanges)
+        .map(
+          (label) =>
+            `<button type="button" data-view="${label}" role="option" aria-selected="${state.range === label}">${viewText(label)}</button>`,
+        )
+        .join("")}</div></div>`;
     const rangePopover = rangeBox.querySelector(".control-popover");
     const rangeTrigger = rangePopover.querySelector(".control-trigger");
     const closeRangePopover = () => closeChartControlPopover(rangePopover);
     const openRangePopover = () => {
       if (rangePopover.classList.contains("is-open")) return closeRangePopover();
-      const list = document.createElement("div");
-      list.id = "rangePopoverOptions";
-      list.className = "control-popover-panel range-options";
-      list.setAttribute("role", "listbox");
-      list.setAttribute("aria-label", tx("查看范围", "Visible range"));
-      list.innerHTML = Object.keys(viewRanges)
-        .map(
-          (label) =>
-            `<button type="button" data-view="${label}" role="option" aria-selected="${state.range === label}">${viewText(label)}</button>`,
-        )
-        .join("");
-      rangePopover.append(list);
+      const list = rangePopover.querySelector(".control-popover-panel");
       list.querySelectorAll("[data-view]").forEach((chip) =>
         chip.classList.toggle("active", state.range === chip.dataset.view),
       );
@@ -8552,7 +8717,6 @@ buttons = function () {
       requestAnimationFrame(() => list.classList.add("is-visible"));
     };
     rangeTrigger.addEventListener("click", openRangePopover);
-    rangePopover.addEventListener("mouseleave", closeRangePopover);
     rangePopover.addEventListener("keydown", (event) => {
       if (event.key === "Escape") {
         event.preventDefault();
@@ -8651,8 +8815,8 @@ function renderPosition() {
     Number.isFinite(x.entry)
   ) {
     const d = visibleCandles(),
-      lo = Math.min(...d.map((v) => v.low)),
-      hi = Math.max(...d.map((v) => v.high)),
+      lo = minOf(d.map((v) => v.low)),
+      hi = maxOf(d.map((v) => v.high)),
       pad = (hi - lo || 1) * 0.075,
       y = Math.max(
         2,
@@ -8800,13 +8964,31 @@ if (typeof positionState.confirmed !== "boolean")
     );
     head.append(confirm);
   }
+  /* 按钮改为开关：未确认时「确认持仓并显示买入点」；已确认后变为「隐藏买入点标记」，
+     点一下即可清除图表上的开仓标记（原先没有任何取消入口，只能靠改表单字段顺带清除）。 */
+  const paintConfirm = () => {
+    confirm.textContent = positionState.confirmed
+      ? tx("隐藏买入点标记", "Hide entry marker")
+      : tx("确认持仓并显示买入点", "Confirm & show entry point");
+  };
+  const renderPositionWithConfirm = renderPosition;
+  renderPosition = function () {
+    renderPositionWithConfirm();
+    paintConfirm();
+  };
   confirm.onclick = () => {
-    const entry = +form.elements.entry.value;
-    if (!Number.isFinite(entry) || entry <= 0) {
-      form.elements.entry.focus();
-      return;
+    if (!positionState.confirmed) {
+      const entry = +form.elements.entry.value;
+      if (!Number.isFinite(entry) || entry <= 0) {
+        form.elements.entry.focus();
+        return;
+      }
+      positionState.confirmed = true;
+    } else {
+      positionState.confirmed = false;
+      const marker = $("entryMarker");
+      if (marker) marker.hidden = true;
     }
-    positionState.confirmed = true;
     localStorage.setItem("btc_position_state", JSON.stringify(positionState));
     renderPosition();
   };
@@ -8815,6 +8997,7 @@ if (typeof positionState.confirmed !== "boolean")
     localStorage.setItem("btc_position_state", JSON.stringify(positionState));
     const marker = $("entryMarker");
     if (marker) marker.hidden = true;
+    paintConfirm();
   });
   renderPosition();
 })();
@@ -8947,8 +9130,8 @@ function liqTouchStats(candles, side, distance, horizon) {
       segment = candles.slice(index, index + horizon),
       extreme =
         side > 0
-          ? Math.min(...segment.map((candle) => candle.low))
-          : Math.max(...segment.map((candle) => candle.high)),
+          ? minOf(segment.map((candle) => candle.low))
+          : maxOf(segment.map((candle) => candle.high)),
       adverse =
         side > 0 ? (start - extreme) / start : (extreme - start) / start;
     hits += adverse >= distance ? 1 : 0;
@@ -8990,8 +9173,8 @@ calcLiqProbability = function () {
       liqHistoricalCandles.length >= 100 ? liqHistoricalCandles : state.candles,
     extreme = history.length
       ? side > 0
-        ? Math.min(...history.map((candle) => candle.low))
-        : Math.max(...history.map((candle) => candle.high))
+        ? minOf(history.map((candle) => candle.low))
+        : maxOf(history.map((candle) => candle.high))
       : NaN;
   const horizons = [
       ["12h", 48],
@@ -9212,8 +9395,8 @@ let resonanceTimer = null,
   horizonForecastCache = null,
   horizonForecastLoading = false;
 /* ════════════════════════════════════════════════════════════════════════
-   重大事件卡片（对比特币影响权重高）
-   框选图表时，在两条框选线之间浮现此卡片，只列出「影响力大」的事件：
+   重大事件数据（对比特币影响权重高）
+   这些事件与普通日历数据合并后统一显示在投资日历列表中：
    · 手工维护的 MAJOR_EVENTS（如美国《清晰法案》投票等定性 / 政策事件）
    · 投资日历里 importance=high 的宏观 / 加密事件（含预期 / 前值，自动合并去重）
    判断结果（利好 / 利空）为「编辑性预判」+ 日历「公布值 vs 预期」的预期差推断，
@@ -9331,60 +9514,6 @@ function majorEventsView() {
     })
     .sort((a, b) => a.at - b.at);
 }
-function renderInvestmentCalendarMajorEvents() {
-  const now = Date.now();
-  // The compact strip is strictly the next four major events by time. It is a
-  // near-term glance, while the lower timeline remains the complete calendar.
-  const list = majorEventsView()
-    .filter(investmentCalendarMatchesSelectors)
-    .filter((ev) => ev.at > now - 24 * 60 * 60 * 1000 && ev.at > now)
-    .sort((a, b) => a.at - b.at)
-    .slice(0, 4);
-  if (!list.length) return "";
-
-  const renderMini = (ev) => {
-    const bj = calendarFormatBeijing(ev.at, { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
-    const refZone = calendarLocalZone(ev.country);
-    const refLabel = calendarLocalLabel(ev.country);
-    const local = calendarFormatInZone(ev.at, refZone, { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
-    const countdown = ev.at > now ? `<span class="mev-mini-cd">⏳ ${macroCountdown(ev.at)}</span>` : `<span class="mev-mini-cd is-past">${tx("已发生", "Past")}</span>`;
-    const kindLabel = ev.kind === "bull" ? tx("利好", "Bull") : ev.kind === "bear" ? tx("利空", "Bear") : tx("中性", "Neutral");
-    const mets = ev.estimate !== null || ev.previous !== null
-      ? `<span class="mev-mini-met" title="${tx("预期", "Est")}">${tx("预期", "Est")} ${ev.estimate !== null ? calendarEscape(String(ev.estimate)) : "—"}</span><span class="mev-mini-met" title="${tx("前值", "Prev")}">${tx("前值", "Prev")} ${ev.previous !== null ? calendarEscape(String(ev.previous)) : "—"}</span>`
-      : "";
-    const pickKey = macroCalendarPickKey(ev);
-    const isPicked = macroCalendarPicks.has(pickKey);
-    return `<article class="mev-mini mev-mini-${ev.kind}${isPicked ? " is-picked" : ""}">
-      <label class="cal-pick mev-mini-pick" data-pin-label="${calendarEscape(tx("关注", "Pin"))}" data-pinned-label="${calendarEscape(tx("已关注", "Pinned"))}" title="${calendarEscape(tx("显示在上方宏观实时数据卡片", "Pin to top macro live-data card"))}">
-        <input type="checkbox" data-cal-pick="${calendarEscape(pickKey)}"${isPicked ? " checked" : ""}>
-        <i class="cal-pick-ui"></i>
-      </label>
-      <div class="mev-mini-top">
-        <i class="mev-mini-dot ${ev.importance}"></i>
-        <span class="mev-mini-name" title="${calendarEscape(ev.name)}">${calendarEscape(ev.name)}</span>
-        <span class="mev-mini-weight" title="${tx("对比特币影响权重", "BTC impact weight")}">${tx("权重", "W")}${ev.weight}</span>
-      </div>
-      <div class="mev-mini-times">
-        <span class="mev-mini-bj"><i>🇨🇳 ${tx("北京", "BJ")}</i>${calendarEscape(bj)}</span>
-        <span class="mev-mini-local"><i>${calendarEscape(refLabel)}</i>${calendarEscape(local)}</span>
-      </div>
-      <div class="mev-mini-mets">${mets}</div>
-      <div class="mev-mini-foot">
-        <span class="mev-mini-kind">${kindLabel}</span>
-        ${countdown}
-      </div>
-      ${ev.judge ? `<small class="mev-mini-judge">${calendarEscape(ev.judge)}</small>` : ""}
-    </article>`;
-  };
-
-  return `<section class="ic-major-events">
-    <header class="ic-major-head">
-      <b>${tx("重大事件", "Major events")}</b>
-      <span>${tx("对比特币影响权重高", "High BTC impact")}</span>
-    </header>
-    <div class="ic-major-list">${list.map(renderMini).join("")}</div>
-  </section>`;
-}
 /* 清空框选并同步隐藏浮层、恢复底部提示。
    任何“显式”清除（双击图表、切换周期/范围/数据源、平移）都走这里；
    鼠标移出图表（pointerleave）不再触发——框选数据要留在屏幕上供阅读。 */
@@ -9425,8 +9554,8 @@ function renderSelectionOverlay() {
     drawLive();
     return;
   }
-  const hi = Math.max(...s.map((v) => v.high)),
-    lo = Math.min(...s.map((v) => v.low)),
+  const hi = maxOf(s.map((v) => v.high)),
+    lo = minOf(s.map((v) => v.low)),
     /* 实时价缺失时退回最后一根收盘，保证「最高 / 最低 / 区间涨跌」永远有得可算，
        不会因为报价源抖动让整张框选数据卡凭空消失。 */
     now = Number.isFinite(state.ticker?.last)
@@ -9572,7 +9701,16 @@ $("chart")?.addEventListener("mousemove", (event) => {
   const volHtml = showVolume
     ? `<span class="${v.close >= v.open ? "bull" : "bear"}">${tx("成交量", "Volume")} ${Number(v.volume).toLocaleString("en-US", { maximumFractionDigits: 2 })}</span>`
     : "";
-  tip.innerHTML = `<b>${pointTime(v.time)}</b><strong class="chart-point-price">${tx("选中价", "Selected price")} ${money(v.close)}</strong><span class="chart-live-price">${tx("实时价", "Live price")} ${money(live)} <i class="${delta >= 0 ? "bull" : "bear"}">${tx("差价", "Δ")} ${delta >= 0 ? "+" : "−"}${money(Math.abs(delta))}</i></span><span>${tx("开", "Open")} ${money(v.open)}　${tx("高", "High")} ${money(v.high)}</span><span>${tx("低", "Low")} ${money(v.low)}　${tx("收", "Close")} ${money(v.close)}</span>${volHtml}${rsiHtml}`;
+  /* 悬浮的正是范围内极值 K 线时，大字直接读标记所标的那个价（影线极值），
+     与蓝点标签口径一致；否则维持收盘价口径。 */
+  const { hiI: hoverHiI, loI: hoverLoI } = rangeExtremeIndices(d),
+    headline =
+      hoverIndex === hoverLoI
+        ? `${tx("最低价", "Lowest price")} ${money(rangeExtremeValue(v, "low"))}`
+        : hoverIndex === hoverHiI
+          ? `${tx("最高价", "Highest price")} ${money(rangeExtremeValue(v, "high"))}`
+          : `${tx("选中价", "Selected price")} ${money(v.close)}`;
+  tip.innerHTML = `<b>${pointTime(v.time)}</b><strong class="chart-point-price">${headline}</strong><span class="chart-live-price">${tx("实时价", "Live price")} ${money(live)} <i class="${delta >= 0 ? "bull" : "bear"}">${tx("差价", "Δ")} ${delta >= 0 ? "+" : "−"}${money(Math.abs(delta))}</i></span><span>${tx("开", "Open")} ${money(v.open)}　${tx("高", "High")} ${money(v.high)}</span><span>${tx("低", "Low")} ${money(v.low)}　${tx("收", "Close")} ${money(v.close)}</span>${volHtml}${rsiHtml}`;
   const rect = $("chart")?.getBoundingClientRect();
   if (rect && event) {
     const boxRect = $("chart")?.closest(".chart-box")?.getBoundingClientRect() || rect,
@@ -9723,30 +9861,14 @@ function updateExtremaHover(event) {
     low = $("rangeLowPoint");
   if (!cv || d.length < 2 || !high || !low) return;
   const rect = cv.getBoundingClientRect(),
-    P = { l: 18, r: 74, t: 15, b: 30 },
-    cw = rect.width - P.l - P.r,
-    ch = rect.height - P.t - P.b,
-    closes = d.map((v) => v.close),
-    values = [...closes];
-  [ema(closes, 20), ema(closes, 50), ema(closes, 200)].forEach((a) =>
-    a.forEach((v) => {
-      if (Number.isFinite(v)) values.push(v);
-    }),
-  );
-  let min = Math.min(...values),
-    max = Math.max(...values),
-    pad = (max - min || 1) * 0.075;
-  min -= pad;
-  max += pad;
-  const x = (i) => P.l + (i / (d.length - 1)) * cw,
-    y = (v) => P.t + ch - ((v - min) / (max - min)) * ch,
-    hi = d.reduce((best, v, i) => (v.close > d[best].close ? i : best), 0),
-    lo = d.reduce((best, v, i) => (v.close < d[best].close ? i : best), 0),
+    { x, y } = chartPlotMapper(rect, d),
+    { hiI: hi, loI: lo } = rangeExtremeIndices(d),
     mx = event.clientX - rect.left,
     my = event.clientY - rect.top,
-    near = (i, v) => Math.hypot(mx - x(i), my - y(v)) <= 15;
-  high.classList.toggle("is-visible", near(hi, d[hi].close));
-  low.classList.toggle("is-visible", near(lo, d[lo].close));
+    near = (i, kind) =>
+      Math.hypot(mx - x(i), my - y(rangeExtremeValue(d[i], kind))) <= 15;
+  high.classList.toggle("is-visible", near(hi, "high"));
+  low.classList.toggle("is-visible", near(lo, "low"));
 }
 $("chart")?.addEventListener("mousemove", updateExtremaHover);
 $("chart")?.addEventListener("mouseleave", () => {
@@ -9761,10 +9883,10 @@ function drawChartWithoutDuplicateExtremaText() {
   proto.fillText = function (text, ...args) {
     if (
       typeof text === "string" &&
-      (text.startsWith("最高选中价") ||
-        text.startsWith("最低选中价") ||
-        text.startsWith("Highest selected price") ||
-        text.startsWith("Lowest selected price"))
+      (text.startsWith("最高价") ||
+        text.startsWith("最低价") ||
+        text.startsWith("Highest price") ||
+        text.startsWith("Lowest price"))
     )
       return;
     return fill.call(this, text, ...args);
@@ -9785,10 +9907,10 @@ drawChartWithoutDuplicateExtremaText = function () {
   proto.fillText = function (text, ...args) {
     if (
       typeof text === "string" &&
-      (text.startsWith("最高选中价") ||
-        text.startsWith("最低选中价") ||
-        text.startsWith("Highest selected price") ||
-        text.startsWith("Lowest selected price"))
+      (text.startsWith("最高价") ||
+        text.startsWith("最低价") ||
+        text.startsWith("Highest price") ||
+        text.startsWith("Lowest price"))
     )
       return;
     const x = Number(args[0]),
@@ -9965,8 +10087,8 @@ function renderPatternAnalysis() {
     ma20 = ema(closes, 20).at(-1),
     last = d.at(-1),
     prior = d.slice(-Math.min(21, d.length), -1),
-    high = Math.max(...prior.map((x) => x.high)),
-    low = Math.min(...prior.map((x) => x.low)),
+    high = maxOf(prior.map((x) => x.high)),
+    low = minOf(prior.map((x) => x.low)),
     range = Math.max(last.high - last.low, 0.01),
     upper = (last.high - Math.max(last.open, last.close)) / range,
     lower = (Math.min(last.open, last.close) - last.low) / range,
@@ -10075,8 +10197,8 @@ function renderPatternNarrative() {
     ma20 = ema(closes, 20).at(-1),
     last = d.at(-1),
     prior = d.slice(-Math.min(21, d.length), -1),
-    high = Math.max(...prior.map((x) => x.high)),
-    low = Math.min(...prior.map((x) => x.low)),
+    high = maxOf(prior.map((x) => x.high)),
+    low = minOf(prior.map((x) => x.low)),
     bull = ma5 > ma10 && ma10 > ma20 && last.close > ma20,
     bear = ma5 < ma10 && ma10 < ma20 && last.close < ma20,
     resistance = bull ? high : ma20,
@@ -10378,7 +10500,10 @@ let personalEntries = [
   { price: null, amount: null, margin: null, leverage: null, side: "long" },
   { price: null, amount: null, margin: null, leverage: null, side: "short" },
 ];
-let personalEntriesFollowAccount = false;
+let personalEntriesAccountLoggedIn = false;
+let personalEntrySyncState = [false, false];
+let personalEntryCloudSnapshot = null;
+const personalEntrySyncing = new Set();
 const hasPersonalEntriesV3 =
   localStorage.getItem(entryPricesStorageKey) !== null;
 try {
@@ -10390,7 +10515,14 @@ try {
       // Migrate the previous leverage-only input into the new margin field.
       margin: validEntry(Number(entry?.margin)) || (validEntry(Number(entry?.amount)) && Number(entry?.leverage) > 0 ? Number(entry.amount) / Number(entry.leverage) : null),
       leverage: validEntry(Number(entry?.leverage)) || (validEntry(Number(entry?.amount)) && validEntry(Number(entry?.margin)) ? Number(entry.amount) / Number(entry.margin) : null),
-      side: entry?.side === "short" ? "short" : index === 1 ? "short" : "long",
+      side:
+        entry?.side === "short"
+          ? "short"
+          : entry?.side === "long"
+            ? "long"
+            : index === 1
+              ? "short"
+              : "long",
     }));
 } catch {}
 // Only migrate old single-price storage once. An intentionally blank v3 value
@@ -10434,7 +10566,7 @@ personalEntries = personalEntries.map((entry, index) => {
 });
 let personalEntryEditingIndex = null;
 window.btcPersonalEntries = personalEntries;
-function savePersonalEntries() {
+function savePersonalEntries(changedIndex = null) {
   window.btcPersonalEntries = personalEntries;
   localStorage.setItem(entryPricesStorageKey, JSON.stringify(personalEntries));
   personalEntries.forEach((entry, index) =>
@@ -10443,20 +10575,9 @@ function savePersonalEntries() {
   localStorage.removeItem("btc_personal_entry_prices_v2");
   localStorage.removeItem(entryPriceStorageKey);
   localStorage.removeItem("btc_personal_entry_side");
+  if (changedIndex === 0 || changedIndex === 1)
+    personalEntrySyncState[changedIndex] = false;
   window.dispatchEvent(new Event("btc:personal-entries-changed"));
-  if (personalEntriesFollowAccount)
-    fetch("/api/account/profile", {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ personalEntries }),
-    })
-      .then((response) => {
-        if (!response.ok) throw new Error("账户同步失败");
-      })
-      .catch(() => {
-        personalEntriesFollowAccount = false;
-        renderPersonalEntryCard();
-      });
 }
 function ensurePersonalEntryCard() {
   let card = $("personalEntryCard");
@@ -10672,7 +10793,7 @@ function beginPersonalEntryEdit(index) {
           manualLeverage ||
           (amount && margin ? amount / margin : null);
       }
-      savePersonalEntries();
+      savePersonalEntries(index);
     }
     personalEntryEditingIndex = null;
     renderPersonalEntryCard();
@@ -10713,7 +10834,7 @@ function setPersonalEntrySide(index, side) {
   // 点击立刻写入独立键和整组数据；后续每秒重绘仅从这份状态取值。
   // Write both the per-card key and grouped data immediately; subsequent live renders only consume this state.
   personalEntries[index].side = side === "short" ? "short" : "long";
-  savePersonalEntries();
+  savePersonalEntries(index);
 }
 function renderPersonalEntryLegend() {
   // 顶部图例已精简为只保留 K线图+价格，个人买入价图例不再追加。
@@ -10723,24 +10844,28 @@ function renderPersonalEntryCard(force = false) {
   const card = ensurePersonalEntryCard(),
     live = state.ticker?.last;
   if (!card || (!force && personalEntryEditingIndex !== null)) return;
-  card.className = `personal-entry-card${personalEntriesFollowAccount ? " account-synced" : ""}`;
-  const sync = personalEntriesFollowAccount
-    ? `<small class="personal-entry-account-sync" title="${tx("该数据已保存到当前登录账户，并会随账户恢复", "This data is stored in the signed-in account and follows it across browsers")}">${tx("已同步", "Synced")}</small>`
-    : "";
+  card.className = "personal-entry-card";
   card.innerHTML =
     personalEntrySlot(0, live) + personalEntrySlot(1, live);
   applyHeroUnitOrder();
-  /* 已同步徽章挂在视觉上第一个持仓槽的“我的持仓”标题旁，
-     不再绝对定位到卡片右上角（display:contents 会让它失去定位基准飞到页头）。 */
-  if (sync) {
-    const hostKey = heroUnitOrder.find((key) => key !== "price"),
-      hostIndex = Number(String(hostKey).slice(4));
+  /* 每笔持仓独立显示账户同步状态；空仓不显示状态。 */
+  personalEntries.forEach((entry, index) => {
+    if (!validEntry(Number(entry.price))) return;
+    const syncing = personalEntrySyncing.has(index),
+      synced = personalEntrySyncState[index] && !syncing,
+      label = syncing
+        ? tx("同步中…", "Syncing…")
+        : synced
+          ? tx("已同步", "Synced")
+          : tx("未同步", "Not synced"),
+      title = synced
+        ? tx("该持仓已保存到当前登录账户", "This position is saved to the signed-in account")
+        : tx("点击将该持仓同步到我的账户", "Click to sync this position to my account"),
+      button = `<button type="button" class="personal-entry-account-sync ${synced ? "is-synced" : "is-unsynced"}" ${synced || syncing ? "disabled" : `data-entry-sync="${index}"`} title="${title}" aria-label="${label}：${title}">${label}</button>`;
     card
-      .querySelector(
-        `[data-hero-unit="slot${hostIndex}"] .personal-entry-heading`,
-      )
-      ?.insertAdjacentHTML("beforeend", sync);
-  }
+      .querySelector(`[data-hero-unit="slot${index}"] .personal-entry-heading`)
+      ?.insertAdjacentHTML("beforeend", button);
+  });
   card
     .querySelectorAll("[data-entry-value]")
     .forEach((button) =>
@@ -10751,6 +10876,12 @@ function renderPersonalEntryCard(force = false) {
   if (card.dataset.entryControlsBound !== "1") {
     card.dataset.entryControlsBound = "1";
     card.addEventListener("click", (event) => {
+      const syncButton = event.target.closest("[data-entry-sync]");
+      if (syncButton && card.contains(syncButton)) {
+        event.preventDefault();
+        syncPersonalEntry(Number(syncButton.dataset.entrySync));
+        return;
+      }
       const button = event.target.closest("[data-entry-side]");
       if (!button || !card.contains(button)) return;
       event.preventDefault();
@@ -10762,13 +10893,97 @@ function renderPersonalEntryCard(force = false) {
   renderPersonalEntryLegend();
   if (state.candles.length) draw();
 }
+const normalizePersonalEntry = (entry, index) => ({
+  price: validEntry(Number(entry?.price)),
+  amount: validEntry(Number(entry?.amount)),
+  margin:
+    validEntry(Number(entry?.margin)) ||
+    (validEntry(Number(entry?.amount)) && Number(entry?.leverage) > 0
+      ? Number(entry.amount) / Number(entry.leverage)
+      : null),
+  leverage:
+    validEntry(Number(entry?.leverage)) ||
+    (validEntry(Number(entry?.amount)) && validEntry(Number(entry?.margin))
+      ? Number(entry.amount) / Number(entry.margin)
+      : null),
+  side:
+    entry?.side === "short"
+      ? "short"
+      : entry?.side === "long"
+        ? "long"
+        : index === 1
+          ? "short"
+          : "long",
+});
+const blankPersonalEntries = () => [
+  normalizePersonalEntry(null, 0),
+  normalizePersonalEntry(null, 1),
+];
+const samePersonalEntry = (left, right) =>
+  ["price", "amount", "margin", "leverage", "side"].every(
+    (key) => left?.[key] === right?.[key],
+  );
+async function syncPersonalEntry(index) {
+  if (
+    (index !== 0 && index !== 1) ||
+    !validEntry(Number(personalEntries[index]?.price))
+  )
+    return;
+  if (!personalEntriesAccountLoggedIn) {
+    showAppDialog({
+      title: tx("持仓同步", "Position sync"),
+      message: tx(
+        "请先登录账户，再同步该持仓数据。",
+        "Sign in before syncing this position.",
+      ),
+    });
+    return;
+  }
+  if (personalEntrySyncing.has(index)) return;
+  personalEntrySyncing.add(index);
+  renderPersonalEntryCard();
+  try {
+    const snapshot = (personalEntryCloudSnapshot || blankPersonalEntries()).map(
+      (entry, entryIndex) => normalizePersonalEntry(entry, entryIndex),
+    );
+    snapshot[index] = normalizePersonalEntry(personalEntries[index], index);
+    const response = await fetch("/api/account/profile", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ personalEntries: snapshot }),
+      }),
+      data = await response.json();
+    if (!response.ok)
+      throw new Error(
+        data.error || tx("账户同步失败", "Account sync failed"),
+      );
+    personalEntryCloudSnapshot = data.profile.personalEntries.map(
+      (entry, entryIndex) => normalizePersonalEntry(entry, entryIndex),
+    );
+    personalEntrySyncState[index] = samePersonalEntry(
+      normalizePersonalEntry(personalEntries[index], index),
+      personalEntryCloudSnapshot[index],
+    );
+  } catch (error) {
+    personalEntrySyncState[index] = false;
+    showAppDialog({
+      title: tx("持仓同步失败", "Position sync failed"),
+      message: error.message,
+    });
+  } finally {
+    personalEntrySyncing.delete(index);
+    renderPersonalEntryCard();
+  }
+}
 bindHeroUnitDrag();
 heroUnitDesktop.addEventListener?.("change", applyHeroUnitOrder);
 renderPersonalEntryCard();
 applyHeroUnitOrder();
 window.addEventListener("btc:account-state", async (event) => {
+  personalEntriesAccountLoggedIn = Boolean(event.detail?.loggedIn);
   if (!event.detail?.loggedIn) {
-    personalEntriesFollowAccount = false;
+    personalEntryCloudSnapshot = null;
+    personalEntrySyncState = [false, false];
     renderPersonalEntryCard();
     return;
   }
@@ -10777,25 +10992,27 @@ window.addEventListener("btc:account-state", async (event) => {
       data = await response.json();
     if (!response.ok) throw new Error(data.error || "账户资料读取失败");
     const cloudEntries = data.profile?.personalEntries;
+    personalEntryCloudSnapshot =
+      Array.isArray(cloudEntries) && cloudEntries.length === 2
+        ? cloudEntries.map((entry, index) => normalizePersonalEntry(entry, index))
+        : blankPersonalEntries();
     if (Array.isArray(cloudEntries) && cloudEntries.length === 2) {
-      personalEntries = cloudEntries.map((entry, index) => ({
-        price: validEntry(Number(entry?.price)),
-        amount: validEntry(Number(entry?.amount)),
-        margin: validEntry(Number(entry?.margin)) || (validEntry(Number(entry?.amount)) && Number(entry?.leverage) > 0 ? Number(entry.amount) / Number(entry.leverage) : null),
-        leverage: validEntry(Number(entry?.leverage)) || (validEntry(Number(entry?.amount)) && validEntry(Number(entry?.margin)) ? Number(entry.amount) / Number(entry.margin) : null),
-        side:
-          entry?.side === "short" ? "short" : index === 1 ? "short" : "long",
-      }));
-      personalEntriesFollowAccount = true;
-      savePersonalEntries();
-      renderPersonalEntryCard();
-      return;
+      personalEntries = personalEntries.map((localEntry, index) => {
+        const local = normalizePersonalEntry(localEntry, index),
+          cloud = personalEntryCloudSnapshot[index];
+        return !local.price && cloud.price ? cloud : local;
+      });
     }
-    personalEntriesFollowAccount = true;
+    personalEntrySyncState = personalEntries.map(
+      (entry, index) =>
+        Boolean(entry.price) &&
+        samePersonalEntry(entry, personalEntryCloudSnapshot[index]),
+    );
     savePersonalEntries();
     renderPersonalEntryCard();
   } catch {
-    personalEntriesFollowAccount = false;
+    personalEntryCloudSnapshot = null;
+    personalEntrySyncState = [false, false];
     renderPersonalEntryCard();
   }
 });
@@ -11135,20 +11352,22 @@ function calendarWeekStart(ts) {
   const day = calendarBeijingDayStart(ts), dow = new Date(day + CALENDAR_BJ_OFFSET).getUTCDay();
   return day + (dow === 0 ? -6 : 1 - dow) * CALENDAR_DAY;
 }
-// Date shortcuts narrow the otherwise complete calendar timeline.
+// Past events are visible only through “Yesterday”. Every other shortcut is
+// clamped to the current instant, including “All” and custom ranges.
 function calendarRangeWindow(range) {
-  const today = calendarBeijingDayStart(Date.now());
+  const now = Date.now();
+  const today = calendarBeijingDayStart(now);
   switch (range) {
     case "yesterday": return [today - CALENDAR_DAY, today];
     case "tomorrow": return [today + CALENDAR_DAY, today + 2 * CALENDAR_DAY];
-    case "week": { const w = calendarWeekStart(today); return [w, w + 7 * CALENDAR_DAY]; }
+    case "week": { const w = calendarWeekStart(today); return [Math.max(now, w), w + 7 * CALENDAR_DAY]; }
     case "nextweek": { const w = calendarWeekStart(today) + 7 * CALENDAR_DAY; return [w, w + 7 * CALENDAR_DAY]; }
-    case "all": return [-Infinity, Infinity];
+    case "all": return [now, Infinity];
     case "custom": {
       const from = calendarBeijingDateToMs(investmentCalendarFrom), to = calendarBeijingDateToMs(investmentCalendarTo);
-      return [Number.isFinite(from) ? from : -Infinity, Number.isFinite(to) ? to + CALENDAR_DAY : Infinity];
+      return [Math.max(now, Number.isFinite(from) ? from : now), Number.isFinite(to) ? to + CALENDAR_DAY : Infinity];
     }
-    default: return [today, today + CALENDAR_DAY];
+    default: return [now, today + CALENDAR_DAY];
   }
 }
 const CALENDAR_RANGES = [
@@ -11373,6 +11592,32 @@ function renderCalendarEventRow(event) {
     <div class="cal-read ${hot?"is-hot":""}"><b>${label}</b><span title="${calendarEscape(read)}">${calendarEscape(read)}</span></div>
   </li>`;
 }
+
+function investmentCalendarTimelineEvents() {
+  const base = investmentCalendarData?.events || [];
+  const curated = majorEventsView()
+    .filter((event) => event.curated)
+    .map((event) => ({
+      at: event.at,
+      title: event.name,
+      country: event.country,
+      category: event.category,
+      importance: event.importance,
+      actual: event.actual,
+      estimate: event.estimate,
+      previous: event.previous,
+      source: tx("重大事件维护", "Curated major event"),
+      timePrecision: "time",
+      majorEvent: true,
+    }));
+  const seen = new Set(base.map((event) => `${calendarBeijingDayKey(event.at)}|${String(event.title || event.name || "").trim().toLowerCase()}`));
+  return [...base, ...curated.filter((event) => {
+    const key = `${calendarBeijingDayKey(event.at)}|${String(event.title || "").trim().toLowerCase()}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  })];
+}
 function renderCalendarField(kind, label, options, selected) {
   const open = calendarOpenMenu === kind;
   const valueText = selected.size === 0
@@ -11443,7 +11688,7 @@ function renderInvestmentCalendar(data) {
   }
   if (!card) return;
 
-  const allEvents = investmentCalendarData?.events || [];
+  const allEvents = investmentCalendarTimelineEvents();
   const [rangeStart, rangeEnd] = calendarRangeWindow(investmentCalendarRange);
   // Counts are computed over the time window only, so the menus keep showing how
   // many events each option would add even while other filters are active.
@@ -11544,8 +11789,6 @@ function renderInvestmentCalendar(data) {
       ${renderCalendarField("category", tx("类别领域","Category"), categoryOptions, investmentCalendarCategories)}
       ${renderCalendarField("importance", tx("重要性","Importance"), importanceOptions, investmentCalendarImportance)}
     </div>` : ""}
-
-    ${renderInvestmentCalendarMajorEvents()}
 
     <div class="ic-subbar">
       <span class="ic-clock">${tx("当前时间","Now")} <b data-calendar-clock>--:--:--</b> <em>GMT+8:00</em></span>
@@ -11799,7 +12042,7 @@ function renderNewsRow(item) {
   const time = newsRelativeTime(item.publishedAt);
   const inner = `<span class="news-title">${title}</span><span class="news-meta"><em>${src}</em>${time ? `<i>${calendarEscape(time)}</i>` : ""}<b class="news-sent ${kind}">${label}</b></span>`;
   return item.url
-    ? `<li class="news-item ${kind}"><a href="${calendarEscape(item.url)}" target="_blank" rel="noopener noreferrer">${inner}</a></li>`
+    ? `<li class="news-item ${kind}"><a href="${safeHref(item.url)}" target="_blank" rel="noopener noreferrer">${inner}</a></li>`
     : `<li class="news-item ${kind}">${inner}</li>`;
 }
 async function loadMacroNews(force = false) {
@@ -12252,7 +12495,7 @@ function renderFearGreedGauge() {
   const pinnedNow = macroCalendarPickedLiveEvent();
   const emptyText = pinnedNow
     ? tx("该事件已公布超过 30 分钟，已自动移除。在投资日历或「重大事件」卡片勾选新的事件即可继续查看实时数据。", "This release was published more than 30 minutes ago and has been removed. Pin a new macro or major event in the investment calendar to see live data again.")
-    : tx("在投资日历列表或「重大事件」卡片勾选关注的宏观/重大事件，北京时间、倒计时、预期/前值/实际与阈值式解读会显示在这里", "Pin a macro or major event in the investment calendar to see its Beijing time, countdown, estimate/previous/actual and threshold read-through here");
+    : tx("在投资日历列表中勾选关注的宏观或重大事件，北京时间、倒计时、预期/前值/实际与阈值式解读会显示在这里", "Pin a macro or major event in the investment calendar list to see its Beijing time, countdown, estimate/previous/actual and threshold read-through here");
   const body = pinnedNow
     ? renderPinnedRelease(pinnedNow)
     : `<p class="macro-cmp-empty">${emptyText}</p>`;
@@ -12260,7 +12503,7 @@ function renderFearGreedGauge() {
   card.innerHTML = `<div class="fear-greed-head"><h2>${tx("关注宏观事件实时数据", "Pinned macro release")}</h2><span>${tx("实时数据", "Live data")}</span></div><div class="fear-greed-compact-grid macro-sentiment-grid">${body}</div>`;
   addHelp(
     card.querySelector(".fear-greed-head h2"),
-    "这里直接展示你最近勾选的宏观事件或重大事件实时数据：北京时间、倒计时、预期/前值/实际，以及「高于/低于锚点分别对 BTC 属于利好还是利空」的阈值式解读。可在投资日历列表或「重大事件」卡片中勾选关注；事件公布超过 30 分钟后会自动移除；未公布事件在公布前后 2 分钟内会高频刷新，第一时间抓取实际值。恐惧贪婪指数已从该卡移除；宏观经济数据已独立成卡，位于「BTC 多因子研究」与「投资日历」之间。",
+    "这里直接展示你最近勾选的宏观事件或重大事件实时数据：北京时间、倒计时、预期/前值/实际，以及「高于/低于锚点分别对 BTC 属于利好还是利空」的阈值式解读。可在投资日历列表中勾选关注；事件公布超过 30 分钟后会自动移除；未公布事件在公布前后 2 分钟内会高频刷新，第一时间抓取实际值。恐惧贪婪指数已从该卡移除；宏观经济数据已独立成卡，位于「BTC 多因子研究」与「投资日历」之间。",
     "This card shows the pinned macro or major event live data: Beijing time, countdown, estimate/previous/actual, and a threshold read-through (above/below the anchor → bullish or bearish for BTC). You can pin events either from the investment calendar list or from the Major events card; released events are removed after 30 minutes, and upcoming events are polled every 15 seconds around release time to capture actuals as soon as they appear. The Fear & Greed index has been removed from this card; macroeconomic data now lives in its own card between the BTC multi-factor research and the investment calendar.",
   );
   if (!macroCountdownTimer) {
@@ -13699,10 +13942,10 @@ drawChartWithoutDuplicateExtremaText = function () {
   proto.fillText = function (text, ...args) {
     if (
       typeof text === "string" &&
-      (text.startsWith("最高选中价") ||
-        text.startsWith("最低选中价") ||
-        text.startsWith("Highest selected price") ||
-        text.startsWith("Lowest selected price"))
+      (text.startsWith("最高价") ||
+        text.startsWith("最低价") ||
+        text.startsWith("Highest price") ||
+        text.startsWith("Lowest price"))
     )
       return;
     const x = Number(args[0]),
@@ -14616,8 +14859,8 @@ positionCalc = function () {
     } finally {
       dailyLoading = false;
     }
-    if (liqDailyCandles.length < MIN_DAILY_SAMPLES && attempt < 3) {
-      setTimeout(() => loadDailyHistory(attempt + 1), 4_000);
+    if (liqDailyCandles.length < MIN_DAILY_SAMPLES && attempt < DAILY_HISTORY_MAX_RETRIES) {
+      setTimeout(() => loadDailyHistory(attempt + 1), DAILY_HISTORY_RETRY_DELAY_MS);
     }
   }
 

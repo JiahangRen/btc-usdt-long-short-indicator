@@ -11,6 +11,9 @@
 //    Output follows a fixed contract so the UI can render it reliably.
 
 import { readFileSync, writeFileSync } from 'node:fs';
+// 指标数学实现抽到共享模块，前后端单一事实来源（见 docs/CODE_AUDIT_REPORT.md F5）。
+// Indicator maths live in shared/indicators.mjs to avoid dual maintenance.
+import { ema, emaSeries, rsi, macd, bollinger, atr } from './shared/indicators.mjs';
 
 // 本地额度累计必须跨重启保留，否则每次重启都会「清零」，用户看到的已用量会倒退。
 // The local quota accumulator must survive restarts, otherwise the usage counter resets to zero.
@@ -564,67 +567,9 @@ function rateAllow(key) {
 }
 setInterval(() => { for (const [key, bucket] of buckets) if (Date.now() - bucket.at > 60_000) buckets.delete(key); }, 60_000).unref?.();
 
-// ---------- 指标计算 / Indicator maths ----------
-function ema(values, period) {
-  if (values.length < period) return null;
-  const k = 2 / (period + 1);
-  let acc = values.slice(0, period).reduce((sum, v) => sum + v, 0) / period;
-  for (let i = period; i < values.length; i += 1) acc = values[i] * k + acc * (1 - k);
-  return acc;
-}
-function emaSeries(values, period) {
-  if (values.length < period) return [];
-  const k = 2 / (period + 1), out = [];
-  let acc = values.slice(0, period).reduce((sum, v) => sum + v, 0) / period;
-  out.push(acc);
-  for (let i = period; i < values.length; i += 1) { acc = values[i] * k + acc * (1 - k); out.push(acc); }
-  return out;
-}
-function rsi(closes, period = 14) {
-  if (closes.length < period + 1) return null;
-  let gain = 0, loss = 0;
-  for (let i = 1; i <= period; i += 1) {
-    const diff = closes[i] - closes[i - 1];
-    if (diff >= 0) gain += diff; else loss -= diff;
-  }
-  let avgGain = gain / period, avgLoss = loss / period;
-  for (let i = period + 1; i < closes.length; i += 1) {
-    const diff = closes[i] - closes[i - 1];
-    avgGain = (avgGain * (period - 1) + Math.max(diff, 0)) / period;
-    avgLoss = (avgLoss * (period - 1) + Math.max(-diff, 0)) / period;
-  }
-  if (avgLoss === 0) return 100;
-  const rs = avgGain / avgLoss;
-  return 100 - 100 / (1 + rs);
-}
-function macd(closes) {
-  if (closes.length < 35) return null;
-  const fast = emaSeries(closes, 12), slow = emaSeries(closes, 26);
-  const offset = fast.length - slow.length;
-  const line = [], diffs = [];
-  for (let i = 0; i < slow.length; i += 1) { const v = fast[i + offset] - slow[i]; line.push(v); diffs.push(v); }
-  if (diffs.length < 9) return null;
-  const signal = emaSeries(diffs, 9);
-  const last = line[line.length - 1], sig = signal[signal.length - 1];
-  const prev = line[line.length - 2], prevSig = signal[signal.length - 2];
-  return { line:last, signal:sig, histogram:last - sig, prevHistogram:prev - prevSig, trend:last > sig ? 'bull' : 'bear' };
-}
-function bollinger(closes, period = 20) {
-  if (closes.length < period) return null;
-  const slice = closes.slice(-period), mean = slice.reduce((s, v) => s + v, 0) / period;
-  const variance = slice.reduce((s, v) => s + (v - mean) ** 2, 0) / period;
-  const sd = Math.sqrt(variance);
-  return { mid:mean, upper:mean + 2 * sd, lower:mean - 2 * sd, widthPct:(4 * sd / mean) * 100 };
-}
-function atr(candles, period = 14) {
-  if (candles.length < period + 1) return null;
-  const trs = [];
-  for (let i = candles.length - period; i < candles.length; i += 1) {
-    const c = candles[i], p = candles[i - 1];
-    trs.push(Math.max(c.high - c.low, Math.abs(c.high - p.close), Math.abs(c.low - p.close)));
-  }
-  return trs.reduce((s, v) => s + v, 0) / trs.length;
-}
+// 指标数学实现已抽到共享模块（见 ./shared/indicators.mjs），前后端单一事实来源，避免漂移。
+// Indicator maths now live in ./shared/indicators.mjs — single source of truth shared with the frontend.
+// 下方的 pct / round 仅为本模块内部小工具，无跨端重复，保留在此。
 function pct(a, b) { return Number.isFinite(a) && Number.isFinite(b) && b !== 0 ? (a / b - 1) * 100 : null; }
 function round(value, digits = 2) { return Number.isFinite(value) ? Number(value.toFixed(digits)) : null; }
 

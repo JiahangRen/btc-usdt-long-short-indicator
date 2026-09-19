@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jeffereyreng.btc-alerts-infra</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>/Users/jeffereyreng/ChatGPT/btc指示器/scripts/ensure-alerts-infra.sh</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/jeffereyreng/ChatGPT/btc指示器</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <!-- 每 2 分钟巡检一次：Docker 掉线/容器退出/8787 被竞态禁用都能自愈。
+       脚本幂等且一切正常时约 0.3s 退出，不要加 KeepAlive（会与 StartInterval 打架）。 -->
+  <key>StartInterval</key>
+  <integer>120</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/jeffereyreng/ChatGPT/btc指示器/btc-alerts-infra.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/jeffereyreng/ChatGPT/btc指示器/btc-alerts-infra.error.log</string>
+</dict>
+</plist>

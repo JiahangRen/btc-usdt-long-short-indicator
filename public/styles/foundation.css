@@ -98,7 +98,7 @@ body {
 .toolbar .control-trigger b { color: #eaf1ff; font-size: 15px; }
 .toolbar .control-trigger i { font-style: normal; font-size: 10px; }
 .toolbar .control-popover-panel { position: absolute; z-index: 20; top: 100%; left: 0; display: none; width: max-content; max-width: min(700px, calc(100vw - 48px)); margin: 0; padding: 9px; border: 1px solid var(--border-strong); border-radius: 12px; background: var(--bg-surface); box-shadow: 0 14px 32px rgba(0,0,0,.32); }
-.toolbar .control-popover.is-open:hover .control-popover-panel { display: block; }
+.toolbar .control-popover.is-open .control-popover-panel { display: block; }
 .toolbar .range-picker .control-popover-panel { opacity: 0; transform: translateY(-4px); pointer-events: none; transition: opacity 200ms ease, transform 200ms ease; }
 .toolbar .range-picker.is-open .control-popover-panel { display: flex; }
 .toolbar .range-picker.is-open .control-popover-panel.is-visible { opacity: 1; transform: translateY(0); pointer-events: auto; }
@@ -129,7 +129,7 @@ body {
 .toolbar .chart-display-controls .control-trigger b { color: #eaf1ff; font-size: 15px; }
 .toolbar .chart-display-controls .control-trigger i { font-style: normal; font-size: 10px; }
 .toolbar .chart-display-controls .control-popover-panel { position: absolute; z-index: 20; top: 100%; right: 0; left: auto; display: none; width: max-content; max-width: min(360px, calc(100vw - 48px)); margin: 0; padding: 9px; border: 1px solid var(--border-strong); border-radius: 12px; background: var(--bg-surface); box-shadow: 0 14px 32px rgba(0,0,0,.32); }
-.toolbar .chart-display-controls .control-popover.is-open:hover .control-popover-panel { display: block; }
+.toolbar .chart-display-controls .control-popover.is-open .control-popover-panel { display: block; }
 .toolbar .chart-display-options { display: grid; gap: 7px; min-width: 260px; }
 .toolbar .chart-series-options,
 .toolbar .chart-line-toggles { display: flex; flex-wrap: wrap; gap: 6px; padding-left: 0; border-left: 0; }

@@ -6,8 +6,8 @@
   <string>com.jeffereyreng.btc-indicator</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/jeffereyreng/.local/share/mise/installs/node/26/bin/node</string>
-    <string>/Users/jeffereyreng/ChatGPT/btc指示器/server.mjs</string>
+    <string>/bin/zsh</string>
+    <string>/Users/jeffereyreng/ChatGPT/btc指示器/scripts/serve-with-infra.sh</string>
   </array>
   <key>WorkingDirectory</key>
   <string>/Users/jeffereyreng/ChatGPT/btc指示器</string>

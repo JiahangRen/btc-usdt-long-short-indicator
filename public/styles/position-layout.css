@@ -8,6 +8,18 @@
     column-gap: 12px;
   }
 
+  /* The three movable hero units own one separator each. Clear the older card
+     and sibling borders first so a dragged position never shows two lines. */
+  #personalEntryCard {
+    border: 0 !important;
+  }
+  .hero [data-hero-unit] {
+    border-left: 0 !important;
+  }
+  .hero [data-hero-unit]:not(.hero-unit-first) {
+    box-shadow: inset 1px 0 0 var(--border-subtle);
+  }
+
   .personal-entry-leverage {
     display: inline-flex;
     align-items: center;
@@ -136,6 +148,42 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .personal-entry-liquidation.is-near-liquidation { animation: none; }
+}
+
+/* At medium desktop widths, keep each position's heading and live values inside
+   its own third of the hero grid. Put PnL on a deterministic second row instead
+   of letting a long three-item row paint over the adjacent position. */
+@media (min-width: 1200px) and (max-width: 1600px) {
+  #personalEntryCard .personal-entry-slot {
+    max-width: 100%;
+  }
+  #personalEntryCard .personal-entry-heading {
+    flex-wrap: wrap;
+    gap: 5px 7px;
+  }
+  #personalEntryCard .personal-entry-price-row {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    align-items: baseline;
+    gap: 4px 10px;
+  }
+  #personalEntryCard .personal-entry-value {
+    max-width: 100%;
+    font-size: clamp(19px, 1.55vw, 23px);
+  }
+  #personalEntryCard .personal-entry-status {
+    min-width: 0;
+  }
+  #personalEntryCard .personal-entry-status-pnl {
+    grid-column: 1 / -1;
+    justify-self: start;
+    min-width: 0;
+    white-space: nowrap;
+  }
+  #personalEntryCard .personal-entry-pnl {
+    max-width: 100%;
+    white-space: normal;
+  }
 }
 
 /* Compact single-input position-entry form (edit mode). */

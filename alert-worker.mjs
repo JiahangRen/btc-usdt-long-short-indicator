@@ -1,14 +1,14 @@
 import { createAlertStore, fetchWithTimeout } from './alert-store.mjs';
+// 告警穿越判定抽到共享模块（见 docs/CODE_AUDIT_REPORT.md F6），与 server 共用单一事实来源。
+// Alert cross evaluation now lives in shared/alert-rule-eval.mjs.
+import { evaluateAlertRule } from './shared/alert-rule-eval.mjs';
 
 const store = await createAlertStore();
 if (!store.enabled) throw new Error(`Server-side alert worker is disabled: ${store.reason}`);
 
 let previousPrice = null;
-const crossed = (rule, from, to) => {
-  if (rule.kind === 'price_reached') return (from - rule.targetPrice) * (to - rule.targetPrice) <= 0 && from !== to;
-  const up = rule.kind === 'price_above' || rule.kind === 'short_liquidation';
-  return up ? from < rule.targetPrice && to >= rule.targetPrice : from > rule.targetPrice && to <= rule.targetPrice;
-};
+// 穿越判定语义原样保留在共享模块（cross 用途），见 shared/alert-rule-eval.mjs。
+const crossed = (rule, from, to) => evaluateAlertRule(rule, from, to, 'cross');
 const phrase = (kind, price) => ({ price_reached:`BTC价格达到 ${price}`,price_above:`BTC价格上涨至 ${price}`,price_below:`BTC价格下跌至 ${price}`,long_liquidation:`接近多头爆仓价 ${price}`,short_liquidation:`接近空头爆仓价 ${price}` }[kind] || `BTC价格 ${price}`);
 const title = (kind, price) => kind === 'long_liquidation' || kind === 'short_liquidation' ? `【爆仓】${phrase(kind,price)}` : `【价格】${phrase(kind,price)}`;
 const short = (kind, price) => kind === 'long_liquidation' ? `多头爆仓价 ${price} USDT` : kind === 'short_liquidation' ? `空头爆仓价 ${price} USDT` : `BTC ${price} USDT`;

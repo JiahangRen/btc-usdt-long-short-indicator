@@ -4,7 +4,7 @@ import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { execFile } from 'node:child_process';
-import { extname, join, normalize } from 'node:path';
+import { extname, join, normalize, resolve, sep } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Communicate } from 'edge-tts.js';
 import { createAiChat, DEFAULT_MODEL as QWEN_DEFAULT_MODEL } from './ai-chat.mjs';
@@ -602,31 +602,10 @@ const loadVoiceState = () => {
 };
 loadVoiceState();
 const persistVoiceState = () => { try { writeFileSync(VOICE_STATE_FILE, JSON.stringify(voiceState)); } catch (error) { console.warn('[voice] persist failed:', error.message); } };
-// 触发判定：状态语义 + 首次/未知价格参考
+// 触发判定：语义原样保留在共享模块（state 用途），见 shared/alert-rule-eval.mjs。
+// Alert hit evaluation semantics preserved verbatim in the shared module (purpose 'state').
 function ruleMatches(rule, prev, next) {
-  if (!Number.isFinite(next)) return false;
-  const target = Number(rule.targetPrice);
-  const direction = (prev === undefined || prev === null) ? null : (next > prev) ? 'up' : (next < prev ? 'down' : null);
-  if (rule.kind === 'price_reached') {
-    if (!Number.isFinite(target)) return false;
-    if (prev === undefined) return next >= target; // 离目标多近算"接近"
-    return (prev - target) * (next - target) <= 0;
-  }
-  if (rule.kind === 'price_above') {
-    if (!Number.isFinite(target)) return false;
-    return next >= target; // 状态：到达即满足
-  }
-  if (rule.kind === 'price_below') {
-    if (!Number.isFinite(target)) return false;
-    return next <= target;
-  }
-  if (rule.kind === 'price_tick_move') {
-    const delta = prev === undefined ? Math.abs(target) : Math.abs(next - prev);
-    return delta >= Math.abs(target);
-  }
-  if (rule.kind === 'long_liquidation') return next >= target;
-  if (rule.kind === 'short_liquidation') return next <= target;
-  return false;
+  return evaluateAlertRule(rule, prev, next, 'state');
 }
 function ruleCooldownMs(rule) {
   if (!rule.repeat) return 0;
@@ -2399,11 +2378,29 @@ const aiChat = createAiChat({
   getVerification: (provider) => Boolean(apiCredentials._verification?.[provider]?.valid),
   setModel: (model) => setQwenModel(model)
 });
-const mime = { '.html':'text/html; charset=utf-8', '.js':'text/javascript; charset=utf-8', '.css':'text/css; charset=utf-8', '.svg':'image/svg+xml', '.png':'image/png', '.ico':'image/x-icon' };
-async function edgeTtsAudio(text, voice='zh-CN-XiaoxiaoNeural') {
-  const chunks=[];
-  for await (const chunk of new Communicate(text, voice, { rate:'+5%' }).stream()) if (chunk.type==='audio') chunks.push(Buffer.from(chunk.data));
-  const audio=Buffer.concat(chunks); if(!audio.length) throw new Error('Edge TTS returned no audio'); return audio;
+const mime = { '.html':'text/html; charset=utf-8', '.js':'text/javascript; charset=utf-8', '.mjs':'text/javascript; charset=utf-8', '.css':'text/css; charset=utf-8', '.svg':'image/svg+xml', '.png':'image/png', '.ico':'image/x-icon' };
+// 文本是否含可朗读内容（字母 / 数字 / 汉字等）。纯标点、纯符号、纯空白没有任何
+// 音素，Edge 语音服务会直接返回空音频——那是请求本身的问题，不是服务不可用。
+// Whether the text contains anything pronounceable. Punctuation-, symbol- or
+// whitespace-only input carries no phonemes, so Edge returns zero audio.
+const hasSpeakableContent = value => /[\p{L}\p{N}]/u.test(value);
+async function edgeTtsAudio(text, voice='zh-CN-XiaoxiaoNeural', attempts=2) {
+  if (!hasSpeakableContent(text)) throw Object.assign(new Error('Voice text has no pronounceable content'), { code:'EMPTY_TEXT' });
+  let lastError;
+  for (let attempt=1; attempt<=attempts; attempt+=1) {
+    try {
+      const chunks=[];
+      for await (const chunk of new Communicate(text, voice, { rate:'+5%' }).stream()) if (chunk.type==='audio') chunks.push(Buffer.from(chunk.data));
+      const audio=Buffer.concat(chunks); if(!audio.length) throw new Error('Edge TTS returned no audio'); return audio;
+    } catch (error) {
+      if (error.code === 'EMPTY_TEXT') throw error;
+      // 上游偶发空音频或建连抖动：退避后重试一次，避免把一次抖动直接暴露成失败。
+      // Transient upstream hiccups are retried once instead of surfacing as an error.
+      lastError = error;
+      if (attempt < attempts) await new Promise(resolve => setTimeout(resolve, 350*attempt));
+    }
+  }
+  throw lastError;
 }
 http.createServer((req, res) => requestTiming.run({ started:performance.now(), upstreamStarted:null, upstreamEnded:null, upstreamCalls:0 }, async () => {
  try {
@@ -2442,11 +2439,18 @@ http.createServer((req, res) => requestTiming.run({ started:performance.now(), u
   if (url.pathname === '/api/voice/edge' && req.method==='POST') {
     try {
       const {text,voice}=await readJson(req),safeText=String(text||'').trim();
-      if(!safeText||safeText.length>240) throw new Error('Voice text must be 1–240 characters');
+      // 长度校验属于请求问题，直接 400；不要落进下面的上游 catch 被报成 503。
+      if(!safeText||safeText.length>240) { json(res,400,{error:'Voice text must be 1–240 characters',detail:'播报文本长度需在 1–240 个字符之间'}); return; }
       const safeVoice=['zh-CN-XiaoxiaoNeural','zh-CN-XiaoyiNeural','zh-CN-liaoning-XiaobeiNeural','zh-CN-shaanxi-XiaoniNeural','zh-TW-HsiaoChenNeural','zh-HK-HiuGaaiNeural','zh-CN-YunxiNeural','zh-CN-YunyangNeural','en-US-AvaNeural','en-US-EmmaNeural','en-US-AnaNeural','en-US-AriaNeural','en-US-JennyNeural','en-US-MichelleNeural','en-US-AndrewNeural','en-US-BrianNeural','en-US-ChristopherNeural','en-US-EricNeural','en-US-GuyNeural','en-US-RogerNeural','en-US-SteffanNeural'].includes(voice)?voice:'zh-CN-XiaoxiaoNeural';
       const audio=await edgeTtsAudio(safeText,safeVoice);
       res.writeHead(200,{'content-type':'audio/mpeg','cache-control':'no-store','content-length':audio.length});res.end(audio);
-    } catch(error) { json(res,503,{error:'Edge voice unavailable',detail:error.message}); }
+    } catch(error) {
+      // 文本无可朗读内容属于请求本身的问题，返回 400 并说明原因；只有上游真的
+      // 不可用才返回 503，避免把「探针文本选错」误报成服务故障。
+      // Unpronounceable text is a bad request, not an upstream outage.
+      if (error.code === 'EMPTY_TEXT') json(res,400,{error:'Voice text has no pronounceable content',detail:'文本中没有可朗读的字母、数字或汉字，无法合成语音'});
+      else json(res,503,{error:'Edge voice unavailable',detail:error.message});
+    }
     return;
   }
   // 语音规则同步：前端保存时 POST 上当前 settings + rules；仅用于页面内状态恢复。
@@ -2628,8 +2632,30 @@ http.createServer((req, res) => requestTiming.run({ started:performance.now(), u
     json(res, 200, await usEquityQuotes());
     return;
   }
+  // 显式服务根目录 shared/（前端 app.js 现以 ES Module 消费其中的指标实现，后端同样 import，
+  // 保持单一事实来源）。单独路由以绕过 PUBLIC 目录隔离与穿越防护；自带 .. 与目录越界双重防护。
+  if (url.pathname.startsWith('/shared/')) {
+    const rel = normalize(url.pathname.slice('/shared/'.length)).replace(/^[/\\]+/, '');
+    if (rel.includes('..')) { res.writeHead(403); res.end(); return; }
+    const sharedRoot = join(process.cwd(), 'shared');
+    const file = join(sharedRoot, rel);
+    if (file !== sharedRoot && !file.startsWith(sharedRoot + sep)) { res.writeHead(403); res.end(); return; }
+    try {
+      const body = await readFile(file);
+      res.writeHead(200, { 'content-type': mime[extname(file)] || 'application/octet-stream', 'cache-control': 'no-cache' });
+      res.end(body);
+    } catch { res.writeHead(404); res.end('Not found'); }
+    return;
+  }
   const relative = url.pathname === '/' ? 'index.html' : normalize(url.pathname).replace(/^[/\\]+/, '');
   if (relative.includes('..')) { res.writeHead(403); res.end(); return; }
+  // 显式路径穿越防护：解析后的绝对路径必须仍落在 PUBLIC 目录内（含 PUBLIC 本身）。
+  // 不依赖 normalize() 会丢弃越根 .. 的隐式行为——即使未来 URL 解码规则变化，这里也会硬拦。
+  // Explicit traversal guard: the resolved absolute path must stay inside PUBLIC
+  // (the PUBLIC dir itself included). Kept separate from the '..' check so the
+  // protection never hinges on normalize()'s implicit leading-`..` dropping.
+  const resolvedPath = resolve(PUBLIC, relative);
+  if (resolvedPath !== PUBLIC && !resolvedPath.startsWith(PUBLIC + sep)) { res.writeHead(403); res.end(); return; }
   try {
     const file = join(PUBLIC, relative);
     const body = await readFile(file);

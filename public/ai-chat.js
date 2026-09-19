@@ -7,7 +7,7 @@
 (function () {
   "use strict";
 
-  var LANG = {
+  let LANG = {
     zh: {
       open: "AI 助手",
       title: "AI 行情助手",
@@ -202,10 +202,10 @@
     }
   };
 
-  var STYLE_ID = "btc-ai-chat-style";
+  let STYLE_ID = "btc-ai-chat-style";
   function injectStyle() {
     if (document.getElementById(STYLE_ID)) return;
-    var css = [
+    let css = [
       ".btc-ai-launch{position:fixed;right:22px;bottom:22px;z-index:1200;display:inline-flex;align-items:center;gap:8px;padding:11px 16px;border-radius:999px;border:1.5px solid #ff6b6b;background:var(--bg-elevated,#232a33);color:var(--text-primary,#e8eaed);font:500 13px/1 system-ui,-apple-system,'Segoe UI',sans-serif;cursor:grab;touch-action:none;box-shadow:0 8px 24px rgba(0,0,0,.35);transition:transform .12s ease;animation:btc-ai-glow 2.6s ease-in-out infinite,btc-ai-hue 7s linear infinite}",
       ".btc-ai-launch[hidden]{display:none}",
       // 波纹扩散：两个向外扩的发光圆环，用伪元素画。inset:-1px 让环贴在胶囊外侧，
@@ -426,14 +426,14 @@
       "#btc-ai-shot .btc-ai-log{display:block;overflow:visible;height:auto;padding:0}",
       "#btc-ai-shot-host{position:fixed;left:-100000px;top:0;width:0;height:0;overflow:visible;pointer-events:none;z-index:-1}"
     ].join("\n");
-    var style = document.createElement("style");
+    let style = document.createElement("style");
     style.id = STYLE_ID;
     style.textContent = css;
     document.head.appendChild(style);
   }
 
   function currentLang() {
-    var attr = (document.documentElement.getAttribute("lang") || "").toLowerCase();
+    let attr = (document.documentElement.getAttribute("lang") || "").toLowerCase();
     return attr.indexOf("en") === 0 ? "en" : "zh";
   }
   function escapeHtml(text) {
@@ -446,9 +446,9 @@
   // 方向词着色（绿涨红跌）、价格/百分比高亮、段落与列表、Markdown 表格。
   // Directional words get colored (green up / red down), prices & percents are
   // highlighted, paragraphs/lists are grouped, Markdown tables are rendered.
-  var BULL_RE = /(看多|做多|上涨|多头|看涨|突破|站上|金叉|支撑|企稳)/g;
-  var BEAR_RE = /(看空|做空|下跌|空头|看跌|跌破|失守|死叉|阻力|回落|回调)/g;
-  var WARN_RE = /(强平|爆仓|止损|风险|杠杆|警告|注意|谨慎)/g;
+  let BULL_RE = /(看多|做多|上涨|多头|看涨|突破|站上|金叉|支撑|企稳)/g;
+  let BEAR_RE = /(看空|做空|下跌|空头|看跌|跌破|失守|死叉|阻力|回落|回调)/g;
+  let WARN_RE = /(强平|爆仓|止损|风险|杠杆|警告|注意|谨慎)/g;
   function colorize(text) {
     return text
       .replace(BULL_RE, '<span class="btc-ai-bull">$1</span>')
@@ -463,7 +463,7 @@
         return '<span class="btc-ai-num">' + m + "</span>";
       })
       .replace(/(-?\d+(?:\.\d+)?)%/g, function (m, p) {
-        var cls = p.indexOf("-") === 0 ? "btc-ai-pct btc-ai-pct-neg" : "btc-ai-pct";
+        let cls = p.indexOf("-") === 0 ? "btc-ai-pct btc-ai-pct-neg" : "btc-ai-pct";
         return '<span class="' + cls + '">' + m + "</span>";
       });
   }
@@ -479,13 +479,13 @@
     function cells(line) {
       return line.replace(/^\s*\|/, "").replace(/\|\s*$/, "").split("|").map(function (c) { return c.trim(); });
     }
-    var head = cells(buf[0]);
-    var rows = buf.slice(1).filter(function (l) {
+    let head = cells(buf[0]);
+    let rows = buf.slice(1).filter(function (l) {
       return !/^[\s|:-]+$/.test(l); // 跳过 | --- | --- | 分隔行
     }).map(cells);
     if (!rows.length) return escapeHtml(buf.join("\n")).replace(/\n/g, "<br>");
-    var th = head.map(function (h) { return "<th>" + inline(h) + "</th>"; }).join("");
-    var body = rows.map(function (r) {
+    let th = head.map(function (h) { return "<th>" + inline(h) + "</th>"; }).join("");
+    let body = rows.map(function (r) {
       return "<tr>" + r.map(function (c) { return "<td>" + inline(c) + "</td>"; }).join("") + "</tr>";
     }).join("");
     return '<div class="btc-ai-table-wrap"><table class="btc-ai-table"><thead><tr>' + th + "</tr></thead><tbody>" + body + "</tbody></table></div>";
@@ -496,18 +496,18 @@
   // Only explicit ```chart fenced blocks (one "label: value" per line) are supported. Charts
   // are optional: the model emits one only when a chart reads better than prose.
   function parseChartBlock(lines) {
-    var spec = { type: "bar", title: "", rows: [] };
+    let spec = { type: "bar", title: "", rows: [] };
     lines.forEach(function (raw) {
-      var line = String(raw).trim();
+      let line = String(raw).trim();
       if (!line) return;
-      var m = line.match(/^([^:：]+)[:：]\s*(.*)$/);
+      let m = line.match(/^([^:：]+)[:：]\s*(.*)$/);
       if (!m) return;
-      var key = m[1].trim().toLowerCase();
-      var value = m[2].trim();
+      let key = m[1].trim().toLowerCase();
+      let value = m[2].trim();
       if (key === "type" || key === "类型") { spec.type = value.toLowerCase() === "line" ? "line" : "bar"; return; }
       if (key === "title" || key === "标题") { spec.title = value; return; }
       if (key === "unit" || key === "单位") { spec.unit = value; return; }
-      var num = parseFloat(value.replace(/[^0-9.+-]/g, ""));
+      let num = parseFloat(value.replace(/[^0-9.+-]/g, ""));
       if (!Number.isFinite(num)) return;
       // 保留原始写法（可能带 % 或单位），图上直接照抄，避免四舍五入失真。
       // Keep the literal text (may carry a % or unit) so the chart never re-rounds the value.
@@ -523,31 +523,31 @@
     return "var(--accent-cyan,#22d3ee)";
   }
   function renderChart(spec) {
-    var rows = spec.rows.slice(0, 12);
+    let rows = spec.rows.slice(0, 12);
     if (rows.length < 2) return "";
-    var maxAbs = 0;
+    let maxAbs = 0;
     rows.forEach(function (r) { maxAbs = Math.max(maxAbs, Math.abs(r.value)); });
     if (!maxAbs) maxAbs = 1;
-    var parts = [];
-    var height;
+    let parts = [];
+    let height;
     if (spec.type === "line") {
       // 折线：等距横轴，纵向按数值区间归一化，末端点加粗。
       // Line: evenly spaced x-axis, values normalised vertically, last point emphasised.
-      var values = rows.map(function (r) { return r.value; });
-      var min = Math.min.apply(null, values), max = Math.max.apply(null, values);
-      var span = max - min || 1;
-      var left = 46, right = 24, top = 14, bottom = 26;
-      var plotW = 600 - left - right, plotH = Math.max(70, rows.length * 14);
+      let values = rows.map(function (r) { return r.value; });
+      let min = Math.min.apply(null, values), max = Math.max.apply(null, values);
+      let span = max - min || 1;
+      let left = 46, right = 24, top = 14, bottom = 26;
+      let plotW = 600 - left - right, plotH = Math.max(70, rows.length * 14);
       height = plotH + top + bottom;
-      var points = rows.map(function (row, index) {
-        var x = left + (rows.length === 1 ? plotW / 2 : (index / (rows.length - 1)) * plotW);
-        var y = top + (1 - (row.value - min) / span) * plotH;
+      let points = rows.map(function (row, index) {
+        let x = left + (rows.length === 1 ? plotW / 2 : (index / (rows.length - 1)) * plotW);
+        let y = top + (1 - (row.value - min) / span) * plotH;
         return { x: x, y: y, row: row };
       });
       parts.push('<line x1="' + left + '" y1="' + (top + plotH) + '" x2="' + (left + plotW) + '" y2="' + (top + plotH) + '" stroke="var(--border-subtle,#2a313b)" stroke-width="1"/>');
       parts.push('<polyline fill="none" stroke="var(--accent-cyan,#22d3ee)" stroke-width="2" stroke-linejoin="round" points="' + points.map(function (p) { return p.x.toFixed(1) + "," + p.y.toFixed(1); }).join(" ") + '"/>');
       points.forEach(function (p, index) {
-        var last = index === points.length - 1;
+        let last = index === points.length - 1;
         parts.push('<circle cx="' + p.x.toFixed(1) + '" cy="' + p.y.toFixed(1) + '" r="' + (last ? 4 : 2.6) + '" fill="' + chartFill(p.row.value, maxAbs) + '"/>');
         parts.push('<text x="' + p.x.toFixed(1) + '" y="' + (p.y - 8).toFixed(1) + '" text-anchor="middle" fill="var(--text-primary,#e8eaed)">' + escapeHtml(p.row.raw) + "</text>");
         parts.push('<text x="' + p.x.toFixed(1) + '" y="' + (top + plotH + 15) + '" text-anchor="middle" fill="var(--text-secondary,#9aa4b2)">' + escapeHtml(p.row.label.slice(0, 10)) + "</text>");
@@ -555,19 +555,19 @@
     } else {
       // 条形：标签左对齐、条长按绝对值比例、数值贴在条尾。
       // Bars: right-aligned labels, length proportional to |value|, value pinned to the tip.
-      var labelW = 104, tipW = 66, rowH = 25;
-      var barPlotW = 600 - labelW - tipW;
+      let labelW = 104, tipW = 66, rowH = 25;
+      let barPlotW = 600 - labelW - tipW;
       height = rows.length * rowH + 6;
       rows.forEach(function (row, index) {
-        var y = index * rowH + 3;
-        var width = Math.max(2, (Math.abs(row.value) / maxAbs) * barPlotW);
+        let y = index * rowH + 3;
+        let width = Math.max(2, (Math.abs(row.value) / maxAbs) * barPlotW);
         parts.push('<text x="' + (labelW - 8) + '" y="' + (y + 14) + '" text-anchor="end" fill="var(--text-secondary,#9aa4b2)">' + escapeHtml(row.label.slice(0, 11)) + "</text>");
         parts.push('<rect x="' + labelW + '" y="' + y + '" width="' + width.toFixed(1) + '" height="' + (rowH - 9) + '" rx="3" fill="' + chartFill(row.value, maxAbs) + '" opacity=".88"/>');
         parts.push('<text class="btc-ai-chart-val" x="' + (labelW + width + 6).toFixed(1) + '" y="' + (y + 14) + '" fill="var(--text-primary,#e8eaed)">' + escapeHtml(row.raw) + "</text>");
       });
     }
-    var caption = spec.title ? "<figcaption>" + escapeHtml(spec.title) + "</figcaption>" : "";
-    var label = spec.title || (spec.type === "line" ? "chart" : "chart");
+    let caption = spec.title ? "<figcaption>" + escapeHtml(spec.title) + "</figcaption>" : "";
+    let label = spec.title || (spec.type === "line" ? "chart" : "chart");
     return '<figure class="btc-ai-chart">' + caption +
       '<svg viewBox="0 0 600 ' + height + '" preserveAspectRatio="xMidYMid meet" role="img" aria-label="' + escapeHtml(label) + '">' +
       parts.join("") + "</svg></figure>";
@@ -576,10 +576,10 @@
   function renderRich(text) {
     if (text == null) return "";
     text = String(text).replace(/\u2212/g, "-"); // 统一全角减号，便于数字着色
-    var lines = text.split(/\r?\n/);
-    var out = [];
-    var i = 0;
-    var sectionOpen = false;
+    let lines = text.split(/\r?\n/);
+    let out = [];
+    let i = 0;
+    let sectionOpen = false;
     // 【结论】是全文最该被看见的一段：给它加底色与更粗的左边线。
     // 【结论】 gets a tinted, thicker left rail — it is the line readers look for first.
     function isLead(title) { return /^\s*(结论|Conclusion)\s*$/i.test(String(title)); }
@@ -591,36 +591,36 @@
     }
     function closeSection() { if (sectionOpen) { out.push("</div>"); sectionOpen = false; } }
     while (i < lines.length) {
-      var rawLine = lines[i];
+      let rawLine = lines[i];
       // 代码围栏：```chart → 图表；其它围栏按等宽代码块原样显示。
       // Fences: ```chart becomes a chart; anything else stays a monospace code block.
-      var fence = rawLine.match(/^\s*```+\s*([a-zA-Z]*)\s*$/);
+      let fence = rawLine.match(/^\s*```+\s*([a-zA-Z]*)\s*$/);
       if (fence) {
-        var lang = (fence[1] || "").toLowerCase();
-        var body = [];
+        let lang = (fence[1] || "").toLowerCase();
+        let body = [];
         i++;
         while (i < lines.length && !/^\s*```+\s*$/.test(lines[i])) { body.push(lines[i]); i++; }
         i++; // 跳过结束围栏 / skip the closing fence
         closeSection();
         if (lang === "chart") {
-          var spec = parseChartBlock(body);
+          let spec = parseChartBlock(body);
           if (spec) { out.push(renderChart(spec)); continue; }
         }
         out.push("<pre class='btc-ai-chart'><code>" + escapeHtml(body.join("\n")) + "</code></pre>");
         continue;
       }
-      var line = escapeHtml(rawLine);
+      let line = escapeHtml(rawLine);
       // Markdown 表格：连续以 | 起止的行（保持在当前分段内，不另起边框）
       // Markdown table: consecutive lines starting and ending with | (kept inside the current section)
       if (/^\s*\|.*\|\s*$/.test(line)) {
-        var tableBuf = [];
+        let tableBuf = [];
         while (i < lines.length && /^\s*\|.*\|\s*$/.test(escapeHtml(lines[i]))) { tableBuf.push(escapeHtml(lines[i])); i++; }
         out.push(renderTable(tableBuf));
         continue;
       }
       // 【标题】分段
       // 【Section】 headers
-      var hm = line.match(/^【(.+?)】(.*)$/);
+      let hm = line.match(/^【(.+?)】(.*)$/);
       if (hm) {
         closeSection();
         openSection(isLead(hm[1]));
@@ -633,9 +633,9 @@
       // Bullet list
       if (/^\s*[-*•]\s+/.test(line)) {
         closeSection();
-        var items = [];
+        let items = [];
         while (i < lines.length) {
-          var b2 = escapeHtml(lines[i]).match(/^\s*[-*•]\s+(.*)$/);
+          let b2 = escapeHtml(lines[i]).match(/^\s*[-*•]\s+(.*)$/);
           if (!b2) break;
           items.push("<li>" + inline(b2[1]) + "</li>");
           i++;
@@ -647,9 +647,9 @@
       // Numbered list
       if (/^\s*\d+[.)]\s+/.test(line)) {
         closeSection();
-        var nis = [];
+        let nis = [];
         while (i < lines.length) {
-          var n2 = escapeHtml(lines[i]).match(/^\s*\d+[.)]\s+(.*)$/);
+          let n2 = escapeHtml(lines[i]).match(/^\s*\d+[.)]\s+(.*)$/);
           if (!n2) break;
           nis.push("<li>" + inline(n2[1]) + "</li>");
           i++;
@@ -668,7 +668,7 @@
 
   // 回答模式（语气档位）：与「快速/深度」正交 —— 那个决定模型想多久，这个决定说给谁听。
   // Answer styles (register): orthogonal to fast/deep — that one controls thinking, this one tone.
-  var STYLE_IDS = ["plain", "balanced", "pro"];
+  let STYLE_IDS = ["plain", "balanced", "pro"];
   function styleText(t, id) {
     if (id === "pro") return { label: t.stylePro, tag: t.styleProTag, note: t.styleProNote, who: t.styleProWho };
     if (id === "balanced") return { label: t.styleBalanced, tag: t.styleBalancedTag, note: t.styleBalancedNote, who: t.styleBalancedWho };
@@ -677,50 +677,50 @@
   // 头部空间有限，模型名去掉 qwen 前缀显示（浮层里仍给全名）。
   // The header is tight, so drop the "qwen" prefix here (the menu still shows the full id).
   function shortModel(id) {
-    var name = String(id || "");
+    let name = String(id || "");
     return name.replace(/^qwen[-\s]*/i, "") || name;
   }
 
   function boot() {
     injectStyle();
-    var t = LANG[currentLang()];
-    var busy = false;
-    var configured = false;
-    var model = "";
+    let t = LANG[currentLang()];
+    let busy = false;
+    let configured = false;
+    let model = "";
     // 可选模型清单由 /api/ai/config 下发（含性价比档位与是否可用于问答）。
     // The selectable model list arrives from /api/ai/config with tier + usable flags.
-    var modelList = [];
+    let modelList = [];
 
     // ---------- 对话管理：本地持久化 ----------
     // 每段对话都存在 localStorage 里：刷新不丢、「新建对话」把当前这段归档进历史记录、
     // 历史记录可随时切回来继续聊（上下文一并恢复）。
     // Conversations persist in localStorage: a reload keeps them, "New chat" files the current one
     // under History, and any saved chat can be reopened with its context intact.
-    var CONV_KEY = "btc_ai_conv_list";
-    var ACTIVE_KEY = "btc_ai_conv_id";
-    var CONV_MAX = 12;        // 最多保留的对话段数 / conversations kept
-    var CONV_MSG_MAX = 40;    // 每段对话落盘的消息上限 / messages persisted per conversation
-    var MSG_CHAR_MAX = 6000;  // 单条消息落盘的字符上限 / chars persisted per message
-    var convList = [];        // 已保存的对话（最新的在最前）/ saved conversations, newest first
-    var convId = "";          // 当前对话 id / active conversation id
-    var convCreatedAt = 0;
-    var convMsgs = [];        // 当前对话的消息 / messages of the active conversation
-    var convSeq = 0;
+    let CONV_KEY = "btc_ai_conv_list";
+    let ACTIVE_KEY = "btc_ai_conv_id";
+    let CONV_MAX = 12;        // 最多保留的对话段数 / conversations kept
+    let CONV_MSG_MAX = 40;    // 每段对话落盘的消息上限 / messages persisted per conversation
+    let MSG_CHAR_MAX = 6000;  // 单条消息落盘的字符上限 / chars persisted per message
+    let convList = [];        // 已保存的对话（最新的在最前）/ saved conversations, newest first
+    let convId = "";          // 当前对话 id / active conversation id
+    let convCreatedAt = 0;
+    let convMsgs = [];        // 当前对话的消息 / messages of the active conversation
+    let convSeq = 0;
     // 字号缩放：只影响对话正文，倍率记在本地。范围 50%–200%：缩小档位密一些（每次 -10%）
     // 方便把长回答压进面板，放大档位到 120% 之后步子变大，避免一路点十几次。
     // Text zoom: scales the transcript only, remembered locally. Range 50%–200% — shrinking
     // steps are fine-grained (10% each) and enlarging gets coarser past 120%.
-    var FONT_STEPS = [0.5, 0.6, 0.7, 0.8, 0.9, 1, 1.1, 1.2, 1.4, 1.6, 1.8, 2];
-    var fontScale = 1;
-    var shotBusy = false;
+    let FONT_STEPS = [0.5, 0.6, 0.7, 0.8, 0.9, 1, 1.1, 1.2, 1.4, 1.6, 1.8, 2];
+    let fontScale = 1;
+    let shotBusy = false;
 
-    var launch = document.createElement("button");
+    let launch = document.createElement("button");
     launch.type = "button";
     launch.className = "btc-ai-launch";
     launch.hidden = true;
     launch.innerHTML = '<span class="btc-ai-dot"></span><span class="btc-ai-launch-label">' + t.open + "</span>";
 
-    var panel = document.createElement("section");
+    let panel = document.createElement("section");
     panel.className = "btc-ai-panel";
     panel.hidden = true;
     panel.setAttribute("aria-label", t.title);
@@ -774,7 +774,7 @@
     // 八个方向的缩放把手：n/s 上下拉伸、w/e 左右拉伸、四角同时改宽高。
     // Eight grips: n/s stretch vertically, w/e horizontally, corners change both axes.
     ["n", "s", "w", "e", "nw", "ne", "sw", "se"].forEach(function (dir) {
-      var grip = document.createElement("span");
+      let grip = document.createElement("span");
       grip.className = "btc-ai-rz btc-ai-rz-" + dir;
       grip.setAttribute("data-dir", dir);
       grip.title = t.resize;
@@ -785,14 +785,14 @@
 
     // ---------- 悬浮按钮：可拖动 + 注意力动画 ----------
     // Floating button: draggable + attention animation
-    var aiTip = document.createElement("span");
+    let aiTip = document.createElement("span");
     aiTip.className = "btc-ai-launch-tip";
     aiTip.textContent = t.aiTip;
     launch.appendChild(aiTip);
-    var launchSeen = false;
+    let launchSeen = false;
     try { launchSeen = localStorage.getItem("btc_ai_launch_seen") === "1"; } catch (e) {}
     if (launchSeen) { launch.classList.add("btc-ai-seen"); aiTip.style.display = "none"; }
-    var tipTimer = setTimeout(function () { aiTip.style.display = "none"; }, 7000);
+    let tipTimer = setTimeout(function () { aiTip.style.display = "none"; }, 7000);
     function hideTip() { aiTip.style.display = "none"; clearTimeout(tipTimer); }
     function markLaunchSeen() {
       launchSeen = true;
@@ -804,7 +804,7 @@
     // 恢复上次拖动到的位置
     // Restore the last dragged position.
     try {
-      var savedPos = JSON.parse(localStorage.getItem("btc_ai_launch_pos") || "null");
+      let savedPos = JSON.parse(localStorage.getItem("btc_ai_launch_pos") || "null");
       if (savedPos && Number.isFinite(savedPos.x) && Number.isFinite(savedPos.y)) {
         launch.style.right = "auto";
         launch.style.bottom = "auto";
@@ -813,19 +813,19 @@
       }
     } catch (e) {}
 
-    var dragMoved = false;
-    var lastDragAt = 0;
+    let dragMoved = false;
+    let lastDragAt = 0;
     // 位移小于这个值算「点击」而不是「拖动」：避免手抖导致点击被吞、动效被无谓打断。
     // Below this distance it counts as a click, not a drag, so a shaky click still opens the panel.
-    var DRAG_THRESHOLD = 4;
+    let DRAG_THRESHOLD = 4;
     launch.addEventListener("pointerdown", function (e) {
       if (e.button !== 0) return;
-      var rect = launch.getBoundingClientRect();
-      var offX = e.clientX - rect.left;
-      var offY = e.clientY - rect.top;
-      var startX = e.clientX, startY = e.clientY;
+      let rect = launch.getBoundingClientRect();
+      let offX = e.clientX - rect.left;
+      let offY = e.clientY - rect.top;
+      let startX = e.clientX, startY = e.clientY;
       dragMoved = false;
-      var dragging = false;
+      let dragging = false;
       try { launch.setPointerCapture(e.pointerId); } catch (err) {}
       function move(ev) {
         if (!dragging) {
@@ -834,9 +834,9 @@
           dragMoved = true;
           launch.classList.add("btc-ai-dragging");
         }
-        var w = rect.width, h = rect.height;
-        var x = Math.max(4, Math.min(window.innerWidth - w - 4, ev.clientX - offX));
-        var y = Math.max(4, Math.min(window.innerHeight - h - 4, ev.clientY - offY));
+        let w = rect.width, h = rect.height;
+        let x = Math.max(4, Math.min(window.innerWidth - w - 4, ev.clientX - offX));
+        let y = Math.max(4, Math.min(window.innerHeight - h - 4, ev.clientY - offY));
         launch.style.right = "auto";
         launch.style.bottom = "auto";
         launch.style.left = x + "px";
@@ -868,10 +868,10 @@
 
     // ---------- 聊天窗口：跟随按钮定位 + 八向拖拽缩放 ----------
     // Chat window: open next to the launch button, resize from any edge or corner.
-    var MIN_W = 320, MIN_H = 340;
+    let MIN_W = 320, MIN_H = 340;
     // 恢复上次调整的尺寸 / restore the last resized dimensions
     try {
-      var savedSize = JSON.parse(localStorage.getItem("btc_ai_panel_size") || "null");
+      let savedSize = JSON.parse(localStorage.getItem("btc_ai_panel_size") || "null");
       if (savedSize && Number.isFinite(savedSize.w) && Number.isFinite(savedSize.h)) {
         panel.style.width = savedSize.w + "px";
         panel.style.height = savedSize.h + "px";
@@ -881,10 +881,10 @@
     function maxPanelW() { return Math.max(MIN_W, window.innerWidth - 8); }
     function maxPanelH() { return Math.max(MIN_H, window.innerHeight - 8); }
     function clampPanelSize() {
-      var width = panel.offsetWidth, height = panel.offsetHeight;
+      let width = panel.offsetWidth, height = panel.offsetHeight;
       if (!width || !height) return;
-      var w = Math.min(Math.max(MIN_W, width), maxPanelW());
-      var h = Math.min(Math.max(MIN_H, height), maxPanelH());
+      let w = Math.min(Math.max(MIN_W, width), maxPanelW());
+      let h = Math.min(Math.max(MIN_H, height), maxPanelH());
       if (w !== width) panel.style.width = w + "px";
       if (h !== height) panel.style.height = h + "px";
     }
@@ -895,18 +895,18 @@
     function placePanel() {
       if (panel.hidden) return;
       clampPanelSize();
-      var gap = 10, pad = 8;
-      var btn = launch.getBoundingClientRect();
-      var w = panel.offsetWidth || 430, h = panel.offsetHeight || 620;
-      var vw = window.innerWidth, vh = window.innerHeight;
-      var cx = btn.left + btn.width / 2, cy = btn.top + btn.height / 2;
+      let gap = 10, pad = 8;
+      let btn = launch.getBoundingClientRect();
+      let w = panel.offsetWidth || 430, h = panel.offsetHeight || 620;
+      let vw = window.innerWidth, vh = window.innerHeight;
+      let cx = btn.left + btn.width / 2, cy = btn.top + btn.height / 2;
       function clampL(l) { return Math.max(pad, Math.min(vw - pad - w, l)); }
       function clampT(t) { return Math.max(pad, Math.min(vh - pad - h, t)); }
       // 四组「紧贴按钮」的原始坐标：下／上／右／左。横向按按钮所在半区与按钮对齐，
       // 纵向按按钮所在半区决定优先顺序（按钮在上半屏先往下开，在下半屏先往上开）。
       // Four anchor candidates: below / above / right / left, aligned to the button's own half.
-      var ax = cx <= vw / 2 ? btn.left : btn.right - w;
-      var cands = (cy <= vh / 2
+      let ax = cx <= vw / 2 ? btn.left : btn.right - w;
+      let cands = (cy <= vh / 2
         ? [[ax, btn.bottom + gap], [ax, btn.top - gap - h]]
         : [[ax, btn.top - gap - h], [ax, btn.bottom + gap]]
       ).concat([
@@ -917,14 +917,14 @@
       // 视口很矮／很窄、四条边都塞不下时也能自动选「不遮挡按钮且尽量完整」的那一侧。
       // Clamp each candidate, then score: off-screen area + area covering the button (heavily
       // weighted) + preference order. Picks the least-bad side when nothing fits cleanly.
-      var best = null, bestScore = Infinity;
-      for (var i = 0; i < cands.length; i++) {
-        var l = clampL(cands[i][0]), t = clampT(cands[i][1]);
-        var out = (Math.max(0, pad - l) + Math.max(0, l + w - (vw - pad))) * h
+      let best = null, bestScore = Infinity;
+      for (let i = 0; i < cands.length; i++) {
+        let l = clampL(cands[i][0]), t = clampT(cands[i][1]);
+        let out = (Math.max(0, pad - l) + Math.max(0, l + w - (vw - pad))) * h
                 + (Math.max(0, pad - t) + Math.max(0, t + h - (vh - pad))) * w;
-        var ox = Math.min(l + w, btn.right) - Math.max(l, btn.left);
-        var oy = Math.min(t + h, btn.bottom) - Math.max(t, btn.top);
-        var score = out + (ox > 0 && oy > 0 ? ox * oy * 40 : 0) + i * 0.5;
+        let ox = Math.min(l + w, btn.right) - Math.max(l, btn.left);
+        let oy = Math.min(t + h, btn.bottom) - Math.max(t, btn.top);
+        let score = out + (ox > 0 && oy > 0 ? ox * oy * 40 : 0) + i * 0.5;
         if (score < bestScore) { bestScore = score; best = [l, t]; }
       }
       panel.style.right = "auto";
@@ -938,27 +938,27 @@
         if (e.button !== 0) return;
         e.preventDefault();
         e.stopPropagation();
-        var dir = grip.getAttribute("data-dir") || "se";
-        var rect = panel.getBoundingClientRect();
-        var startX = e.clientX, startY = e.clientY;
-        var startW = rect.width, startH = rect.height, startL = rect.left, startT = rect.top;
+        let dir = grip.getAttribute("data-dir") || "se";
+        let rect = panel.getBoundingClientRect();
+        let startX = e.clientX, startY = e.clientY;
+        let startW = rect.width, startH = rect.height, startL = rect.left, startT = rect.top;
         // 对边保持不动：拖动左边框时右边框固定，反之亦然。
         // Pin the opposite edge: dragging the left edge keeps the right edge fixed.
-        var rightEdge = startL + startW, bottomEdge = startT + startH;
+        let rightEdge = startL + startW, bottomEdge = startT + startH;
         try { grip.setPointerCapture(e.pointerId); } catch (err) { /* 捕获失败也能继续 / continue without capture */ }
         panel.setAttribute("data-resizing", "true");
         function move(ev) {
-          var dx = ev.clientX - startX, dy = ev.clientY - startY;
-          var w = startW, h = startH, l = startL, t = startT;
+          let dx = ev.clientX - startX, dy = ev.clientY - startY;
+          let w = startW, h = startH, l = startL, t = startT;
           if (dir.indexOf("e") >= 0) w = startW + dx;
           if (dir.indexOf("w") >= 0) { w = startW - dx; l = startL + dx; }
           if (dir.indexOf("s") >= 0) h = startH + dy;
           if (dir.indexOf("n") >= 0) { h = startH - dy; t = startT + dy; }
           // 触到最小/最大限制时钳住被拖的那条边，对边依然不动。
           // When a limit is reached, pin the dragged edge so the opposite edge stays put.
-          var cappedW = Math.min(Math.max(MIN_W, w), maxPanelW());
+          let cappedW = Math.min(Math.max(MIN_W, w), maxPanelW());
           if (cappedW !== w) { if (dir.indexOf("w") >= 0) l = rightEdge - cappedW; w = cappedW; }
-          var cappedH = Math.min(Math.max(MIN_H, h), maxPanelH());
+          let cappedH = Math.min(Math.max(MIN_H, h), maxPanelH());
           if (cappedH !== h) { if (dir.indexOf("n") >= 0) t = bottomEdge - cappedH; h = cappedH; }
           l = Math.max(0, Math.min(window.innerWidth - w, l));
           t = Math.max(0, Math.min(window.innerHeight - h, t));
@@ -989,53 +989,53 @@
     // Re-anchor to the button after a viewport change so the panel never strands off-screen.
     window.addEventListener("resize", placePanel);
 
-    var log = panel.querySelector(".btc-ai-log");
-    var quick = panel.querySelector(".btc-ai-quick");
-    var input = panel.querySelector(".btc-ai-input");
-    var sendBtn = panel.querySelector(".btc-ai-send");
-    var modelTag = panel.querySelector(".btc-ai-model");
-    var titleEl = panel.querySelector(".btc-ai-head h3");
-    var subEl = panel.querySelector(".btc-ai-head p");
-    var closeBtn = panel.querySelector('[data-act="close"]');
-    var toolsEl = panel.querySelector(".btc-ai-tools");
-    var newBtn = panel.querySelector('[data-act="new"]');
-    var historyBtn = panel.querySelector('[data-act="history"]');
-    var historyBadge = panel.querySelector(".btc-ai-tool-badge");
-    var zoomOutBtn = panel.querySelector('[data-act="zoom-out"]');
-    var zoomInBtn = panel.querySelector('[data-act="zoom-in"]');
-    var zoomVal = panel.querySelector('[data-act="zoom-reset"]');
-    var shotBtn = panel.querySelector('[data-act="shot"]');
-    var convMenu = panel.querySelector(".btc-ai-conv-menu");
-    var noteEl = panel.querySelector(".btc-ai-note");
-    var quotaEl = panel.querySelector(".btc-ai-quota");
-    var quotaFill = panel.querySelector(".btc-ai-quota-fill");
-    var quotaPct = panel.querySelector(".btc-ai-quota-pct");
-    var quotaMeta = panel.querySelector(".btc-ai-quota-meta");
-    var quotaDetail = panel.querySelector(".btc-ai-quota-detail");
-    var modeBtn = panel.querySelector(".btc-ai-mode");
-    var modelMenu = panel.querySelector(".btc-ai-model-menu");
-    var styleBtn = panel.querySelector(".btc-ai-style");
-    var styleMenu = panel.querySelector(".btc-ai-styles");
-    var webBtn = panel.querySelector(".btc-ai-web");
+    let log = panel.querySelector(".btc-ai-log");
+    let quick = panel.querySelector(".btc-ai-quick");
+    let input = panel.querySelector(".btc-ai-input");
+    let sendBtn = panel.querySelector(".btc-ai-send");
+    let modelTag = panel.querySelector(".btc-ai-model");
+    let titleEl = panel.querySelector(".btc-ai-head h3");
+    let subEl = panel.querySelector(".btc-ai-head p");
+    let closeBtn = panel.querySelector('[data-act="close"]');
+    let toolsEl = panel.querySelector(".btc-ai-tools");
+    let newBtn = panel.querySelector('[data-act="new"]');
+    let historyBtn = panel.querySelector('[data-act="history"]');
+    let historyBadge = panel.querySelector(".btc-ai-tool-badge");
+    let zoomOutBtn = panel.querySelector('[data-act="zoom-out"]');
+    let zoomInBtn = panel.querySelector('[data-act="zoom-in"]');
+    let zoomVal = panel.querySelector('[data-act="zoom-reset"]');
+    let shotBtn = panel.querySelector('[data-act="shot"]');
+    let convMenu = panel.querySelector(".btc-ai-conv-menu");
+    let noteEl = panel.querySelector(".btc-ai-note");
+    let quotaEl = panel.querySelector(".btc-ai-quota");
+    let quotaFill = panel.querySelector(".btc-ai-quota-fill");
+    let quotaPct = panel.querySelector(".btc-ai-quota-pct");
+    let quotaMeta = panel.querySelector(".btc-ai-quota-meta");
+    let quotaDetail = panel.querySelector(".btc-ai-quota-detail");
+    let modeBtn = panel.querySelector(".btc-ai-mode");
+    let modelMenu = panel.querySelector(".btc-ai-model-menu");
+    let styleBtn = panel.querySelector(".btc-ai-style");
+    let styleMenu = panel.querySelector(".btc-ai-styles");
+    let webBtn = panel.querySelector(".btc-ai-web");
     // 联网检索：默认开（服务端 /api/ai/config 可覆盖），选择记在本地浏览器。
     // Web research: on by default (the server config can override), remembered locally.
-    var webEnabled = true;
+    let webEnabled = true;
     try { webEnabled = localStorage.getItem("btc_ai_web") !== "0"; } catch (e) { /* 隐私模式 / private mode */ }
     // 思考模式：默认快速（关掉推理，秒级出结果），存 localStorage 记住选择。
     // Thinking mode: fast by default (no reasoning, answers in seconds), persisted in localStorage.
-    var thinking = "fast";
+    let thinking = "fast";
     try { thinking = localStorage.getItem("btc_ai_thinking") === "deep" ? "deep" : "fast"; } catch (e) { /* 隐私模式下 localStorage 不可用 / localStorage can throw in private mode */ }
     // 回答模式：默认「通俗」，同样记住在本地。切换对下一条提问立即生效。
     // Answer style: plain by default, also remembered locally; applies from the next question on.
-    var answerStyle = "plain";
+    let answerStyle = "plain";
     try {
-      var savedStyle = localStorage.getItem("btc_ai_style");
+      let savedStyle = localStorage.getItem("btc_ai_style");
       if (savedStyle && STYLE_IDS.indexOf(savedStyle) >= 0) answerStyle = savedStyle;
     } catch (e) { /* 忽略存储失败 / ignore storage failures */ }
 
     function applyLabels() {
       t = LANG[currentLang()];
-      var labelEl = launch.querySelector(".btc-ai-launch-label");
+      let labelEl = launch.querySelector(".btc-ai-launch-label");
       if (labelEl) labelEl.textContent = t.open;
       if (!launchSeen && aiTip) aiTip.textContent = t.aiTip;
       titleEl.textContent = t.title;
@@ -1061,7 +1061,7 @@
       applyWebLabel();
       quick.innerHTML = "";
       t.quick.forEach(function (text) {
-        var chip = document.createElement("button");
+        let chip = document.createElement("button");
         chip.type = "button";
         chip.className = "btc-ai-chip";
         chip.textContent = text;
@@ -1074,7 +1074,7 @@
     // Mode button: shows the current gear, toggles on click, explains itself on hover.
     function applyModeLabel() {
       if (!modeBtn) return;
-      var deep = thinking === "deep";
+      let deep = thinking === "deep";
       modeBtn.textContent = deep ? t.modeDeep : t.modeFast;
       modeBtn.setAttribute("data-mode", thinking);
       modeBtn.title = deep ? t.modeDeepTip : t.modeFastTip;
@@ -1092,40 +1092,40 @@
     function renderModelMenu() {
       if (!modelMenu) return;
       modelMenu.innerHTML = "";
-      var head = document.createElement("h4");
+      let head = document.createElement("h4");
       head.textContent = t.modelMenuTitle;
-      var hint = document.createElement("p");
+      let hint = document.createElement("p");
       hint.className = "btc-ai-models-hint";
       hint.textContent = t.modelMenuHint;
       modelMenu.append(head, hint);
       if (!configured) {
-        var needKey = document.createElement("p");
+        let needKey = document.createElement("p");
         needKey.className = "btc-ai-models-hint";
         needKey.textContent = t.notConfigured;
         modelMenu.appendChild(needKey);
         return;
       }
       if (!modelList.length) {
-        var empty = document.createElement("p");
+        let empty = document.createElement("p");
         empty.className = "btc-ai-models-hint";
         empty.textContent = "—";
         modelMenu.appendChild(empty);
         return;
       }
       modelList.forEach(function (entry) {
-        var usable = entry.usable !== false;
-        var row = document.createElement("button");
+        let usable = entry.usable !== false;
+        let row = document.createElement("button");
         row.type = "button";
         row.className = "btc-ai-model-row";
         if (!usable) row.disabled = true;
         if (usable && entry.id === model) row.setAttribute("aria-current", "true");
 
-        var top = document.createElement("span");
+        let top = document.createElement("span");
         top.className = "btc-ai-model-top";
-        var idEl = document.createElement("span");
+        let idEl = document.createElement("span");
         idEl.className = "btc-ai-model-id";
         idEl.textContent = entry.label || entry.id;
-        var tierEl = document.createElement("span");
+        let tierEl = document.createElement("span");
         tierEl.className = "btc-ai-model-tier";
         tierEl.setAttribute("data-tier", entry.tier || "balanced");
         tierEl.textContent = tierLabel(entry.tier);
@@ -1133,19 +1133,19 @@
         // 优先级：当前使用中 > 推荐标记，避免两个徽标同时出现。
         // Current model wins over the "recommended" badge so only one chip shows.
         if (usable && entry.id === model) {
-          var nowBadge = document.createElement("span");
+          let nowBadge = document.createElement("span");
           nowBadge.className = "btc-ai-model-badge";
           nowBadge.textContent = t.modelCurrent;
           top.appendChild(nowBadge);
         } else if (entry.recommended) {
-          var recBadge = document.createElement("span");
+          let recBadge = document.createElement("span");
           recBadge.className = "btc-ai-model-badge";
           recBadge.textContent = t.modelRecommended;
           top.appendChild(recBadge);
         }
         row.appendChild(top);
 
-        var noteLine = document.createElement("span");
+        let noteLine = document.createElement("span");
         noteLine.className = "btc-ai-model-note";
         noteLine.textContent = entry.note || "";
         row.appendChild(noteLine);
@@ -1156,7 +1156,7 @@
     }
     function toggleModelMenu(force) {
       if (!modelMenu || !modelTag) return;
-      var open = typeof force === "boolean" ? force : modelMenu.hidden;
+      let open = typeof force === "boolean" ? force : modelMenu.hidden;
       if (open && !configured) {
         addMessage("error", t.notConfigured);
         return;
@@ -1173,16 +1173,16 @@
       if (id === model) return;
       modelTag.disabled = true;
       try {
-        var response = await fetch("/api/ai/model", {
+        let response = await fetch("/api/ai/model", {
           method: "PUT",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ model: id })
         });
-        var data = await response.json().catch(function () { return {}; });
+        let data = await response.json().catch(function () { return {}; });
         if (!response.ok) throw new Error(data.error || t.modelSwitchFailed);
         model = data.model || id;
         modelTag.textContent = shortModel(model);
-        var picked = modelList.filter(function (m) { return m.id === model; })[0];
+        let picked = modelList.filter(function (m) { return m.id === model; })[0];
         modelTag.title = t.modelPick + (picked && picked.note ? "：" + picked.note : "");
       } catch (error) {
         addMessage("error", error.message || t.modelSwitchFailed);
@@ -1196,7 +1196,7 @@
     // The chip shows the active register; clicking opens a three-way picker.
     function applyStyleLabel() {
       if (!styleBtn) return;
-      var info = styleText(t, answerStyle);
+      let info = styleText(t, answerStyle);
       styleBtn.textContent = info.label;
       styleBtn.title = t.styleMenuTitle + "：" + info.note;
       styleBtn.setAttribute("data-style", answerStyle);
@@ -1212,38 +1212,38 @@
     function renderStyleMenu() {
       if (!styleMenu) return;
       styleMenu.innerHTML = "";
-      var head = document.createElement("h4");
+      let head = document.createElement("h4");
       head.textContent = t.styleMenuTitle;
-      var hint = document.createElement("p");
+      let hint = document.createElement("p");
       hint.className = "btc-ai-models-hint";
       hint.textContent = t.styleMenuHint;
       styleMenu.append(head, hint);
       STYLE_IDS.forEach(function (id) {
-        var info = styleText(t, id);
-        var row = document.createElement("button");
+        let info = styleText(t, id);
+        let row = document.createElement("button");
         row.type = "button";
         row.className = "btc-ai-model-row";
         if (id === answerStyle) row.setAttribute("aria-current", "true");
 
-        var top = document.createElement("span");
+        let top = document.createElement("span");
         top.className = "btc-ai-model-top";
-        var nameEl = document.createElement("span");
+        let nameEl = document.createElement("span");
         nameEl.className = "btc-ai-model-id";
         nameEl.textContent = info.label;
-        var tagEl = document.createElement("span");
+        let tagEl = document.createElement("span");
         tagEl.className = "btc-ai-style-tag";
         tagEl.setAttribute("data-tag", id);
         tagEl.textContent = info.tag;
         top.append(nameEl, tagEl);
         if (id === answerStyle) {
-          var nowBadge = document.createElement("span");
+          let nowBadge = document.createElement("span");
           nowBadge.className = "btc-ai-model-badge";
           nowBadge.textContent = t.modelCurrent;
           top.appendChild(nowBadge);
         }
         row.appendChild(top);
 
-        var noteLine = document.createElement("span");
+        let noteLine = document.createElement("span");
         noteLine.className = "btc-ai-model-note";
         noteLine.textContent = info.note + " · " + info.who;
         row.appendChild(noteLine);
@@ -1254,7 +1254,7 @@
     }
     function toggleStyleMenu(force) {
       if (!styleMenu || !styleBtn) return;
-      var open = typeof force === "boolean" ? force : styleMenu.hidden;
+      let open = typeof force === "boolean" ? force : styleMenu.hidden;
       // 两个浮层互斥，避免叠在一起。
       // The two overlays are mutually exclusive so they never stack.
       if (open) toggleModelMenu(false);
@@ -1275,9 +1275,9 @@
     // 工具条按钮上的文字＋悬停说明由这里统一刷新（语言切换后也会走一遍）。
     // Label + tooltip for a tool-row button; refreshed on language switches too.
     function setToolLabel(act, label, tip) {
-      var btn = panel.querySelector('[data-act="' + act + '"]');
+      let btn = panel.querySelector('[data-act="' + act + '"]');
       if (!btn) return;
-      var span = btn.querySelector(".btc-ai-tool-label");
+      let span = btn.querySelector(".btc-ai-tool-label");
       if (span) span.textContent = label;
       if (tip) btn.title = tip;
     }
@@ -1288,7 +1288,7 @@
     // 读盘时逐项校验，坏数据直接丢掉，避免一段脏记录把整个面板卡死。
     // Validate on read and drop junk, so one bad record cannot wedge the whole panel.
     function readConvs() {
-      var raw = null;
+      let raw = null;
       try { raw = JSON.parse(localStorage.getItem(CONV_KEY) || "[]"); } catch (e) { return []; }
       if (!Array.isArray(raw)) return [];
       return raw.filter(function (c) {
@@ -1310,7 +1310,7 @@
     // 落盘：配额满时先砍最旧的对话，再逐次压缩单条消息，最后放弃并静默（不能因为存不下就打断聊天）。
     // Persist: when over quota, drop the oldest chat first, then shrink messages, and finally give up quietly.
     function writeConvs() {
-      for (var attempt = 0; attempt < 4; attempt += 1) {
+      for (let attempt = 0; attempt < 4; attempt += 1) {
         try {
           localStorage.setItem(CONV_KEY, JSON.stringify(convList.slice(0, CONV_MAX)));
           return true;
@@ -1327,9 +1327,9 @@
       return false;
     }
     function convTitle(msgs) {
-      var first = msgs.filter(function (m) { return m.role === "user"; })[0];
+      let first = msgs.filter(function (m) { return m.role === "user"; })[0];
       if (!first) return t.newChat;
-      var text = String(first.content).replace(/\s+/g, " ").trim();
+      let text = String(first.content).replace(/\s+/g, " ").trim();
       return text.length > 26 ? text.slice(0, 26) + "…" : text;
     }
     // 联网回执只留图上要用的字段，避免把整包检索结果塞进本地存储。
@@ -1349,10 +1349,10 @@
     // Upsert the active conversation (newest first); an empty chat is not stored at all.
     function persistCurrent() {
       if (!convId) convId = convUid();
-      var cleaned = convMsgs
+      let cleaned = convMsgs
         .filter(function (m) { return !m.failed; })
         .map(function (m) {
-          var out = { role: m.role, content: String(m.content || "").slice(0, MSG_CHAR_MAX), ts: m.ts || Date.now() };
+          let out = { role: m.role, content: String(m.content || "").slice(0, MSG_CHAR_MAX), ts: m.ts || Date.now() };
           if (m.role === "assistant" && m.search) out.search = m.search;
           return out;
         })
@@ -1381,7 +1381,7 @@
     }
     function updateConvBadge() {
       if (!historyBadge) return;
-      var others = convList.filter(function (c) {
+      let others = convList.filter(function (c) {
         return c.id !== convId && c.msgs.some(function (m) { return m.role === "user"; });
       }).length;
       historyBadge.textContent = t.historyBadge.replace("{n}", String(others));
@@ -1394,9 +1394,9 @@
       log.innerHTML = "";
       if (!convMsgs.length) { addMessage("bot", t.greeting); return; }
       convMsgs.forEach(function (m) {
-        var node = addMessage(m.role === "user" ? "user" : "bot", m.content);
+        let node = addMessage(m.role === "user" ? "user" : "bot", m.content);
         if (m.role === "assistant" && m.search) {
-          var receipt = buildSearchReceipt(m.search);
+          let receipt = buildSearchReceipt(m.search);
           if (receipt) node.appendChild(receipt);
         }
       });
@@ -1405,7 +1405,7 @@
     // 新建对话：先把当前这段归档，再开一段干净的（带问候语）。
     // New chat: archive the current one first, then start a clean one with the greeting.
     function newConversation() {
-      var had = convMsgs.some(function (m) { return m.role === "user"; });
+      let had = convMsgs.some(function (m) { return m.role === "user"; });
       persistCurrent();
       closeOverlays(false);
       convId = convUid();
@@ -1424,7 +1424,7 @@
       if (!id) return;
       if (id === convId) { toggleConvMenu(false); return; }
       persistCurrent();
-      var target = convList.filter(function (c) { return c.id === id; })[0];
+      let target = convList.filter(function (c) { return c.id === id; })[0];
       if (!target) return;
       convId = target.id;
       convCreatedAt = target.createdAt || Date.now();
@@ -1442,9 +1442,9 @@
     // Boot restore: read local records and reopen the last chat; return false when there is none.
     function restoreConversation() {
       convList = readConvs();
-      var savedId = "";
+      let savedId = "";
       try { savedId = localStorage.getItem(ACTIVE_KEY) || ""; } catch (e) { savedId = ""; }
-      var target = convList.filter(function (c) { return c.id === savedId; })[0] || convList[0];
+      let target = convList.filter(function (c) { return c.id === savedId; })[0] || convList[0];
       if (!target) return false;
       convId = target.id;
       convCreatedAt = target.createdAt || Date.now();
@@ -1454,7 +1454,7 @@
       // 字号也是本地记忆，恢复对话时一并套用。
       // Text size is remembered too; apply it while restoring.
       try {
-        var savedScale = parseFloat(localStorage.getItem("btc_ai_font_scale") || "1");
+        let savedScale = parseFloat(localStorage.getItem("btc_ai_font_scale") || "1");
         if (FONT_STEPS.indexOf(savedScale) >= 0) fontScale = savedScale;
       } catch (e) { /* 隐私模式 / private mode */ }
       renderConversation();
@@ -1462,7 +1462,7 @@
       return true;
     }
     function deleteConversation(id) {
-      var wasActive = id === convId;
+      let wasActive = id === convId;
       convList = convList.filter(function (c) { return c.id !== id; });
       writeConvs();
       if (wasActive) {
@@ -1477,47 +1477,47 @@
       renderConvMenu();
     }
     function formatConvTime(ts) {
-      var d = new Date(ts);
+      let d = new Date(ts);
       if (Number.isNaN(d.getTime())) return "—";
-      var pad = function (n) { return String(n).padStart(2, "0"); };
+      let pad = function (n) { return String(n).padStart(2, "0"); };
       return (d.getMonth() + 1) + "-" + pad(d.getDate()) + " " + pad(d.getHours()) + ":" + pad(d.getMinutes());
     }
     function renderConvMenu() {
       if (!convMenu) return;
       convMenu.innerHTML = "";
-      var head = document.createElement("h4");
+      let head = document.createElement("h4");
       head.textContent = t.historyTitle;
-      var hint = document.createElement("p");
+      let hint = document.createElement("p");
       hint.className = "btc-ai-models-hint";
       hint.textContent = t.historyHint;
       convMenu.append(head, hint);
       if (!convList.length) {
-        var empty = document.createElement("p");
+        let empty = document.createElement("p");
         empty.className = "btc-ai-models-hint";
         empty.textContent = t.historyEmpty;
         convMenu.appendChild(empty);
         return;
       }
       convList.forEach(function (conv) {
-        var row = document.createElement("div");
+        let row = document.createElement("div");
         row.className = "btc-ai-conv-row";
         row.setAttribute("role", "button");
         row.tabIndex = 0;
         if (conv.id === convId) row.setAttribute("aria-current", "true");
 
-        var body = document.createElement("span");
+        let body = document.createElement("span");
         body.className = "btc-ai-conv-body";
-        var title = document.createElement("span");
+        let title = document.createElement("span");
         title.className = "btc-ai-conv-title";
         title.textContent = conv.title || t.newChat;
-        var meta = document.createElement("span");
+        let meta = document.createElement("span");
         meta.className = "btc-ai-conv-meta";
         meta.textContent = t.historyMeta
           .replace("{n}", String(conv.msgs.length))
           .replace("{t}", formatConvTime(conv.updatedAt));
         body.append(title, meta);
         if (conv.id === convId) {
-          var now = document.createElement("span");
+          let now = document.createElement("span");
           now.className = "btc-ai-conv-now";
           now.textContent = t.historyCurrent;
           meta.appendChild(document.createTextNode(" · "));
@@ -1527,13 +1527,13 @@
 
         // 右侧的「›」是给用户看的可点进提示：这一行是能点开的。
         // The trailing chevron is the affordance that tells the user this row is clickable.
-        var go = document.createElement("span");
+        let go = document.createElement("span");
         go.className = "btc-ai-conv-go";
         go.textContent = "›";
         row.appendChild(go);
         if (conv.id !== convId) row.title = t.historyOpen;
 
-        var del = document.createElement("button");
+        let del = document.createElement("button");
         del.type = "button";
         del.className = "btc-ai-conv-del";
         del.textContent = "×";
@@ -1547,7 +1547,7 @@
         };
         convMenu.appendChild(row);
       });
-      var foot = document.createElement("p");
+      let foot = document.createElement("p");
       foot.className = "btc-ai-models-hint";
       foot.style.marginTop = "6px";
       foot.textContent = t.historyLimit.replace("{n}", String(CONV_MAX));
@@ -1555,7 +1555,7 @@
     }
     function toggleConvMenu(force) {
       if (!convMenu || !historyBtn) return;
-      var open = typeof force === "boolean" ? force : convMenu.hidden;
+      let open = typeof force === "boolean" ? force : convMenu.hidden;
       if (open) {
         // 打开前先落一次盘，当前这段才能带着最新内容出现在列表顶部。
         // Persist first so the active chat shows up at the top with its latest content.
@@ -1591,9 +1591,9 @@
       try { localStorage.setItem("btc_ai_font_scale", String(fontScale)); } catch (e) { /* 隐私模式 / private mode */ }
     }
     function zoomStep(direction) {
-      var index = FONT_STEPS.indexOf(fontScale);
+      let index = FONT_STEPS.indexOf(fontScale);
       if (index < 0) index = FONT_STEPS.indexOf(1);
-      var next = Math.max(0, Math.min(FONT_STEPS.length - 1, index + direction));
+      let next = Math.max(0, Math.min(FONT_STEPS.length - 1, index + direction));
       if (FONT_STEPS[next] === fontScale) return;
       setFontScale(FONT_STEPS[next]);
     }
@@ -1603,20 +1603,20 @@
     // 画到 canvas 导出 PNG。顺带把整段对话复制进剪贴板，能直接粘到聊天窗口里。
     // No third-party library: clone the transcript, wrap it in the site's own chat CSS inside an SVG
     // <foreignObject>, rasterise to a canvas, then download the PNG and try to copy it too.
-    var SHOT_VARS = ["--bg-base","--bg-surface","--bg-surface-2","--bg-elevated","--border-subtle","--border-strong","--bull","--bear","--warn","--accent-cyan","--accent-orange","--accent-purple","--text-primary","--text-secondary","--text-muted"];
+    let SHOT_VARS = ["--bg-base","--bg-surface","--bg-surface-2","--bg-elevated","--border-subtle","--border-strong","--bull","--bear","--warn","--accent-cyan","--accent-orange","--accent-purple","--text-primary","--text-secondary","--text-muted"];
     function shotThemeVars() {
       // 主题变量按页面当前的实际取值抄一份，导出图才和屏幕一致；取不到就回落到深色默认值。
       // Copy the live theme variables so the export matches the screen; fall back to the dark defaults.
-      var computed = window.getComputedStyle(panel);
-      var out = ":root{";
+      let computed = window.getComputedStyle(panel);
+      let out = ":root{";
       SHOT_VARS.forEach(function (name) {
-        var value = (computed.getPropertyValue(name) || "").trim();
+        let value = (computed.getPropertyValue(name) || "").trim();
         if (value) out += name + ":" + value + ";";
       });
       return out + "}";
     }
     function shotHost() {
-      var host = document.getElementById("btc-ai-shot-host");
+      let host = document.getElementById("btc-ai-shot-host");
       if (!host) {
         host = document.createElement("div");
         host.id = "btc-ai-shot-host";
@@ -1626,17 +1626,17 @@
       return host;
     }
     function shotStamp() {
-      var d = new Date();
-      var pad = function (n) { return String(n).padStart(2, "0"); };
+      let d = new Date();
+      let pad = function (n) { return String(n).padStart(2, "0"); };
       return {
         file: String(d.getFullYear()) + pad(d.getMonth() + 1) + pad(d.getDate()) + "-" + pad(d.getHours()) + pad(d.getMinutes()),
         text: formatTimestamp(d.toISOString())
       };
     }
     function buildShot() {
-      var bubbles = [];
+      let bubbles = [];
       Array.prototype.forEach.call(log.querySelectorAll(".btc-ai-msg"), function (node) {
-        var clone = node.cloneNode(true);
+        let clone = node.cloneNode(true);
         // 流式光标与「正在连接」这类瞬时状态不进图。
         // Drop the streaming caret and transient status text.
         Array.prototype.forEach.call(clone.querySelectorAll(".btc-ai-caret,.btc-ai-status"), function (n) { n.remove(); });
@@ -1644,23 +1644,23 @@
         bubbles.push(clone.outerHTML);
       });
       if (!bubbles.length) return null;
-      var width = Math.max(420, Math.min(760, Math.round(log.clientWidth || 430)));
-      var stamp = shotStamp();
-      var meta = [t.subtitle, stamp.text, model].filter(Boolean).join(" · ");
-      var host = shotHost();
+      let width = Math.max(420, Math.min(760, Math.round(log.clientWidth || 430)));
+      let stamp = shotStamp();
+      let meta = [t.subtitle, stamp.text, model].filter(Boolean).join(" · ");
+      let host = shotHost();
       host.innerHTML = "";
-      var wrap = document.createElement("div");
+      let wrap = document.createElement("div");
       wrap.id = "btc-ai-shot";
       wrap.style.width = width + "px";
       wrap.style.setProperty("--ai-fs", String(fontScale));
       // 把面板上的 CSS 变量（配色 / 字号基准等）搬到导出容器，克隆出来的气泡才能拿到正确的颜色。
       // Copy the panel's CSS custom properties onto the export wrapper so cloned bubbles keep their palette.
       try {
-        var panelVars = window.getComputedStyle(panel);
-        for (var vi = 0; vi < panelVars.length; vi++) {
-          var vname = panelVars[vi];
+        let panelVars = window.getComputedStyle(panel);
+        for (let vi = 0; vi < panelVars.length; vi++) {
+          let vname = panelVars[vi];
           if (vname && vname.indexOf("--") === 0) {
-            var vval = panelVars.getPropertyValue(vname);
+            let vval = panelVars.getPropertyValue(vname);
             if (vval) wrap.style.setProperty(vname, vval);
           }
         }
@@ -1674,12 +1674,12 @@
       // 留在 DOM 里交给 html2canvas 量尺并栅格化（不走 foreignObject，否则画布会被 Chromium 判为污染而无法导出）。
       // Keep it in the DOM for html2canvas to measure and rasterize — no foreignObject, so the canvas stays untainted.
       host.appendChild(wrap);
-      var height = Math.ceil(wrap.getBoundingClientRect().height) + 8;
+      let height = Math.ceil(wrap.getBoundingClientRect().height) + 8;
       return { width: width, height: height, el: wrap };
     }
     function downloadBlob(blob, name) {
-      var url = URL.createObjectURL(blob);
-      var a = document.createElement("a");
+      let url = URL.createObjectURL(blob);
+      let a = document.createElement("a");
       a.href = url;
       a.download = name;
       document.body.appendChild(a);
@@ -1688,8 +1688,8 @@
       setTimeout(function () { URL.revokeObjectURL(url); }, 4000);
     }
     function copyShot(blob, w, h) {
-      var finish = function (copied) {
-        var line = copied ? t.shotCopied : t.shotDone;
+      let finish = function (copied) {
+        let line = copied ? t.shotCopied : t.shotDone;
         flashStatus(line.replace("{w}", String(w)).replace("{h}", String(h)));
       };
       try {
@@ -1704,19 +1704,19 @@
     }
     function shootLong() {
       if (shotBusy) return;
-      var built = buildShot();
+      let built = buildShot();
       if (!built) { flashStatus(t.shotEmpty); return; }
       if (typeof window.html2canvas !== "function") { flashStatus(t.shotFail); return; }
       shotBusy = true;
       flashStatus(t.shotWorking);
       // 长对话按 2 倍导出可能撞上 canvas 尺寸上限，超了就自动降倍率。
       // A very long chat can hit the canvas size ceiling at 2x, so scale down when needed.
-      var scale = 2;
+      let scale = 2;
       if (built.height * scale > 16000) scale = Math.max(1, 16000 / built.height);
-      var bg = (window.getComputedStyle(panel).getPropertyValue("--bg-surface") || "#161a20").trim() || "#161a20";
+      let bg = (window.getComputedStyle(panel).getPropertyValue("--bg-surface") || "#161a20").trim() || "#161a20";
       // html2canvas 是逐节点手动重绘，画布不会被判为污染，toBlob 可以正常导出（foreignObject 方案会被 Chromium 直接判污染）。
       // html2canvas repaints node-by-node, so the canvas stays clean and toBlob works (the foreignObject path is tainted by Chromium).
-      var cleanup = function () { var h = document.getElementById("btc-ai-shot-host"); if (h) h.innerHTML = ""; };
+      let cleanup = function () { let h = document.getElementById("btc-ai-shot-host"); if (h) h.innerHTML = ""; };
       try {
         window.html2canvas(built.el, {
           backgroundColor: bg,
@@ -1744,7 +1744,7 @@
     }
     // 状态行：临时借用底部免责声明那一行，几秒后自动回到原文案。
     // Status line: borrows the disclaimer row for a few seconds, then restores it.
-    var noteTimer = null;
+    let noteTimer = null;
     function flashStatus(text) {
       if (!text || !noteEl) return;
       noteEl.textContent = text;
@@ -1757,7 +1757,7 @@
     }
 
     function addMessage(role, text) {
-      var node = document.createElement("div");
+      let node = document.createElement("div");
       node.className = "btc-ai-msg " + role;
       node.innerHTML = renderRich(text);
       log.appendChild(node);
@@ -1769,28 +1769,28 @@
     // Source receipt for web research: pinned under the answer, listing count / outlets / latency and the headlines.
     function buildSearchReceipt(info) {
       if (!info || !info.enabled) return null;
-      var box = document.createElement("div");
+      let box = document.createElement("div");
       box.className = "btc-ai-src";
-      var srcs = Array.isArray(info.sources) ? info.sources : [];
-      var srcText = srcs.length ? srcs.slice(0, 6).join(" · ") : "—";
-      var head = document.createElement("div");
+      let srcs = Array.isArray(info.sources) ? info.sources : [];
+      let srcText = srcs.length ? srcs.slice(0, 6).join(" · ") : "—";
+      let head = document.createElement("div");
       if (info.count > 0) {
-        var line = info.cached ? t.webReceiptCached : t.webReceipt;
+        let line = info.cached ? t.webReceiptCached : t.webReceipt;
         line = line.replace("{n}", String(info.count)).replace("{src}", srcText).replace("{ms}", String(info.elapsedMs || 0));
         head.textContent = line;
       } else {
         head.textContent = t.webOffNote;
       }
       box.appendChild(head);
-      var heads = Array.isArray(info.headlines) ? info.headlines : [];
+      let heads = Array.isArray(info.headlines) ? info.headlines : [];
       if (heads.length) {
-        var cap = document.createElement("div");
+        let cap = document.createElement("div");
         cap.textContent = t.webHeadlines;
         cap.style.marginTop = "4px";
         box.appendChild(cap);
-        var ul = document.createElement("ul");
+        let ul = document.createElement("ul");
         heads.forEach(function (h) {
-          var li = document.createElement("li");
+          let li = document.createElement("li");
           li.textContent = h;
           ul.appendChild(li);
         });
@@ -1808,9 +1808,9 @@
 
     async function loadConfig() {
       try {
-        var response = await fetch("/api/ai/config");
+        let response = await fetch("/api/ai/config");
         if (!response.ok) return;
-        var payload = await response.json();
+        let payload = await response.json();
         configured = Boolean(payload.available);
         launch.hidden = !configured;
         if (!configured) panel.hidden = true;
@@ -1818,13 +1818,13 @@
         modelList = Array.isArray(payload.models) ? payload.models : [];
         modelTag.textContent = configured ? shortModel(model) : "";
         modelTag.disabled = !configured;
-        var current = modelList.filter(function (m) { return m.id === model; })[0];
+        let current = modelList.filter(function (m) { return m.id === model; })[0];
         modelTag.title = configured ? t.modelPick + (current && current.note ? "：" + current.note : "") : t.notConfigured;
         if (modelMenu && !modelMenu.hidden) renderModelMenu();
         // 服务端下发档位清单时做一次校验，避免前端与服务端 id 漂移。
         // Validate the stored register against the server list so the ids cannot drift apart.
         if (Array.isArray(payload.answerStyles) && payload.answerStyles.length) {
-          var styleIds = payload.answerStyles.map(function (entry) { return entry.id; });
+          let styleIds = payload.answerStyles.map(function (entry) { return entry.id; });
           if (styleIds.indexOf(answerStyle) < 0) {
             answerStyle = styleIds.indexOf(payload.defaultStyle) >= 0 ? payload.defaultStyle : styleIds[0];
             applyStyleLabel();
@@ -1841,24 +1841,24 @@
     // Format a countdown as "6d 23h 12m", or "XX min" when under one hour.
     function formatCountdown(ms) {
       if (ms == null || ms <= 0) return null;
-      var totalMin = Math.floor(ms / 60000);
-      var d = Math.floor(totalMin / 1440);
-      var h = Math.floor((totalMin % 1440) / 60);
-      var m = totalMin % 60;
+      let totalMin = Math.floor(ms / 60000);
+      let d = Math.floor(totalMin / 1440);
+      let h = Math.floor((totalMin % 1440) / 60);
+      let m = totalMin % 60;
       if (d > 0) return d + "d " + h + "h";
       if (h > 0) return h + "h " + m + "m";
       return Math.max(1, m) + "m";
     }
     function formatTimestamp(iso) {
       if (!iso) return null;
-      var d = new Date(iso);
+      let d = new Date(iso);
       if (Number.isNaN(d.getTime())) return null;
-      var pad = function (n) { return String(n).padStart(2, "0"); };
+      let pad = function (n) { return String(n).padStart(2, "0"); };
       return pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + " " + pad(d.getHours()) + ":" + pad(d.getMinutes());
     }
     function formatNumber(value) {
       if (value == null) return "—";
-      var n = Number(value);
+      let n = Number(value);
       if (!Number.isFinite(n)) return "—";
       if (Math.abs(n) >= 10000) return (n / 1000).toFixed(1) + "k";
       return Math.round(n).toLocaleString();
@@ -1867,27 +1867,27 @@
     // Render the quota payload onto the panel: bar + meta + collapsible history.
     function renderQuota(state) {
       if (!state) { quotaFill.style.width = "0%"; quotaPct.textContent = "—"; quotaMeta.textContent = ""; quotaDetail.innerHTML = ""; return; }
-      var remote = state.remote;
-      var local = state.local || {};
-      var hasRemote = remote && (remote.limit != null) && (remote.remaining != null);
-      var pctRemaining = hasRemote ? remote.percentRemaining : null;
-      var pctUsed = hasRemote ? 100 - pctRemaining : null;
+      let remote = state.remote;
+      let local = state.local || {};
+      let hasRemote = remote && (remote.limit != null) && (remote.remaining != null);
+      let pctRemaining = hasRemote ? remote.percentRemaining : null;
+      let pctUsed = hasRemote ? 100 - pctRemaining : null;
       // 优先用 remote 限额算进度；否则基于本地估算（按模型换算表 × 套餐 2500 credits 兜底）
       // Prefer the remote limit when known; otherwise fall back to the local credits estimate.
-      var estimateLimit = 2500;  // Token Plan Lite 套餐默认值；用户可到控制台查看实际值
-      var estCredits = local.estimatedCredits || 0;
-      var estPercentRemaining = estCredits > 0 ? Math.max(0, Math.min(100, (1 - estCredits / estimateLimit) * 100)) : null;
+      let estimateLimit = 2500;  // Token Plan Lite 套餐默认值；用户可到控制台查看实际值
+      let estCredits = local.estimatedCredits || 0;
+      let estPercentRemaining = estCredits > 0 ? Math.max(0, Math.min(100, (1 - estCredits / estimateLimit) * 100)) : null;
       if (hasRemote) {
-        var fillPct = Math.max(0, Math.min(100, pctRemaining));
+        let fillPct = Math.max(0, Math.min(100, pctRemaining));
         quotaFill.style.width = fillPct + "%";
-        var level = pctRemaining > 50 ? "ok" : (pctRemaining > 20 ? "mid" : "low");
+        let level = pctRemaining > 50 ? "ok" : (pctRemaining > 20 ? "mid" : "low");
         quotaFill.setAttribute("data-level", level);
         quotaPct.textContent = (100 - pctUsed).toFixed(1) + "%";
-        var usedNum = formatNumber(remote.used);
-        var limitNum = formatNumber(remote.limit);
-        var remainNum = formatNumber(remote.remaining);
-        var resetTxt = formatTimestamp(remote.resetAt);
-        var cd = formatCountdown(local.countdownMs);
+        let usedNum = formatNumber(remote.used);
+        let limitNum = formatNumber(remote.limit);
+        let remainNum = formatNumber(remote.remaining);
+        let resetTxt = formatTimestamp(remote.resetAt);
+        let cd = formatCountdown(local.countdownMs);
         quotaMeta.innerHTML =
           '<span><b>' + t.quotaIn + '</b> ' + remainNum + ' / ' + limitNum + (pctUsed != null ? ' (' + usedNum + ' ' + (currentLang()==='en'?'used':'已用') + ')' : '') + '</span>' +
           (resetTxt ? '<span><b>' + t.quotaReset + '</b> ' + resetTxt + (cd ? ' · ' + cd : '') + '</span>' : '') +
@@ -1897,7 +1897,7 @@
         // No remote data: show local estimate. Fill is the remaining % vs. the Lite plan's 2,500 credits.
         if (estPercentRemaining != null) {
           quotaFill.style.width = estPercentRemaining + "%";
-          var lvl = estPercentRemaining > 50 ? "ok" : (estPercentRemaining > 20 ? "mid" : "low");
+          let lvl = estPercentRemaining > 50 ? "ok" : (estPercentRemaining > 20 ? "mid" : "low");
           quotaFill.setAttribute("data-level", lvl);
           quotaPct.textContent = estPercentRemaining.toFixed(1) + "%";
         } else {
@@ -1905,11 +1905,11 @@
           quotaFill.removeAttribute("data-level");
           quotaPct.textContent = "—";
         }
-        var cd2 = formatCountdown(local.countdownMs);
-        var resetTxt2 = formatTimestamp(state.local.periodEnd);
-        var callsN = formatNumber(local.calls);
-        var tokN = formatNumber(local.totalTokens);
-        var credN = estCredits > 0 ? estCredits.toFixed(1) + ' credits（' + (currentLang()==='en'?'est':'估算') + '）' : '';
+        let cd2 = formatCountdown(local.countdownMs);
+        let resetTxt2 = formatTimestamp(state.local.periodEnd);
+        let callsN = formatNumber(local.calls);
+        let tokN = formatNumber(local.totalTokens);
+        let credN = estCredits > 0 ? estCredits.toFixed(1) + ' credits（' + (currentLang()==='en'?'est':'估算') + '）' : '';
         quotaMeta.innerHTML =
           '<span><b>' + (currentLang()==='en'?'Used':'已用') + '</b> ' + credN + (credN?' · ':'') + callsN + ' ' + t.quotaCalls + ' · ' + tokN + ' ' + t.quotaTokens + '</span>' +
           (resetTxt2 ? '<span><b>' + t.quotaReset + '</b> ' + resetTxt2 + (cd2 ? ' · ' + cd2 : '') + '</span>' : '') +
@@ -1924,20 +1924,20 @@
         return;
       }
       // 最近 10 次明细
-      var recent = local.recentCalls || [];
+      let recent = local.recentCalls || [];
       if (!recent.length) { quotaDetail.innerHTML = ""; return; }
-      var rows = recent.map(function (entry) {
-        var at = formatTimestamp(new Date(entry.timestamp).toISOString());
-        var credTxt = entry.credits != null ? ' · ' + entry.credits.toFixed(1) + ' cr' : '';
+      let rows = recent.map(function (entry) {
+        let at = formatTimestamp(new Date(entry.timestamp).toISOString());
+        let credTxt = entry.credits != null ? ' · ' + entry.credits.toFixed(1) + ' cr' : '';
         return '<div class="btc-ai-quota-detail-row"><b>' + (at || '—') + ' · ' + escapeHtml(entry.model || '') + '</b><span>' + formatNumber(entry.total) + ' tok' + credTxt + '</span></div>';
       }).join("");
       quotaDetail.innerHTML = rows;
     }
     async function loadQuota() {
       try {
-        var response = await fetch("/api/ai/quota");
+        let response = await fetch("/api/ai/quota");
         if (!response.ok) return null;
-        var payload = await response.json();
+        let payload = await response.json();
         renderQuota(payload);
         return payload;
       } catch (error) { return null; }
@@ -1951,16 +1951,16 @@
     // 加信号面板的可见文本（规则信号卡 / 方向研究估算）。
     // Collect page context: the user-entered positions plus the signal panels' visible text.
     function collectPageContext() {
-      var positions = [];
+      let positions = [];
       try {
-        var entries = window.btcPersonalEntries;
+        let entries = window.btcPersonalEntries;
         if (Array.isArray(entries)) {
           entries.forEach(function (entry) {
-            var price = Number(entry && entry.price);
+            let price = Number(entry && entry.price);
             if (!(price > 0)) return;
-            var leverage = Number(entry.leverage);
-            var amount = Number(entry.amount);
-            var margin = Number(entry.margin);
+            let leverage = Number(entry.leverage);
+            let amount = Number(entry.amount);
+            let margin = Number(entry.margin);
             positions.push({
               side: entry.side === "short" ? "short" : "long",
               entryPrice: price,
@@ -1971,17 +1971,17 @@
           });
         }
       } catch (e) { /* app.js 未就绪时忽略 / app.js may not be ready */ }
-      var pickText = function (selector, limit) {
+      let pickText = function (selector, limit) {
         try {
-          var el = document.querySelector(selector);
-          var text = el && el.innerText ? el.innerText.replace(/\s+/g, " ").trim() : "";
+          let el = document.querySelector(selector);
+          let text = el && el.innerText ? el.innerText.replace(/\s+/g, " ").trim() : "";
           return text ? text.slice(0, limit) : null;
         } catch (e) { return null; }
       };
-      var pageSignals = {};
-      var ruleSignal = pickText("#ruleSignalCard", 500);
+      let pageSignals = {};
+      let ruleSignal = pickText("#ruleSignalCard", 500);
       if (ruleSignal) pageSignals.ruleSignal = ruleSignal;
-      var projection = pickText(".signal-projection", 400);
+      let projection = pickText(".signal-projection", 400);
       if (projection) pageSignals.directionalEstimate = projection;
       return {
         positions: positions.slice(0, 2),
@@ -2002,55 +2002,55 @@
       input.value = "";
       convMsgs.push({ role: "user", content: question, ts: Date.now() });
       setBusy(true);
-      var botNode = addMessage("bot", "");
-      var caret = document.createElement("span");
+      let botNode = addMessage("bot", "");
+      let caret = document.createElement("span");
       caret.className = "btc-ai-caret";
       botNode.appendChild(caret);
-      var full = "";
+      let full = "";
       // 联网检索回执：流式期间服务端会推一个 search 事件，存下来留待回答完成后渲染来源清单。
       // Web-search receipt: the server streams a `search` event; stash it and render the source list after the answer.
-      var searchInfo = null;
+      let searchInfo = null;
       // 采集一次页面上下文（持仓 + 信号面板），随本次提问一起发送。
       // Collect page context once (positions + signal panels) for this question.
-      var pageContext = collectPageContext();
+      let pageContext = collectPageContext();
       // 等待期间给用户可见的进度：先提示"已连接"，深度模式再显示推理进度。
       // Give the user visible progress while waiting: connection notice, then reasoning progress.
-      var statusNode = document.createElement("span");
+      let statusNode = document.createElement("span");
       statusNode.className = "btc-ai-status";
       statusNode.textContent = pageContext && pageContext.positions.length ? t.connectedWithPosition : t.connected;
       botNode.appendChild(statusNode);
 
       try {
-        var response = await fetch("/api/ai/chat", {
+        let response = await fetch("/api/ai/chat", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ question: question, history: apiHistory(), stream: true, lang: currentLang(), thinking: thinking, style: answerStyle, search: webEnabled, context: pageContext || collectPageContext() })
         });
-        var type = response.headers.get("content-type") || "";
+        let type = response.headers.get("content-type") || "";
         if (!response.ok) {
-          var errBody = await response.json().catch(function () { return {}; });
+          let errBody = await response.json().catch(function () { return {}; });
           throw new Error(errBody.error || t.askAgain);
         }
         if (type.indexOf("application/json") >= 0) {
-          var data = await response.json();
+          let data = await response.json();
           full = data.content || "";
           if (data.search) searchInfo = data.search;
         } else {
-          var reader = response.body.getReader();
-          var decoder = new TextDecoder();
-          var buffer = "";
+          let reader = response.body.getReader();
+          let decoder = new TextDecoder();
+          let buffer = "";
           while (true) {
-            var chunk = await reader.read();
+            let chunk = await reader.read();
             if (chunk.done) break;
             buffer += decoder.decode(chunk.value, { stream: true });
-            var lines = buffer.split("\n");
+            let lines = buffer.split("\n");
             buffer = lines.pop() || "";
-            for (var i = 0; i < lines.length; i += 1) {
-              var line = lines[i].trim();
+            for (let i = 0; i < lines.length; i += 1) {
+              let line = lines[i].trim();
               if (line.indexOf("data:") !== 0) continue;
-              var raw = line.slice(5).trim();
+              let raw = line.slice(5).trim();
               if (!raw) continue;
-              var parsed;
+              let parsed;
               try { parsed = JSON.parse(raw); } catch (e) { continue; }
               if (parsed.error) throw new Error(parsed.error);
               // 深度模式：上游持续吐 reasoning_content，这里只显示进度不显示正文。
@@ -2096,7 +2096,7 @@
         if (convMsgs.length && convMsgs[convMsgs.length - 1].role === "user") convMsgs.pop();
       } finally {
         botNode.innerHTML = renderRich(full || "…");
-        var receipt = buildSearchReceipt(searchInfo);
+        let receipt = buildSearchReceipt(searchInfo);
         if (receipt && full) botNode.appendChild(receipt);
         setBusy(false);
         input.focus();
