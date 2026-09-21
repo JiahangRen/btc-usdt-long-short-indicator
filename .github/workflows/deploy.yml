@@ -15,13 +15,30 @@ on:
           - configure-env
           - deploy
 
+# One concurrency group per target so a deploy to one host never cancels a
+# deploy to the other. Both matrix jobs run in parallel on a single push.
 concurrency:
-  group: production
+  group: production-${{ matrix.target }}
   cancel-in-progress: true
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # Never abort the other target just because one fails its health check.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: legacy
+            verify_url: https://renjiahang1201.xyz/api/status
+            deploy_host: ${{ secrets.DEPLOY_HOST }}
+            deploy_user: ${{ secrets.DEPLOY_USER }}
+            deploy_key_b64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+          - target: hk
+            verify_url: https://jeffereyreng.site/api/status
+            deploy_host: ${{ secrets.DEPLOY_HOST_HK }}
+            deploy_user: ${{ secrets.DEPLOY_USER_HK }}
+            deploy_key_b64: ${{ secrets.DEPLOY_SSH_KEY_HK_B64 }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
@@ -29,13 +46,13 @@ jobs:
       - name: Configure SSH
         id: ssh
         env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-          DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+          DEPLOY_HOST: ${{ matrix.deploy_host }}
+          DEPLOY_USER: ${{ matrix.deploy_user }}
+          DEPLOY_SSH_KEY_B64: ${{ matrix.deploy_key_b64 }}
         run: |
           if [ -z "$DEPLOY_HOST" ] || [ -z "$DEPLOY_USER" ] || [ -z "$DEPLOY_SSH_KEY_B64" ]; then
             echo "ready=false" >> "$GITHUB_OUTPUT"
-            echo "Deployment secrets are not configured; skipping deployment."
+            echo "Deployment secrets for target '${{ matrix.target }}' are not configured; skipping."
             exit 0
           fi
           install -d -m 700 ~/.ssh
@@ -44,7 +61,7 @@ jobs:
           fi
           chmod 600 ~/.ssh/deploy_key
           if ! ssh-keygen -y -f ~/.ssh/deploy_key > /dev/null 2>&1; then
-            echo "DEPLOY_SSH_KEY_B64 is neither valid Base64 nor a valid OpenSSH private key."
+            echo "DEPLOY_SSH_KEY_B64 for target '${{ matrix.target }}' is neither valid Base64 nor a valid OpenSSH private key." >&2
             exit 1
           fi
           ssh-keyscan -p 22 -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
@@ -53,8 +70,8 @@ jobs:
       - name: Preflight remote runtime
         if: steps.ssh.outputs.ready == 'true'
         env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_HOST: ${{ matrix.deploy_host }}
+          DEPLOY_USER: ${{ matrix.deploy_user }}
         run: |
           # This read-only check must pass before source synchronization. It is
           # also the default manual workflow mode for testing SSH credentials.
@@ -73,8 +90,8 @@ jobs:
       - name: Synchronize application
         if: steps.ssh.outputs.ready == 'true' && (github.event_name == 'push' || inputs.mode == 'deploy')
         env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_HOST: ${{ matrix.deploy_host }}
+          DEPLOY_USER: ${{ matrix.deploy_user }}
         run: |
           # Market history and training samples are a persistent server-side
           # SQLite, production secrets and the current release must never be
@@ -98,19 +115,21 @@ jobs:
             rsync -a --delete \
               --exclude=".git/" --exclude="data/" --exclude=".env" --exclude=".env.*" \
               --exclude=".releases/" --exclude=".rollback-current" \
+              --exclude="docker-compose.override.yml" \
               "$app/" "$backup/"
             ln -sfn "$backup" "$app/.rollback-current"
           '
           rsync -az --delete-after \
             --exclude='.git/' --exclude='data/' --exclude='.env' --exclude='.env.*' \
             --exclude='.releases/' --exclude='.rollback-current' \
+            --exclude='docker-compose.override.yml' \
             -e "ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p 22" ./ "$DEPLOY_USER@$DEPLOY_HOST:/opt/btc-usdt-long-short-indicator/"
 
       - name: Configure cloud alert secrets
         if: steps.ssh.outputs.ready == 'true' && inputs.mode == 'configure-env'
         env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_HOST: ${{ matrix.deploy_host }}
+          DEPLOY_USER: ${{ matrix.deploy_user }}
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
           ALERT_ENCRYPTION_KEY: ${{ secrets.ALERT_ENCRYPTION_KEY }}
         run: |
@@ -144,8 +163,8 @@ jobs:
         id: deploy_app
         if: steps.ssh.outputs.ready == 'true' && (github.event_name == 'push' || inputs.mode == 'deploy')
         env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_HOST: ${{ matrix.deploy_host }}
+          DEPLOY_USER: ${{ matrix.deploy_user }}
         run: |
           ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p 22 "$DEPLOY_USER@$DEPLOY_HOST" 'bash /opt/btc-usdt-long-short-indicator/scripts/deploy-production.sh'
 
@@ -153,7 +172,7 @@ jobs:
         id: verify_production
         if: steps.deploy_app.outcome == 'success'
         continue-on-error: true
-        run: curl --fail --silent --show-error --retry 12 --retry-delay 5 --retry-all-errors --max-time 15 https://renjiahang1201.xyz/api/status
+        run: curl --fail --silent --show-error --retry 12 --retry-delay 5 --retry-all-errors --max-time 15 ${{ matrix.verify_url }}
 
       - name: Roll back after a failed deploy or verification
         # A failed build/deploy step previously left the broken release live,
@@ -162,8 +181,8 @@ jobs:
         # restores the same pre-deploy snapshot).
         if: always() && steps.ssh.outputs.ready == 'true' && (github.event_name == 'push' || inputs.mode == 'deploy') && (steps.deploy_app.outcome == 'failure' || steps.verify_production.outcome == 'failure')
         env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_HOST: ${{ matrix.deploy_host }}
+          DEPLOY_USER: ${{ matrix.deploy_user }}
         run: |
           ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p 22 "$DEPLOY_USER@$DEPLOY_HOST" 'bash /opt/btc-usdt-long-short-indicator/scripts/rollback-production.sh'
           exit 1
