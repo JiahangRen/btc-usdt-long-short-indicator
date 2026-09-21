@@ -681,19 +681,25 @@ function refreshMacroCountdown(macro, now = Date.now()) {
   return { ...macro, federalReserve:refreshRows(macro.federalReserve), economicCalendar:refreshRows(macro.economicCalendar) };
 }
 
-export function createAiChat({ market, liveQuote, marketContext, fearGreedSentiment, fedMonitor, investmentCalendar, getCredential, getVerification, setModel }) {
+export function createAiChat({ market, liveQuote, marketContext, fearGreedSentiment, fedMonitor, investmentCalendar, getCredential, getVerification, setModel, currentCoin }) {
   getCredentialFn = getCredential || null;
   setModelFn = typeof setModel === 'function' ? setModel : null;
   let snapshotCache = { at:0, source:null, value:null, promise:null };
 
   async function buildSnapshot(source = 'okx') {
+    // 快照缓存必须按「交易所 + 币种」双键：多币种模式下 BTC/ETH/ZEC/BNB 各自
+    // 持有独立的实时快照，否则先查的币种会污染后查的（实测 ETH 一度复用 BTC 价格）。
+    // Snapshot cache is keyed by exchange AND coin; without the coin dimension the
+    // first queried coin's snapshot would be served to every other coin.
+    const coin = (typeof currentCoin === 'function' ? currentCoin() : null) || 'BTC';
+    const cacheKey = `${source}:${coin}`;
     const now = Date.now();
-    if (snapshotCache.source === source && snapshotCache.value && now - snapshotCache.at < SNAPSHOT_TTL) {
+    if (snapshotCache.key === cacheKey && snapshotCache.value && now - snapshotCache.at < SNAPSHOT_TTL) {
       return { ...snapshotCache.value, cacheAgeMs:now - snapshotCache.at };
     }
     // 同一个快照只抓一次：并发提问时共享同一次抓取。
     // One in-flight fetch per snapshot: concurrent questions share it.
-    if (snapshotCache.source === source && snapshotCache.promise && now - snapshotCache.at < SNAPSHOT_TTL) {
+    if (snapshotCache.key === cacheKey && snapshotCache.promise && now - snapshotCache.at < SNAPSHOT_TTL) {
       return snapshotCache.promise;
     }
     const task = (async () => {
@@ -759,10 +765,10 @@ export function createAiChat({ market, liveQuote, marketContext, fearGreedSentim
         const total = scores.reduce((s, [, v]) => s + (v || 0), 0);
         snapshot.multiTimeframeScore = { perTimeframe:Object.fromEntries(scores), sum:round(total, 1), max:scores.length * 6 };
       }
-      snapshotCache = { at:Date.now(), source, value:snapshot, promise:null };
+      snapshotCache = { at:Date.now(), key:cacheKey, source, value:snapshot, promise:null };
       return snapshot;
     })();
-    snapshotCache = { at:snapshotCache.at, source, value:snapshotCache.value, promise:task };
+    snapshotCache = { at:snapshotCache.at, key:cacheKey, source, value:snapshotCache.value, promise:task };
     try { return await task; } finally { if (snapshotCache.promise === task) snapshotCache.promise = null; }
   }
 

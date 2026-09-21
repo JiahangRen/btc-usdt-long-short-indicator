@@ -138,15 +138,10 @@ button.active {
   font-size: 29px;
   font-weight: 800;
 }
-.bull {
-  color: #ff6175;
-}
-.bear {
-  color: #42c995;
-}
-.flat {
-  color: #d29922;
-}
+/* 涨跌配色唯一真源在下方的 .bull / .bear 规则（欧美习惯：涨=绿 --bull、跌=红 --bear）。
+   此处原有一组反向定义（.bull 红 #ff6175 / .bear 绿 #42c995），属早期残留，
+   虽被下方 `color: var(--bull/--bear)` 覆盖而从未生效，但一旦层叠顺序变动就会
+   让全站涨跌色整体翻转，已移除。 */
 .levels {
   justify-content: space-between;
   padding-top: 12px;
@@ -402,7 +397,7 @@ button.active {
 }
 .chart-box {
   height: 440px;
-  margin: 15px -3px 0;
+  margin: 15px -16px 0;
   border-radius: 11px;
   overflow: hidden;
   background: linear-gradient(
@@ -497,15 +492,9 @@ pre {
   border: 1px solid rgba(172, 201, 232, 0.07);
   line-height: 1.7;
 }
-.bull {
-  color: #ff708a;
-}
-.bear {
-  color: #37d8a0;
-}
-.flat {
-  color: #ffca71;
-}
+/* 同上：这里原有第二组反向涨跌定义（.bull 红 #ff708a / .bear 绿 #37d8a0），
+   同样被下方 .bull/.bear 的 var(--bull/--bear) 规则覆盖，已移除以免日后层叠变动
+   导致配色翻转。 */
 @media (max-width: 680px) {
   main {
     padding: 22px 14px 34px;
@@ -720,7 +709,7 @@ header p {
 }
 .hero strong {
   font-family: "SF Mono", "JetBrains Mono", monospace;
-  font-size: 39px;
+  font-size: 44px;
   letter-spacing: -1.8px;
   color: var(--text-primary);
   background: none;
@@ -739,9 +728,22 @@ header p {
 }
 .terminal-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1.62fr) minmax(330px, 1fr);
+  grid-template-columns: minmax(0, 68fr) minmax(300px, 32fr);
   gap: 18px;
   align-items: start;
+}
+/* v2.10.56：左列容器——K 线卡、OKX 微观结构卡、周期涨幅卡三张平级卡片纵向排列。 */
+.chart-column {
+  display: grid;
+  gap: 16px;
+  align-content: start;
+  min-width: 0;
+}
+.chart-column > .card {
+  margin: 0;
+}
+.chart-column > .okx-microstructure-card {
+  margin-top: 0;
 }
 .card {
   padding: 20px;
@@ -754,7 +756,8 @@ header p {
 .card:before {
   display: none;
 }
-.terminal-layout > .card {
+.terminal-layout > .card,
+.chart-column > .card {
   margin: 0;
 }
 .toolbar {
@@ -784,7 +787,7 @@ header p {
 }
 .chart-box {
   height: 530px;
-  margin: 0 -4px;
+  margin: 0 -16px;
   background: var(--bg-surface-2);
   border: 0;
   border-radius: 10px;
@@ -932,6 +935,11 @@ header p {
   font-family: "SF Mono", "JetBrains Mono", monospace;
   font-size: 12px;
 }
+/* ===== 涨跌配色唯一真源（全站约定：欧美习惯 —— 涨=绿、跌=红） =====
+   .bull（看多/上涨）→ var(--bull) 绿；.bear（看空/下跌）→ var(--bear) 红。
+   --bull / --bear 在 html[data-theme="dark"|"light"|"auto"] 中各自定义，
+   亮暗主题均保持同一方向。K 线图在 app.js 中单独绘制（涨 #28c76f / 跌 #ef4d78），
+   方向与这里一致。新增涨跌元素请复用 .bull / .bear，不要另写颜色。 */
 .bull {
   color: var(--bull);
 }
@@ -1731,16 +1739,19 @@ html[data-theme="light"] #chartTooltip {
 .side-stack > .change-card {
   display: none;
 }
-.terminal-layout > .card > .forecast-card {
+.terminal-layout > .card > .forecast-card,
+.chart-column > .card > .forecast-card {
   margin: 18px 0 0;
   padding: 14px;
   background: var(--bg-surface-2);
   box-shadow: none;
 }
-.terminal-layout > .card > .forecast-card .forecast-grid {
+.terminal-layout > .card > .forecast-card .forecast-grid,
+.chart-column > .card > .forecast-card .forecast-grid {
   margin-top: 10px;
 }
-.terminal-layout > .card > .forecast-card .forecast-item {
+.terminal-layout > .card > .forecast-card .forecast-item,
+.chart-column > .card > .forecast-card .forecast-item {
   padding: 8px;
   background: rgba(3, 12, 23, 0.28);
 }
@@ -1917,6 +1928,109 @@ html[data-theme="light"] #chartTooltip {
 }
 .res-chip.flat {
   border-color: rgba(154, 164, 178, 0.4);
+}
+.res-chip.conflict {
+  border-style: dashed;
+  border-color: rgba(255, 77, 106, 0.75) !important;
+  background: rgba(255, 77, 106, 0.12);
+}
+.res-chips {
+  display: flex;
+  flex-wrap: wrap;
+  margin-top: 2px;
+}
+.res-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0 8px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  font:
+    700 13px/1.2 "SF Mono",
+    "JetBrains Mono",
+    monospace;
+  border: 1px solid transparent;
+}
+.res-summary b {
+  font-style: normal;
+}
+.res-summary small {
+  font-weight: 500;
+  font-size: 11px;
+  opacity: 0.85;
+}
+.res-summary.bull {
+  color: #00d4aa;
+  background: rgba(0, 212, 170, 0.14);
+  border-color: rgba(0, 212, 170, 0.45);
+}
+.res-summary.bear {
+  color: #ff4d6a;
+  background: rgba(255, 77, 106, 0.14);
+  border-color: rgba(255, 77, 106, 0.45);
+}
+.res-summary.flat {
+  color: var(--text-secondary);
+  background: var(--bg-surface-2);
+  border-color: var(--border-subtle);
+}
+.res-summary.conflict {
+  color: #ffb020;
+  background: rgba(255, 176, 32, 0.14);
+  border-color: rgba(255, 176, 32, 0.5);
+}
+.res-summary.loading,
+.res-summary.error {
+  color: var(--text-muted);
+  background: var(--bg-surface-2);
+  border-color: var(--border-subtle);
+}
+/* 多周期共振的卡片头部：标题与结论徽标同一行，说明换行在下面。
+   结论（强共振 / 多数 / 分歧 + 强度）放在标题右侧，卡片变成「先看结论、
+   再看右侧各周期标签」的读法；未计算时槽位为空，不占位。 */
+.resonance-head {
+  min-width: 0;
+}
+.resonance-head-top {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+}
+.resonance-head-top > h2 {
+  flex: 0 0 auto;
+}
+#resonanceSummary:empty {
+  display: none;
+}
+#resonanceSummary .res-summary {
+  margin: 0;
+}
+/* 标题行里那句话结论（几个字，如「多头占优」）：纯文字、跟着方向变色，
+   不做成第二个徽标 —— 徽标已经有数字，这里只要一眼看懂的短句。 */
+.res-verdict {
+  font:
+    700 14px/1.2 "SF Mono",
+    "JetBrains Mono",
+    monospace;
+  letter-spacing: 0.4px;
+  white-space: nowrap;
+}
+.res-verdict[hidden] {
+  display: none;
+}
+.res-verdict.bull {
+  color: var(--bull);
+}
+.res-verdict.bear {
+  color: var(--bear);
+}
+.res-verdict.conflict {
+  color: #ffb020;
+}
+.res-verdict.flat {
+  color: var(--text-secondary);
 }
 .horizon-forecasts {
   display: grid;
@@ -2109,8 +2223,10 @@ header p b {
 }
 /* The manual recalculation control is a compact action alongside the result
    chips, rather than a wider primary action that dominates this row. */
+/* 标题区按内容自适应，中间那一列 1fr 只当留白，把「计算共振」推到最右侧、
+   紧挨着周期标签；周期标签继续靠右对齐。 */
 .optional {
-  grid-template-columns: minmax(290px, 1fr) auto minmax(540px, auto);
+  grid-template-columns: minmax(0, auto) minmax(0, 1fr) auto;
 }
 .optional > button {
   width: auto;
@@ -2118,6 +2234,7 @@ header p b {
   min-height: 34px;
   padding: 6px 10px;
   font-size: 12px;
+  justify-self: end;
 }
 .chart-periods #changeTags small {
   font-size: 10px;
@@ -2127,18 +2244,27 @@ header p b {
 .price-digit {
   display: inline-block;
   min-width: 0.6ch;
+  /* 放大以字符底线为基准，跳动时向上"长"出去，不推挤整行基线
+     / Grow from the digit's own baseline so a tick never nudges the row. */
+  transform-origin: 50% 100%;
 }
+/* 脉冲时长 500ms：刷新提到 250ms（4 次/秒）后，若还用原来的 950ms，同一位数字
+   连续变化时动画会被下一次刷新打断、永不到达终态（表现为"一直在亮"）。500ms 让
+   每次脉冲在下一次刷新前后就基本回落完成，颜色与光晕方案保持不变。
+   A 500ms pulse: once the quote refreshes every 250ms, the old 950ms animation
+   would be restarted before finishing (a digit that keeps changing would stay lit
+   forever). 500ms lets each pulse settle; colors and glow are unchanged. */
 .price-digit.changed-up {
-  animation: digit-flash-up 950ms ease-out;
+  animation: digit-flash-up 500ms ease-out;
 }
 .price-digit.changed-down {
-  animation: digit-flash-down 950ms ease-out;
+  animation: digit-flash-down 500ms ease-out;
 }
 @keyframes digit-flash-up {
   0% {
     color: #00d4aa;
     text-shadow: 0 0 18px rgba(0, 212, 170, 0.9);
-    transform: translateY(-1px);
+    transform: translateY(-1px) scale(1.16);
   }
   100% {
     color: inherit;
@@ -2150,7 +2276,7 @@ header p b {
   0% {
     color: #ff4d6a;
     text-shadow: 0 0 18px rgba(255, 77, 106, 0.85);
-    transform: translateY(-1px);
+    transform: translateY(-1px) scale(1.16);
   }
   100% {
     color: inherit;
@@ -2853,7 +2979,7 @@ main > header .controls:has(#langToggle) {
     max-width: 1440px;
   }
   .terminal-layout {
-    grid-template-columns: minmax(0, 1.45fr) minmax(520px, 1fr);
+    grid-template-columns: minmax(0, 68fr) minmax(300px, 32fr);
   }
 }
 
@@ -2911,7 +3037,8 @@ html[data-theme="light"] main > header .controls label:after {
   color: #587087;
 }
 html[data-theme="light"] .micro-forecast,
-html[data-theme="light"] .terminal-layout > .card > .forecast-card {
+html[data-theme="light"] .terminal-layout > .card > .forecast-card,
+html[data-theme="light"] .chart-column > .card > .forecast-card {
   background: linear-gradient(135deg, #f7fbff, #edf4fa);
 }
 html[data-theme="light"] .vol-item,
@@ -2970,7 +3097,8 @@ html[data-theme="light"] #selectionOverlay {
     color: #24364d;
   }
   html[data-theme="auto"] .micro-forecast,
-  html[data-theme="auto"] .terminal-layout > .card > .forecast-card {
+  html[data-theme="auto"] .terminal-layout > .card > .forecast-card,
+  html[data-theme="auto"] .chart-column > .card > .forecast-card {
     background: linear-gradient(135deg, #f7fbff, #edf4fa);
   }
   html[data-theme="auto"] .vol-item,
@@ -3311,6 +3439,29 @@ html[data-theme="light"] #selectionOverlay {
     9px/1.2 ui-sans-serif,
     system-ui;
   white-space: nowrap;
+}
+/* 「横向移动」（v2.11.26）：默认只显示标题，把小字提示收起来；
+   鼠标移到中间文字区（不含左右箭头）时，瞬间用提示替换掉标题。
+   做法是让两层叠进同一格：命中区始终由 <i> 独占（只把它的文字调透明，
+   元素盒不收缩），提示层 pointer-events:none —— 否则它浮上来后会截走
+   hover，形成「显示↔隐藏」的高频闪烁。 */
+.pan-tools #panLabel i,
+.pan-tools #panLabel small {
+  grid-area: 1 / 1;
+  align-self: center;
+}
+.pan-tools #panLabel small {
+  opacity: 0;
+  visibility: hidden;
+  transition: none;
+  pointer-events: none;
+}
+.pan-tools #panLabel i:hover {
+  color: transparent;
+}
+.pan-tools #panLabel i:hover + small {
+  opacity: 1;
+  visibility: visible;
 }
 .chart-pattern-legend {
   display: flex;
@@ -5928,6 +6079,10 @@ html[data-theme="light"] .range-extreme {
   position: fixed;
   z-index: 2147483647;
   max-width: min(340px, calc(100vw - 24px));
+  /* 长说明（共振的用法）可能高于视口：给个上限并允许在浮层内滚动，别顶出屏幕。 */
+  max-height: calc(100vh - 24px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 10px 12px;
   border: 1px solid var(--border-strong);
   border-radius: 9px;
@@ -5941,7 +6096,8 @@ html[data-theme="light"] .range-extreme {
   letter-spacing: 0;
   text-align: left;
   overflow-wrap: anywhere;
-  pointer-events: none;
+  /* 允许指针停在浮层上（长说明要在里面滚动）；离开浮层由脚本收起。 */
+  pointer-events: auto;
 }
 #globalHelpTooltip[hidden] {
   display: none;
@@ -6109,7 +6265,7 @@ html[data-theme="light"] .range-extreme {
 #periodChangeCard.chart-periods {
   display: block !important;
   min-height: 0 !important;
-  margin: 18px 0 !important;
+  margin: 0 !important;
   padding: 17px 19px !important;
   border: 1px solid var(--border-subtle) !important;
   border-radius: 12px !important;
@@ -6237,7 +6393,7 @@ main > header .controls #appVersion {
 }
 @media (max-width: 760px) {
   #periodChangeCard.chart-periods {
-    margin: 14px 0 !important;
+    margin: 0 !important;
     padding: 15px !important;
   }
   #periodChangeCard.chart-periods > #changeTags {
@@ -6275,7 +6431,7 @@ main > header,
   min-width: 0;
 }
 .terminal-layout {
-  grid-template-columns: minmax(0, 1.58fr) minmax(360px, 1fr) !important;
+  grid-template-columns: minmax(0, 68fr) minmax(360px, 32fr) !important;
 }
 .terminal-layout > .side-stack {
   width: 100%;
@@ -6594,7 +6750,7 @@ main > header,
    keep all cards beneath the chart instead. */
 @media (min-width: 1300px) {
   .terminal-layout {
-    grid-template-columns: minmax(0, 1.58fr) minmax(430px, 0.92fr) !important;
+    grid-template-columns: minmax(0, 68fr) minmax(300px, 32fr) !important;
     align-items: start !important;
   }
   .terminal-layout > .side-stack {
@@ -6641,7 +6797,7 @@ main > header,
     min-width: 0;
   }
   .terminal-layout {
-    grid-template-columns: minmax(0, 1.45fr) minmax(430px, 1fr) !important;
+    grid-template-columns: minmax(0, 68fr) minmax(300px, 32fr) !important;
     align-items: start !important;
   }
   .terminal-layout > .side-stack {
@@ -7750,6 +7906,18 @@ main > #marketClocks #exchangeMeta .exchange-row {
 .research-training-status > small {
   color: var(--text-muted);
 }
+/* `.research-governance span` 是网格容器，会把这里的四个周期各自变成网格项而竖排；
+   这里必须显式回到行内流，并整行占满，进度才能读成一行。 */
+.research-training-status .research-horizon-progress {
+  grid-column: 1/-1;
+  display: block;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+.research-training-status .research-horizon-progress b {
+  font-weight: 700;
+}
 .research-outlook-card footer {
   margin-top: 11px;
   padding-top: 10px;
@@ -8715,7 +8883,9 @@ body.voice-grid-resizing {
 .voice-quick-toggle {
   position: absolute;
   top: 5px;
-  left: min(255px, calc(100% - 38px));
+  /* 主报价放大到 44px 后数字更宽，喇叭随之右移，保持与数字尾部留白
+     / The 44px quote is wider, so the toggle shifts right to clear the digits. */
+  left: min(300px, calc(100% - 38px));
   right: auto;
   display: grid;
   place-items: center;
@@ -9137,28 +9307,86 @@ body.voice-grid-resizing {
   font-size: 27px;
   line-height: 1;
 }
-.account-service-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  margin-top: 13px;
+.account-service-desc {
+  margin: 13px 0 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.7;
 }
 .account-service-user {
+  margin-top: 12px;
+  padding: 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background: var(--bg-surface-2);
+}
+.asu-id-row {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 9px;
-  margin-top: 10px;
-  padding: 10px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 7px;
-  background: var(--bg-surface-2);
-  font-size: 11px;
+  gap: 10px;
+  min-width: 0;
 }
-.account-service-user span {
+.asu-avatar {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 36px;
+  height: 36px;
+  border: 1px solid rgba(0, 229, 255, 0.35);
+  border-radius: 50%;
+  background: rgba(0, 229, 255, 0.12);
+  color: var(--accent-cyan);
+  font-size: 15px;
+  font-weight: 800;
+}
+.asu-email {
   flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+.asu-note {
+  margin: 11px 0 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.75;
+}
+.asu-actions {
+  display: flex;
+  gap: 9px;
+  margin-top: 13px;
+}
+.asu-actions button {
+  flex: 1;
+  min-height: 34px;
+  padding: 0 12px;
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 700;
+}
+.asu-primary {
+  border-color: var(--accent-cyan);
+  background: var(--accent-cyan);
+  color: #061019;
+}
+.asu-primary:hover {
+  border-color: var(--accent-cyan);
+  background: #48ddeb;
+  color: #061019;
+}
+.asu-primary:disabled {
+  opacity: 0.6;
+}
+.asu-ghost {
+  border-color: var(--border-strong);
+  background: transparent;
   color: var(--text-secondary);
+}
+.asu-ghost:hover {
+  border-color: var(--bear);
+  background: rgba(255, 82, 110, 0.1);
+  color: var(--bear);
 }
 .account-auth {
   margin-top: 20px;
@@ -10595,17 +10823,23 @@ main > header {
   ) !important;
 }
 .signal-validity-scale {
-  grid-template-columns: minmax(82px, 1fr) minmax(130px, 3fr) minmax(82px, 1fr) !important;
-  gap: 12px !important;
+  grid-template-columns: minmax(0, 1fr) !important;
+  gap: 6px !important;
+}
+.signal-validity-ends {
+  display: flex !important;
+  justify-content: space-between !important;
+  align-items: baseline !important;
+  gap: 10px !important;
 }
 .signal-validity-label {
   gap: 5px !important;
 }
 .signal-validity-label small {
-  font-size: 13px !important;
+  font-size: 11px !important;
 }
 .signal-validity-label em {
-  font-size: 14px !important;
+  font-size: 12px !important;
   font-weight: 850 !important;
   letter-spacing: 0.04em;
 }
@@ -10663,7 +10897,7 @@ main > header {
   box-shadow: 0 7px 18px rgba(0, 0, 0, 0.32);
   color: #eef8ff;
   font:
-    800 11px/1 "SF Mono",
+    800 10px/1 "SF Mono",
     "JetBrains Mono",
     monospace;
   transform: translateX(-50%);
@@ -10713,8 +10947,11 @@ main > header {
     padding: 14px !important;
   }
   .signal-validity-scale {
-    grid-template-columns: 70px minmax(80px, 1fr) 70px !important;
-    gap: 7px !important;
+    grid-template-columns: minmax(0, 1fr) !important;
+    gap: 6px !important;
+  }
+  .signal-validity-ends {
+    gap: 8px !important;
   }
   .signal-validity-label small {
     font-size: 11px !important;
@@ -12252,6 +12489,18 @@ html[data-theme="light"] #okxMicrostructureCard .microstructure-neutral-toggle:f
 .api-qwen-quota-meta { font:400 10px/1.4 system-ui,sans-serif; color:var(--text-secondary,#9aa4b2); flex:1 1 auto; word-break:break-word; }
 .api-qwen-quota[data-empty='true'] .api-qwen-quota-pct { color:var(--text-muted); }
 .api-qwen-quota-meta b { color:var(--text-primary); font-weight:500; }
+.api-center-row.api-center-qwen { align-items:stretch; gap:20px; }
+.api-center-row.api-center-qwen > div { flex:1 1 auto; }
+.api-center-row.api-center-qwen form { display:flex; flex-direction:column; gap:8px; flex:0 0 340px; justify-content:flex-start; }
+.api-center-row.api-center-qwen form label { display:flex; flex-direction:column; gap:4px; color:var(--text-secondary); font-size:10px; }
+.api-center-row.api-center-qwen form select { box-sizing:border-box; width:100%; padding:8px 9px; border:1px solid rgba(137,166,199,.28); border-radius:7px; color:var(--text-primary); background:rgba(3,12,23,.72); font-size:11px; }
+.api-center-row.api-center-qwen .api-qwen-actions { display:flex; gap:7px; flex-wrap:wrap; }
+.api-center-row.api-center-qwen .api-qwen-actions button { flex:1 1 auto; }
+.api-key-systems { display:flex; flex-direction:column; gap:3px; margin-top:7px; padding:8px 10px; border:1px solid rgba(137,166,199,.16); border-radius:8px; background:rgba(8,20,34,.45); }
+.api-key-systems > b { color:var(--text-primary); font-size:11px; }
+.api-key-systems > span { margin:0; }
+.api-key-systems > small { color:var(--text-muted); font-size:10px; line-height:1.5; }
+.api-key-systems code { white-space:nowrap; }
 .investment-calendar-head { display:flex; justify-content:space-between; gap:18px; align-items:flex-start; padding:22px 24px 16px; border-bottom:1px solid rgba(137,166,199,.16); }
 .investment-calendar-kicker { display:flex; gap:8px; align-items:center; margin-bottom:7px; color:#68ead7; font:700 11px/1 ui-monospace,SFMono-Regular,monospace; letter-spacing:.1em; text-transform:uppercase; }
 .investment-calendar-kicker i { width:7px; height:7px; border-radius:99px; background:#38dfc4; box-shadow:0 0 12px #38dfc4; }
@@ -12800,4 +13049,1475 @@ html[data-theme="light"] .liq-prob-window {
 }
 .liq-entry-menu button:disabled > b {
   color: var(--text-muted);
+}
+
+/* ===== 消息推送 · 多渠道设置（v2.10.52，配 public/notification.js） ===== */
+/* 总开关 / 渠道启用拨钮：沿用语音面板拨钮的轨道+滑块画法，局部复用不互相污染。 */
+.push-switch input[type="checkbox"] {
+  position: relative;
+  flex: 0 0 auto;
+  appearance: none;
+  -webkit-appearance: none;
+  width: 38px;
+  height: 21px;
+  margin: 0;
+  border-radius: 999px;
+  background: var(--border-strong);
+  cursor: pointer;
+  transition: background 0.2s ease;
+}
+.push-switch input[type="checkbox"]::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  transition: transform 0.2s ease;
+}
+.push-switch input[type="checkbox"]:checked {
+  background: var(--accent-cyan);
+}
+.push-switch input[type="checkbox"]:checked::after {
+  transform: translateX(17px);
+}
+.push-switch input[type="checkbox"]:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.push-master-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 9px 12px;
+  margin: 10px 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 9px;
+  background: var(--bg-surface-2);
+}
+.push-master-row .push-switch-row {
+  display: flex;
+  flex-direction: row-reverse;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-primary);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.push-master-row small {
+  color: var(--text-muted);
+  font-size: 10.5px;
+}
+.channel-section {
+  margin: 10px 0;
+}
+.channel-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.channel-list > small {
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+.channel-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 9px;
+  background: var(--bg-surface-2);
+}
+.channel-card.channel-disabled {
+  opacity: 0.55;
+}
+.channel-card.channel-disabled .channel-main b {
+  text-decoration: line-through;
+}
+.channel-card .channel-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.channel-card .channel-main b {
+  color: var(--text-primary);
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.channel-card .channel-main small {
+  color: var(--text-muted);
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.channel-card button {
+  padding: 4px 8px;
+  font-size: 10.5px;
+}
+.channel-card .push-switch {
+  display: inline-flex;
+  align-items: center;
+}
+/* 渠道弹窗 */
+#channelModal .channel-type-hint {
+  margin: -4px 0 8px;
+  color: var(--text-muted);
+  font-size: 10.5px;
+  line-height: 1.6;
+}
+#channelModal form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+}
+#channelModal form input {
+  padding: 7px 9px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  background: var(--bg-surface-2);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+#channelModal .channel-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 6px;
+}
+/* 亏损联动（与持仓联动） */
+.loss-push-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  margin: 10px 0;
+  border: 1px dashed var(--border-subtle);
+  border-radius: 9px;
+}
+.loss-push-box .push-switch-row {
+  display: flex;
+  flex-direction: row-reverse;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-primary);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.loss-push-fields {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+}
+.loss-push-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  color: var(--text-secondary);
+  font-size: 10.5px;
+}
+.loss-push-fields input {
+  width: 84px;
+  padding: 5px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  background: var(--bg-surface-2);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+.loss-push-box > small {
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+/* ===== 消息推送设置 · 仿 8899 分渠道交互（v2.10.53，配 public/notification.js） =====
+   设计取舍：沿用 btc 指示器自己的配色令牌（--bull/--bear/--warn/--accent-cyan 等），
+   不照搬 8899 的 --ok/--danger/--muted 体系，保证明/暗主题下都统一。 */
+.push-head-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  margin: 10px 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 9px;
+  background: var(--bg-surface-2);
+}
+.push-head-row .push-switch-row {
+  display: flex;
+  flex-direction: row-reverse;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.push-head-row small {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 10.5px;
+  line-height: 1.45;
+}
+.push-settings-btn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease;
+}
+.push-settings-btn:hover {
+  color: var(--accent-cyan);
+  border-color: var(--accent-cyan);
+  background: color-mix(in srgb, var(--accent-cyan) 8%, transparent);
+}
+
+/* 推送设置弹层 */
+.push-settings-desc {
+  margin: -2px 0 12px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+/* 推送设置是「设置面板」，不是底部弹出的快捷输入表：基础 .alert-composer 用的是
+   align-items:end（交易所风格 sheet，给「添加预警」那种一步输入用的），所以这里必须
+   和 .voice-settings-modal / .account-service-card 一样用修饰类改回整屏居中。
+   漏了这个类时弹层会贴着浏览器底部 —— 因为 align-items:end 是「底对齐」而非「居中」。 */
+.push-settings-modal {
+  z-index: 1004;
+  align-items: center;
+  padding: 20px;
+}
+.push-settings-modal > section {
+  width: min(600px, 100%);
+  max-height: calc(100vh - 40px);
+  border-radius: 14px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.52);
+}
+.push-settings-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-subtle);
+}
+.push-settings-footer button { min-height: 34px; }
+
+/* 渠道块：标题行 + 状态徽章 + 开关；开关打开后展开表单 */
+.ch-block {
+  border-top: 1px solid var(--border-subtle);
+  margin-top: 12px;
+  padding-top: 2px;
+}
+.ch-block:first-of-type { border-top: none; margin-top: 2px; }
+.ch-locked { opacity: 0.7; }
+.ch-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+}
+.ch-head .grow { flex: 1; min-width: 0; }
+.ch-label {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+.ch-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  background: rgba(124, 135, 147, 0.14);
+  color: var(--text-muted);
+}
+.ch-badge::before { content: '●'; font-size: 7px; line-height: 1; }
+.ch-badge.ok { background: rgba(0, 212, 170, 0.14); color: var(--bull); }
+.ch-badge.ok::before { content: '✓'; font-size: 10px; font-weight: 700; }
+.ch-badge.danger { background: rgba(255, 77, 106, 0.14); color: var(--bear); }
+.ch-badge.danger::before { content: '✕'; font-size: 10px; font-weight: 700; }
+.ch-badge.warn { background: rgba(155, 98, 0, 0.14); color: var(--warn); }
+.ch-badge.warn::before { content: '!'; font-size: 11px; font-weight: 700; }
+.ch-badge.muted { background: rgba(124, 135, 147, 0.14); color: var(--text-muted); }
+.ch-badge.muted::before { content: ''; }
+.ch-badge:empty { display: none; }
+
+.ch-body { padding: 4px 0 8px; }
+.ch-sub {
+  display: block;
+  margin: 0 0 8px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+.ch-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+/* 验证通过后 JS 会给本容器加 hidden 来收起输入框；这里的 display:flex 属于作者样式，
+   会盖掉浏览器对 [hidden] 的默认隐藏（UA 样式永远输给作者样式），于是 hidden 形同虚设。
+   必须显式声明 hidden 时的隐藏，否则「已验证」的渠道仍会露出两行输入框。 */
+.ch-fields[hidden] { display: none !important; }
+.ch-fields .field { display: block; }
+.ch-fields .field input { box-sizing: border-box; width: 100%; }
+.ch-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 2px 0 4px;
+}
+.ch-actions button {
+  min-height: 32px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease;
+}
+.ch-actions button:hover { border-color: var(--border-strong); }
+.ch-primary {
+  background: var(--accent-cyan) !important;
+  border-color: var(--accent-cyan) !important;
+  color: #fff !important;
+}
+.ch-primary:hover { filter: brightness(1.05); }
+.ch-primary:disabled { opacity: 0.6; cursor: default; filter: none; }
+.ch-actions .ch-clear {
+  border-color: transparent;
+  background: transparent;
+}
+.ch-clear { color: var(--bear) !important; }
+.ch-clear:hover {
+  background: rgba(255, 77, 106, 0.12) !important;
+  border-color: var(--bear) !important;
+  color: var(--bear) !important;
+}
+.ch-msg {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-muted);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.ch-msg.ok { color: var(--bull); }
+.ch-msg.warn { color: var(--warn); }
+.ch-msg.danger { color: var(--bear); }
+.ch-msg:empty { display: none; }
+
+/* 同一渠道的多个实例（如多个飞书机器人） */
+.ch-extra {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0 8px 14px;
+  border-left: 2px solid var(--border-subtle);
+  margin: 4px 0 4px 2px;
+}
+.ch-extra .channel-main { flex: 1; min-width: 0; }
+.ch-extra .ch-clear { margin-left: auto; }
+.channel-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.channel-main b {
+  color: var(--text-primary);
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.channel-main small {
+  color: var(--text-muted);
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ===================== v2.11.0 宏观板块整合 ===================== */
+
+/* —— 宏观事件中枢：「现在」时间流分隔线 —— */
+.cal-now {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 0 6px;
+  padding: 0 2px;
+}
+.cal-now::before {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--cal-warn));
+}
+.cal-now::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, var(--cal-warn), transparent);
+}
+.cal-now span {
+  flex: none;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--cal-warn);
+  padding: 2px 10px;
+  border: 1px solid rgba(245, 177, 48, 0.45);
+  border-radius: 999px;
+  background: rgba(245, 177, 48, 0.1);
+  font-variant-numeric: tabular-nums;
+}
+
+/* —— 事件行：已公布高亮 + 可展开 —— */
+.cal-event.is-released { background: rgba(46, 204, 145, 0.045); }
+.cal-event.is-released .ic-met.is-actual .ic-met-val:not(.empty) {
+  color: var(--cal-bull);
+  font-weight: 750;
+}
+.cal-event.is-expandable { cursor: pointer; }
+.cal-event.is-expanded {
+  border-color: var(--cal-line);
+  background: var(--cal-surface-2);
+}
+.cal-expand-caret {
+  flex: none;
+  width: 0;
+  height: 0;
+  margin-top: 2px;
+  border-left: 4.5px solid transparent;
+  border-right: 4.5px solid transparent;
+  border-top: 5px solid var(--cal-text-3);
+  transition: transform 0.15s;
+  align-self: center;
+}
+.cal-event.is-expanded .cal-expand-caret { transform: rotate(180deg); }
+.cal-event:hover .cal-expand-caret { border-top-color: var(--cal-text-2); }
+
+/* 事件名旁的利好/利空小标签（复用 macro-cmp-tag，缩小到行内） */
+.cal-name .macro-cmp-tag {
+  flex: none;
+  font-size: 9px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+
+/* —— 展开的「影响预测矩阵」详情行 —— */
+.cal-detail {
+  list-style: none;
+  padding: 2px 12px 10px 0;
+}
+.cal-detail .ic-impact-card {
+  background: var(--cal-surface-2);
+}
+/* 窄屏时事件行变 grid-areas 布局，详情行保持整宽 */
+@media (max-width: 720px) {
+  .cal-detail { padding: 2px 10px 10px 0; }
+}
+
+/* —— 宏观环境与跨市场联动：底部联动面板 —— */
+.fed-corr-panel {
+  --cal-text: var(--text-primary);
+  --cal-text-2: var(--text-secondary);
+  --cal-text-3: var(--text-muted);
+  --cal-line: var(--border-subtle);
+  --cal-line-2: var(--border-strong);
+  --cal-accent: var(--accent-cyan, #38dfc4);
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--cal-line-2);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.fed-corr-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.fed-corr-head h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 750;
+  color: var(--cal-text);
+}
+.fed-corr-head p {
+  margin: 3px 0 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--cal-text-3);
+  max-width: 640px;
+}
+.fed-corr-head button {
+  appearance: none;
+  border: 1px solid rgba(56, 223, 196, 0.42);
+  border-radius: 8px;
+  background: rgba(56, 223, 196, 0.1);
+  color: var(--cal-accent);
+  padding: 6px 14px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 750;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.fed-corr-head button:hover {
+  background: rgba(56, 223, 196, 0.17);
+  border-color: rgba(56, 223, 196, 0.7);
+}
+.fed-corr-panel .correlation-output { margin: 0; }
+.fed-corr-panel .index-ticker-cards { margin: 0; }
+
+/* ===== v2.10.69：图表悬浮缩略图 + 一键返回顶部 ===== */
+#thumbToggle.is-active {
+  background: rgba(34, 211, 238, 0.18);
+  border-color: rgba(34, 211, 238, 0.65);
+  color: var(--accent-cyan, #22d3ee);
+}
+
+#chartThumb {
+  position: fixed;
+  z-index: 1150;
+  display: flex;
+  flex-direction: column;
+  min-width: 220px;
+  max-width: 920px;
+  border-radius: 10px;
+  border: 1px solid var(--border-strong, #3a434f);
+  background: var(--bg-surface, #161a20);
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.42);
+  overflow: hidden;
+}
+#chartThumb[hidden] {
+  display: none !important;
+}
+.ct-head {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px 8px 5px 10px;
+  background: var(--bg-elevated, #232a33);
+  border-bottom: 1px solid var(--border-strong, #3a434f);
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+.ct-head:active {
+  cursor: grabbing;
+}
+.ct-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.ct-title {
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--text-secondary, #9aa4b2);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.ct-price-lab {
+  flex: none;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted, #6b7684);
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+.ct-price {
+  display: flex;
+  align-items: baseline;
+  padding: 2px 0;
+  font-size: 13.5px;
+  font-weight: 750;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  color: var(--text-primary, #e8eaed);
+}
+/* 逐位跳动复用顶部 hero 大价格的 .price-digit / .changed-up / .changed-down
+   （500ms 脉冲、涨绿跌红、放大 1.16 倍后回落），此处只补 baseline 对齐。 */
+.ct-price .price-digit {
+  display: inline-block;
+  transform-origin: 50% 100%;
+}
+.ct-spacer {
+  flex: 1;
+}
+.ct-btn {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: 5px;
+  border: 1px solid var(--border-strong, #3a434f);
+  background: transparent;
+  color: var(--text-secondary, #9aa4b2);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+.ct-btn:hover {
+  color: var(--text-primary, #e8eaed);
+  border-color: var(--accent-cyan, #22d3ee);
+}
+.ct-body {
+  position: relative;
+  flex: none;
+  min-height: 0;
+  background: var(--bg-base, #0d1117);
+}
+#chartThumbCanvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  cursor: zoom-in;
+}
+#chartThumb.is-expanded #chartThumbCanvas {
+  cursor: zoom-out;
+}
+.ct-rz {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 18px;
+  height: 18px;
+  cursor: nwse-resize;
+  touch-action: none;
+  background: linear-gradient(
+    135deg,
+    transparent 0 55%,
+    var(--border-strong, #3a434f) 55% 65%,
+    transparent 65% 78%,
+    var(--border-strong, #3a434f) 78% 88%,
+    transparent 88%
+  );
+}
+
+#backToTop {
+  position: fixed;
+  right: 30px;
+  bottom: 78px;
+  z-index: 1150;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong, #3a434f);
+  background: var(--bg-elevated, #232a33);
+  color: var(--text-primary, #e8eaed);
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.35);
+  transition: transform 0.12s ease, border-color 0.15s ease,
+    background 0.15s ease;
+}
+#backToTop:hover {
+  transform: translateY(-2px);
+  border-color: var(--accent-cyan, #22d3ee);
+  color: var(--accent-cyan, #22d3ee);
+}
+#backToTop[hidden] {
+  display: none !important;
+}
+
+/* ============================================================
+   v2.11.10 · 智能顶部栏（滚动即隐 / 可唤回）
+   Smart top bar: stows on scroll-down, returns on scroll-up, the top
+   hover zone, or keyboard focus.
+
+   栏体改为固定定位后，首屏由 JS 生成的 .header-slot 撑住原始高度，
+   因此 scrollY=0 时与改造前逐像素一致；宽高与左边距由脚本按主内容区
+   实时写入内联样式。固定后才会「滚动时仍可唤回」，这是本特性的前提。
+   ============================================================ */
+main > header.is-smart-bar {
+  position: fixed;
+  top: var(--smart-bar-top, 20px);
+  left: 0;
+  width: 100%;
+  margin: 0;
+  z-index: 900;
+  transition:
+    transform 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 0.22s ease,
+    top 0.22s ease,
+    visibility 0s linear 0s;
+  will-change: transform;
+}
+/* 离开首屏后微微上浮，视觉上「脱开」页面边缘。 */
+main > header.is-smart-bar.is-detached {
+  top: 8px;
+}
+/* 收起态：整条滑出视口上方；visibility 延迟到滑出动画结束，
+   顺带把这条栏移出命中测试与 Tab 顺序，不会挡住底下的内容。 */
+main > header.is-smart-bar.is-stowed {
+  transform: translateY(calc(-100% - 30px));
+  opacity: 0;
+  pointer-events: none;
+  visibility: hidden;
+  transition:
+    transform 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 0.22s ease,
+    visibility 0s linear 0.32s;
+}
+/* 占位块：栏体离流后由它保留首屏空间（高度 = 栏高 + 栏体原有的
+   margin-bottom，由脚本实测写入），它只负责撑高，不接收指针事件。
+   停在页面顶部静置收起时，脚本会把它收成 0 —— 内容因此整体上提。 */
+.header-slot {
+  margin: 0;
+  pointer-events: none;
+}
+/* 高度过渡只在脚本加上 .is-animated 之后生效（首帧之后），
+   否则开屏那次 0 → 栏高 的赋值会被当成动画，内容会跳一下。 */
+.header-slot.is-animated {
+  transition: height 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+@media (prefers-reduced-motion: reduce) {
+  main > header.is-smart-bar,
+  main > header.is-smart-bar.is-stowed {
+    transition: none;
+  }
+  .header-slot.is-animated {
+    transition: none;
+  }
+}
+/* 打印时栏体回归文档流：导出/存档里不应出现悬空的一条。 */
+@media print {
+  main > header.is-smart-bar {
+    position: relative;
+    top: 0 !important;
+    left: auto !important;
+    width: auto !important;
+    transform: none !important;
+    opacity: 1 !important;
+    visibility: visible !important;
+  }
+  .header-slot {
+    display: none;
+  }
+}
+
+/* v2.11.10 历史回放面板：把已存 K 线重放成与实时同口径的三分类样本。
+   文字一律 color:inherit 再靠 opacity 分层，避免全局 p/span 规则在深色主题下把它压成不可读。 */
+.research-replay {
+  margin-top: 14px;
+  padding: 14px 16px;
+  border: 1px solid rgba(128, 128, 128, 0.28);
+  border-radius: 12px;
+}
+.research-replay h3 {
+  margin: 0 0 10px;
+  font-size: 14px;
+  font-weight: 600;
+  color: inherit;
+}
+.research-replay-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.research-replay-head small {
+  flex: 1 1 320px;
+}
+.research-replay-head small,
+.research-replay-result small {
+  font-size: 12px;
+  line-height: 1.6;
+  color: inherit;
+  opacity: 0.72;
+}
+.research-replay-result small {
+  display: block;
+}
+.research-replay-grid {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.research-replay-grid article {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  padding: 8px 10px;
+  border: 1px solid rgba(128, 128, 128, 0.24);
+  border-radius: 8px;
+  font-size: 12px;
+  color: inherit;
+}
+.research-replay-grid article b {
+  min-width: 34px;
+}
+.research-replay-grid article span {
+  display: inline;
+}
+/* v2.11.26：因子消融面板。判定结论要一眼可见，所以把 ΔM 与结论放在同一行并带色，而不是让读者自己
+   在两列数字之间做心算。内联文字一律 color:inherit 再靠 opacity 分层，避免全局 p/span 规则在深色
+   主题下把它压成不可读。 */
+.research-ablation {
+  margin: 0 0 12px;
+}
+.research-ablation h3 {
+  margin: 0 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: inherit;
+}
+.research-ablation-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.research-ablation-head small {
+  flex: 1 1 320px;
+  min-width: 0;
+  opacity: 0.75;
+  font-size: 12px;
+  line-height: 1.6;
+  color: inherit;
+}
+.research-ablation-result {
+  font-size: 12px;
+  color: inherit;
+}
+.research-ablation-result > small {
+  display: block;
+  opacity: 0.75;
+  font-size: 11px;
+  line-height: 1.6;
+}
+.research-ablation-grid {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+/* 卡片从「一个周期一行读数」改成「一个因子一张卡，卡内每周期一行」，因此卡片本身纵向堆叠，
+   行内再横向排列。栏宽交给外层 grid，卡内不再自己排流。 */
+/* One card per factor with a row per horizon, so the card stacks vertically and each row flows
+   horizontally. Outer grid owns the columns; the card no longer lays itself out. */
+.research-ablation-grid article {
+  display: block;
+  font-size: 12px;
+  color: inherit;
+}
+.research-ablation-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 14px;
+  padding: 3px 0;
+}
+.research-ablation-row > b {
+  min-width: 34px;
+}
+/* 子选择器限定 `>`：span 里还嵌着结论用的 `<b>`，用后代会把它也撑成固定宽度。 */
+.research-ablation-row > span {
+  display: inline;
+  white-space: nowrap;
+}
+/* 标题行用一条分隔线与读数分开，否则因子名看起来只是第一行数据的标签。 */
+.research-ablation-title {
+  margin-bottom: 4px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid rgba(127, 127, 127, 0.25);
+}
+.research-ablation-title > b {
+  font-size: 13px;
+  font-weight: 600;
+}
+/* 一个周期两行读数（方向 + 波动）。分组容器只负责把两行绑在一起，本身不参与横向排流 ——
+   让它变成 flex/grid 会把两行并排，而不是上下叠。 */
+/* Two readings per horizon (direction and volatility). The group only ties the two lines together
+   and must not lay itself out: making it flex or grid puts the two lines side by side. */
+.research-ablation-horizon {
+  display: block;
+}
+/* 波动行整体降一级：它是同一个周期的第二个问题，不是新的一行周期。左侧细竖线让「两行同属一个
+   周期」一眼可见，不必去数行。 */
+/* The volatility line sits one level down: it is a second question about the same horizon, not a new
+   horizon. The thin rule on its left makes that visible without counting lines. */
+.research-ablation-vol {
+  padding-left: 8px;
+  margin-bottom: 4px;
+  border-left: 2px solid rgba(127, 127, 127, 0.35);
+  opacity: 0.92;
+}
+.research-ablation-dir {
+  padding-left: 8px;
+  margin-bottom: 6px;
+  border-left: 2px solid rgba(64, 156, 255, 0.45);
+  opacity: 0.94;
+}
+/* 第三档语气：既不是「好」也不是「坏」，而是「还不能判」。用 amber 而不是红/绿，是为了让「前后段反向」
+   一眼区别于「有损害」—— 它说的是证据本身分裂，不是这个因子有害。 */
+/* A third tone: neither good nor bad, but "not decidable yet". Amber rather than red or green so that
+   "the halves disagree" cannot be misread as "this factor hurts" - the complaint is about the evidence,
+   not about the factor. */
+.research-ablation .warn {
+  color: var(--warn, #e0a33a);
+  font-weight: 600;
+}
+.research-ablation-howto {
+  margin: 8px 0 0;
+  font-size: 11.5px;
+  opacity: 0.85;
+}
+.research-ablation-howto > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.research-ablation-howto > ol {
+  margin: 6px 0 0;
+  padding-left: 20px;
+  display: grid;
+  gap: 4px;
+}
+.research-ablation-howto li {
+  line-height: 1.55;
+}
+.research-ablation-method {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  opacity: 0.75;
+  font-size: 11px;
+  line-height: 1.7;
+}
+
+/* ===================== 参数与门槛（阶段 4）：单一配置源 =====================
+   配置项按组铺开，每组一张卡，组内每项一行「路径 值」。被环境变量覆盖的项染成涨色并显式标注，
+   这样「这次跑的和上次跑的规则不一样」是看得见的，不必只靠比对指纹才能察觉。
+   子选择器限定 `>`，否则 span 里嵌的 `<b>` 也会被撑成固定宽度。 */
+.research-tuning {
+  margin: 0 0 12px;
+}
+.research-tuning h3 {
+  margin: 0 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: inherit;
+}
+.research-tuning-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.research-tuning-head small {
+  flex: 1 1 320px;
+  min-width: 0;
+  opacity: 0.75;
+  font-size: 12px;
+  line-height: 1.6;
+  color: inherit;
+}
+.research-tuning-result {
+  font-size: 12px;
+  color: inherit;
+}
+.research-tuning-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin-bottom: 10px;
+}
+.research-tuning-summary > span {
+  display: inline;
+  white-space: nowrap;
+}
+.research-tuning-grid {
+  /* 卡片高度差异极大（「震荡带」3 项 vs 「周期定义」24 项）。用 grid 时同一行的行高由该行最高的
+     那张卡决定，短卡下方会留下与它内容无关的大片空白 —— 单纯 `align-items: start` 只能阻止卡片
+     被拉伸，挡不住这种行高空白。改成多列流动，卡片按内容高度依次排列，空白随之消失。 */
+  /* Card heights differ wildly (3 leaves vs 24), and a grid row is as tall as its tallest card, so
+     short cards leave a large gap that has nothing to do with their content. `align-items: start`
+     stops the stretch but not the row height. Multi-column flow removes the gap entirely. */
+  columns: 3 240px;
+  column-gap: 8px;
+}
+.research-tuning-grid article {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(127, 127, 127, 0.08);
+  font-size: 12px;
+  line-height: 1.5;
+  color: inherit;
+  /* 卡片不可跨列断开：一张卡被劈成两半会让「组名 + 它的项」分家。 */
+  break-inside: avoid;
+  margin-bottom: 8px;
+}
+/* 长路径不折行，超出就横向滚动：折行会让「路径 = 值」的对应关系变得难读。 */
+.research-tuning-grid article > span {
+  display: block;
+  white-space: nowrap;
+  overflow-x: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ===================== 宏观事件因子（阶段 2）：CPI / 非农 / FOMC =====================
+   每类事件一行，字段多、且末尾带一段精度说明，所以用 flex-wrap 自适应而不做固定列。
+   子选择器限定 `>` ，否则 span 里的 `<small>n=…</small>` 也会吃到整行宽度。 */
+.research-macro {
+  margin: 0 0 12px;
+}
+.research-macro h3 {
+  font-size: 14px;
+  margin: 0 0 8px;
+  color: inherit;
+}
+.research-macro-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-bottom: 10px;
+}
+.research-macro-head small {
+  flex: 1 1 320px;
+  min-width: 0;
+  opacity: 0.75;
+  font-size: 11px;
+  line-height: 1.5;
+  color: inherit;
+}
+.research-macro-result {
+  font-size: 12px;
+  color: inherit;
+}
+.research-macro-result > small {
+  display: block;
+  opacity: 0.75;
+  font-size: 11px;
+  line-height: 1.6;
+  margin-top: 8px;
+  color: inherit;
+}
+.research-macro-grid {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.research-macro-grid article {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  padding: 8px 10px;
+  border: 1px solid rgba(128, 128, 128, 0.24);
+  border-radius: 8px;
+  font-size: 12px;
+  color: inherit;
+}
+.research-macro-grid article b {
+  min-width: 88px;
+}
+.research-macro-grid article > span {
+  display: inline;
+  white-space: nowrap;
+}
+.research-macro-grid article > small {
+  flex: 1 1 100%;
+  opacity: 0.7;
+  font-size: 11px;
+  line-height: 1.5;
+  color: inherit;
+}
+.research-macro-result details {
+  margin-top: 10px;
+  font-size: 11px;
+  color: inherit;
+}
+.research-macro-result details summary {
+  cursor: pointer;
+  opacity: 0.8;
+}
+.research-macro-result details ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  line-height: 1.6;
+  opacity: 0.8;
+}
+
+/* ===================== v2.11.16 宏观事件列表：展开 / 收起控制条 ===================== */
+
+/* 控制条常驻：只要列表长于折叠态就一直在，不再像旧版那样
+   展开到底后连同统计一起消失。左右两段 —— 操作按钮组 / 进度。 */
+.investment-calendar-card .ic-list-more {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  margin-top: 12px;
+  padding: 13px 0 2px;
+  border-top: 1px dashed var(--cal-line-2);
+}
+.ic-more-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+/* 主按钮：继续展开 N 条 */
+.investment-calendar-card .ic-more-btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid rgba(56, 223, 196, .42);
+  border-radius: 8px;
+  background: rgba(56, 223, 196, .1);
+  color: var(--cal-accent);
+  padding: 7px 15px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 750;
+  cursor: pointer;
+  transition: background .15s, border-color .15s, color .15s, transform .15s;
+}
+.investment-calendar-card .ic-more-btn:hover {
+  background: rgba(56, 223, 196, .18);
+  border-color: rgba(56, 223, 196, .72);
+  transform: translateY(-1px);
+}
+.investment-calendar-card .ic-more-btn .ic-caret { margin: 0; border-top-color: currentColor; }
+
+/* 次级按钮：全部展开 */
+.investment-calendar-card .ic-more-btn.is-ghost {
+  border-color: var(--cal-line-2);
+  background: transparent;
+  color: var(--cal-text-2);
+}
+.investment-calendar-card .ic-more-btn.is-ghost:hover {
+  border-color: var(--cal-accent);
+  background: rgba(56, 223, 196, .07);
+  color: var(--cal-text);
+}
+
+/* 收起：展开后始终出现，中性色以便和「展开」区分开 */
+.investment-calendar-card .ic-more-btn.is-less {
+  border-color: rgba(148, 163, 184, .5);
+  background: rgba(148, 163, 184, .1);
+  color: var(--cal-text);
+}
+.investment-calendar-card .ic-more-btn.is-less:hover {
+  border-color: rgba(148, 163, 184, .85);
+  background: rgba(148, 163, 184, .18);
+}
+
+/* 进度：文字 + 细轨 */
+.ic-more-progress { display: flex; align-items: center; gap: 10px; min-width: 210px; }
+.ic-more-progress > span {
+  font-size: 11px;
+  color: var(--cal-text-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.ic-more-progress > span b { color: var(--cal-text-2); font-weight: 700; }
+.ic-more-progress > span em {
+  font-style: normal;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 800;
+  color: var(--cal-accent);
+  background: rgba(56, 223, 196, .13);
+}
+.ic-more-track {
+  flex: 1;
+  min-width: 60px;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--cal-line-2);
+  overflow: hidden;
+}
+.ic-more-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--cal-accent);
+  transition: width .25s ease;
+}
+
+/* 展开到一定条数后改为框内滚动，避免把整页撑长 */
+.ic-list.is-scrollable {
+  max-height: min(62vh, 720px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 6px;
+}
+/* 滚动时日期头吸顶，滚到哪一天一眼可见 */
+.ic-list.is-scrollable .cal-day {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--cal-surface);
+  backdrop-filter: blur(8px);
+}
+/* 框内滚动时列标题冗余（每行自带「今值/预期/前值」标签），让位给日期吸顶 */
+.ic-list.is-scrollable > .cal-head { display: none; }
+
+/* 滚动提示条 */
+.ic-scroll-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+  padding: 7px 12px;
+  border-radius: 8px;
+  background: var(--cal-surface-2);
+  font-size: 11px;
+  color: var(--cal-text-3);
+}
+.ic-scroll-bar button {
+  appearance: none;
+  flex: none;
+  border: 1px solid var(--cal-line-2);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--cal-text-2);
+  padding: 4px 10px;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.ic-scroll-bar button:hover { border-color: var(--cal-accent); color: var(--cal-text); }
+
+@media (max-width: 720px) {
+  .investment-calendar-card .ic-list-more { justify-content: flex-start; }
+  .ic-more-progress { width: 100%; min-width: 0; }
+}
+
+/* ── 说明按钮「!」（2026-09-20 用户反馈）──────────────────────────────────
+   原来 15px + 主题色描边太抢眼：它只是备注入口，不该跟内容抢注意力。
+   现在 12px、默认 45% 不透明度，指针移上去或键盘聚焦时才恢复清晰。
+   光标保持箭头（cursor: default）—— 问号光标传达的是「点我求助」，
+   而这里既不是链接也不是帮助入口，主流产品的 tooltip 也不用问号光标。 */
+:is(
+  .help-dot,
+  .metric .help-dot,
+  .change-card .help-dot,
+  .card h2 .help-dot,
+  .levels .help-dot,
+  .toolbar .help-dot,
+  .signal-projection .help-dot,
+  .microstructure-item > .help-dot,
+  .microstructure-item > div > span .help-dot,
+  #okxMicrostructureCard .help-dot,
+  #okxMicrostructureCard .microstructure-item > div > span .help-dot
+) {
+  width: 12px !important;
+  height: 12px !important;
+  min-width: 12px !important;
+  /* 别处有 min-height: 16px 的规则；不写这一条，高度会被它撑回去。 */
+  min-height: 12px !important;
+  /* 比例保险：将来哪条规则只改了宽或只改了高，也仍然是正圆而不是椭圆。 */
+  aspect-ratio: 1 / 1 !important;
+  border-radius: 50% !important;
+  /* 居中三件套：flex + 双向居中 + 行高 1，「!」不会贴到圆底。 */
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  padding: 0 !important;
+  font-size: 9px !important;
+  line-height: 1 !important;
+  /* 与标题文字的中心线齐平。原来这里是 vertical-align: 0（＝贴基线），18px 行高的
+     标题上图标中心会比文字中心**低约 2.5px**。`middle` 只能补回一半（还差 1.7px），
+     所以直接按行基准上抬 2.5px —— 这个值是用 Range 量「文字中心线 vs 图标中心」
+     校准出来的；flex 标题里的图标不受 vertical-align 影响，仍然走父级居中。 */
+  vertical-align: 2.5px !important;
+  border-color: var(--border-subtle) !important;
+  color: var(--text-muted) !important;
+  opacity: 0.45 !important;
+  /* 卡片标题多是 flex 行，不锁住的话按钮会被 align-items: stretch 拉伸 ——
+     表现就是「宽 12 / 高 16」那种竖椭圆。 */
+  align-self: center !important;
+  flex: none !important;
+  cursor: default !important;
+  transition:
+    opacity 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease,
+    background-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+/* 小字号标签（指标明细等 12px / 行高 14.4px）：同一套抬升量会过头 ——
+   它们只需要抬 1px。用 :is() 里带 id 的那条把整体特异度顶到 (1,3,2)，
+   否则压不过上面那条基础块。 */
+:is(
+  .metrics .metric span .help-dot,
+  .signal-projection strong .help-dot,
+  .pattern-analysis-card .help-dot,
+  #okxMicrostructureCard .microstructure-item > div > span .help-dot
+) {
+  vertical-align: 1px !important;
+}
+/* 悬停/聚焦：先把圈「点亮」给即时反馈（不延迟），停住 260ms 才弹说明 ——
+   反馈与触发分开，鼠标扫过时也有交代，不会显得没反应。
+   ⚠️ 选择器必须用 :is(…) 把整套列表带上：基础块里的 `.card h2 .help-dot` 特异度
+   是 (0,2,1)，单写 `.help-dot:hover` (0,2,0) 压不过它，高亮会**静默失效**。 */
+:is(.help-dot, .metric .help-dot, .change-card .help-dot, .card h2 .help-dot, .levels .help-dot, .toolbar .help-dot, .signal-projection .help-dot, .microstructure-item > .help-dot, .microstructure-item > div > span .help-dot, #okxMicrostructureCard .help-dot, #okxMicrostructureCard .microstructure-item > div > span .help-dot):hover,
+:is(.help-dot, .metric .help-dot, .change-card .help-dot, .card h2 .help-dot, .levels .help-dot, .toolbar .help-dot, .signal-projection .help-dot, .microstructure-item > .help-dot, .microstructure-item > div > span .help-dot, #okxMicrostructureCard .help-dot, #okxMicrostructureCard .microstructure-item > div > span .help-dot):focus-visible {
+  opacity: 1 !important;
+  border-color: var(--accent-cyan) !important;
+  color: var(--accent-cyan) !important;
+  background-color: rgba(75, 159, 255, 0.16) !important;
+  box-shadow:
+    0 0 0 3px rgba(75, 159, 255, 0.14),
+    0 0 10px rgba(75, 159, 255, 0.32) !important;
+}
+
+/* ══ 多币种：模式开关 + 币种切换器 ══════════════════════════════════════════
+   只新增两类元素，不改动任何既有规则，因此比特币模式下的观感与之前完全一致。 */
+.controls #coinModeToggle {
+  display: inline-flex;
+  align-items: stretch;
+  gap: 1px;
+  padding: 2px;
+  border: 1px solid var(--border-subtle, #2a313b);
+  background: var(--bg-surface-2, #0d1524);
+  border-radius: 999px;
+  white-space: nowrap;
+  line-height: 1;
+}
+.controls #coinModeToggle button {
+  flex: 1 1 auto;
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary, #9aa4b2);
+  font-size: 12px;
+  line-height: 1;
+  padding: 5px 11px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background .15s ease, color .15s ease, box-shadow .15s ease, transform .15s ease;
+}
+.controls #coinModeToggle button:hover {
+  color: var(--text-primary, #e6edf3);
+  transform: translateY(-0.5px);
+}
+.controls #coinModeToggle button.is-active {
+  background: var(--bg-elevated, #19243a);
+  color: var(--text-primary, #e6edf3);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .18), 0 0 0 1px rgba(255, 255, 255, .06) inset;
+}
+html[data-theme="light"] .controls #coinModeToggle button.is-active {
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .12), 0 0 0 1px rgba(0, 0, 0, .04) inset;
+}
+html[data-theme="light"] .controls #coinModeToggle {
+  background: #eef2f6;
+  border-color: #d6dde5;
+}
+html[data-theme="light"] .controls #coinModeToggle button { color: #56616e; }
+html[data-theme="light"] .controls #coinModeToggle button:hover { color: #1a1d23; }
+.coin-switcher {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 2px 0 10px;
+}
+.coin-switcher[hidden] { display: none; }
+.coin-switcher .coin-chip {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 7px 13px;
+  border-radius: 10px;
+  border: 1px solid var(--border-subtle, #2a313b);
+  background: var(--bg-surface, #161a20);
+  color: var(--text-secondary, #9aa4b2);
+  font: inherit;
+  cursor: pointer;
+  transition: border-color .15s ease, background .15s ease, color .15s ease, transform .15s ease;
+}
+.coin-switcher .coin-chip:hover {
+  border-color: var(--border-strong, #3a434f);
+  transform: translateY(-1px);
+}
+.coin-switcher .coin-chip .coin-chip-mark {
+  font-weight: 700;
+  font-size: 14px;
+  letter-spacing: .04em;
+  color: var(--text-primary, #e6edf3);
+}
+.coin-switcher .coin-chip .coin-chip-name {
+  font-size: 11px;
+  color: var(--text-muted, #5b6573);
+}
+.coin-switcher .coin-chip.is-active {
+  border-color: var(--accent-cyan, #22d3ee);
+  background: color-mix(in srgb, var(--accent-cyan, #22d3ee) 16%, var(--bg-surface, #161a20));
+  color: var(--accent-cyan, #22d3ee);
+}
+.coin-switcher .coin-chip.is-active .coin-chip-mark { color: var(--accent-cyan, #22d3ee); }
+.coin-switcher .coin-chip.is-active .coin-chip-name { color: var(--accent-cyan, #22d3ee); opacity: .8; }
+@media (max-width: 640px) {
+  .coin-switcher { gap: 6px; }
+  .coin-switcher .coin-chip { padding: 6px 10px; }
+  .coin-switcher .coin-chip .coin-chip-name { display: none; }
 }

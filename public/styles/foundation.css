@@ -207,7 +207,7 @@ body {
   justify-self: end;
   margin-left: 0 !important;
   padding: 2px 4px;
-  border: 1px solid rgba(99, 136, 185, 0.18);
+  border: 1px solid rgba(99, 136, 185, 0.26);
   border-radius: 8px;
   background: rgba(9, 23, 43, 0.5);
 }
@@ -223,8 +223,8 @@ body {
   width: max-content !important;
   min-height: 28px;
   padding: 1px 4px;
-  border: 1px solid rgba(99, 136, 185, 0.13);
-  border-radius: 7px;
+  border: 1px solid rgba(99, 136, 185, 0.26);
+  border-radius: 8px;
   background: transparent;
 }
 .toolbar .pan-tools #panLabel { min-width: 112px; font-size: 9px; }
@@ -257,12 +257,19 @@ body {
   .toolbar .chart-display-controls { order: 3; }
   .toolbar #panTools { order: 4; }
   .toolbar .zoom-tools { order: 5; }
+  .toolbar .thumb-tools { order: 6; }
+  /* 一行分成左右两组：左侧是四个控制（K 线周期 / 查看范围 / 图表 / 横向移动），
+     右侧是缩放组 + 悬浮缩略图。右对齐支点必须挂在右侧组的**首元素**（缩放组）上，
+     组内两块才会紧挨着一起贴右；挂到组内靠后的元素上，会在组内撑开一个洞。 */
+  .toolbar .pan-tools { margin-left: 0 !important; }
   .toolbar .zoom-tools { margin-left: auto !important; }
+  .toolbar .thumb-tools { margin-left: 0 !important; }
 }
 .toolbar .control-trigger,
 .toolbar .chart-display-controls .control-trigger,
 .toolbar .zoom-tools,
-.toolbar .pan-tools {
+.toolbar .pan-tools,
+.toolbar .thumb-tools {
   height: 28px;
   min-height: 28px;
 }
@@ -275,14 +282,27 @@ body {
 .toolbar .zoom-tools button,
 .toolbar .zoom-tools span,
 .toolbar .pan-tools button,
-.toolbar .pan-tools #panLabel { font-size: 12px !important; }
+.toolbar .pan-tools #panLabel,
+.toolbar .thumb-tools button { font-size: 12px !important; }
 .toolbar .zoom-tools { padding: 0 3px; }
 .toolbar .zoom-tools button,
-.toolbar .pan-tools button { height: 26px; min-width: 24px; padding: 0 6px !important; }
-.toolbar .pan-tools { display: inline-flex; align-items: center; gap: 2px; height: 40px; padding: 0 3px; }
+.toolbar .pan-tools button,
+.toolbar .thumb-tools button { height: 26px; min-width: 24px; padding: 0 6px !important; }
+.toolbar .pan-tools { display: inline-flex; align-items: center; gap: 2px; height: 28px; padding: 0 3px; }
 .toolbar .pan-tools #panLabel { min-width: 112px; white-space: nowrap; }
 .toolbar .pan-tools #panLabel i { font-style: normal; }
 .toolbar .pan-tools #panLabel small { display: block; font-size: 10px; }
+/* v2.11.28：缩略图开关从「重置」旁独立出来，自带边框自成一颗按钮。
+   宽屏下由 861px 段的 order + margin-left:auto 把它安置在最右（见上文），
+   缩放组因此回靠中间那组控件，两颗按钮之间的余量即自然形成的小间距。 */
+.toolbar .thumb-tools {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 3px;
+  border: 1px solid rgba(99, 136, 185, 0.26);
+  border-radius: 8px;
+  background: transparent;
+}
 
 /* The legend belongs to the chart footer, following the volume pane. */
 #chartLegend {
@@ -313,7 +333,33 @@ body {
   #chartLegendRow { flex-wrap: wrap; align-items: flex-start; }
   #chartLegendRow #chartLegend { margin-left: 0; }
 }
-.chart-box { height: 580px; }
+/* v2.11.28：图例区整排上提 —— 工具栏与图例之间、两行图例之间的留白一起收紧，
+   省下来的高度直接补给图表主体（.chart-box 由 580px 提到 600px）。 */
+.toolbar { margin-bottom: 6px !important; }
+.chart-legend-strip {
+  padding: 2px 0 !important;
+  margin-bottom: 4px !important;
+  gap: 8px 18px !important;
+}
+
+/* v2.11.28：卡片内所有内容与 K 线图表主体左右对齐，共用同一条边界。
+   图表本来用负外边距铺到卡片内边距之外，其余内容各留各的内缩（工具栏 10px、
+   图例区 2px），从上往下看左边就一节一节地参差。现在一起走这条规则。
+   外扩量取 -10px（原先 -16px 会贴死卡片边框，只剩 5px 余量），
+   于是左右各留出约 11px 的空隙；想再松/再紧只改这一处即可。 */
+.chart-box,
+.chart-column > .card > .toolbar,
+.chart-column > .card > .chart-legend-strip,
+.chart-column > .card > .chart-caption,
+.chart-column > .card > .selection-stats {
+  margin-left: -10px !important;
+  margin-right: -10px !important;
+}
+.chart-column > .card > .toolbar {
+  padding-left: 0 !important;
+  padding-right: 0 !important;
+}
+.chart-box { height: 600px; }
 #chartVolumeTooltip {
   position: absolute;
   z-index: 4;

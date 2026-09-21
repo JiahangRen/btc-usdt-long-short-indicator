@@ -1,5 +1,114 @@
 import { emaSeriesPadded as ema, rsiSeriesPadded as rsi, atrSeriesPadded as atr } from '/shared/indicators.mjs';
+import { COIN_KEYS, COINS, BASE_COIN, normalizeCoin } from '/shared/coins.mjs';
 const $ = (id) => document.getElementById(id);
+
+/* ══ 币种上下文 / Coin context ═══════════════════════════════════════════════
+ * 两种模式：
+ *   bitcoin —— 比特币模式。页面与多币种改造之前**完全一致**，币种恒为 BTC。
+ *   multi   —— 多币种模式。可在 BTC / ETH / ZEC / BNB 之间切换，
+ *              切换后整页（行情、图表、信号、微观结构、研究预测、宏观）都基于该币种。
+ * 模式与币种都记在本机 localStorage，刷新后保持。
+ *
+ * Two modes: `bitcoin` (identical to the pre-multi-coin page, coin pinned to BTC)
+ * and `multi` (switch between BTC/ETH/ZEC/BNB; the whole page follows the choice).
+ * Both the mode and the selected coin persist in localStorage.
+ */
+const COIN_MODE_KEY = 'btc_coin_mode_v1';
+const COIN_SYMBOL_KEY = 'btc_coin_symbol_v1';
+let coinMode = localStorage.getItem(COIN_MODE_KEY) === 'multi' ? 'multi' : 'bitcoin';
+let selectedCoin = normalizeCoin(localStorage.getItem(COIN_SYMBOL_KEY));
+const isMultiCoinMode = () => coinMode === 'multi';
+/** 当前真正生效的币种：比特币模式下恒为 BTC。所有接口请求都用它。 */
+const activeCoin = () => (isMultiCoinMode() ? selectedCoin : BASE_COIN);
+const coinMetaOf = (coin = activeCoin()) => COINS[normalizeCoin(coin)] || COINS[BASE_COIN];
+/** 「BTC / USDT」这类展示用交易对。 */
+const coinPair = (coin = activeCoin()) => `${normalizeCoin(coin)} / USDT`;
+/** 当前币种的中/英文全名（以太坊 / Ethereum）。 */
+// 这里直接读 localStorage 而不复用 uiLang：uiLang 在本文件中声明得更靠后，
+// 模块初始化早期若走到这里会撞上暂时性死区（TDZ），整页板块会消失。
+const coinNameOf = (coin = activeCoin()) => {
+  const name = coinMetaOf(coin).name;
+  return (localStorage.getItem('btc_lang') || 'zh') === 'en' ? name.en : name.zh;
+};
+const coinLabel = (coin = activeCoin()) => normalizeCoin(coin);
+/** 多币种本地存储键的币种后缀：BTC 用旧键（无后缀），其余币种 "_<COIN>"。
+ *  放在文件最前，任何按币种隔离的 localStorage 键都复用它（避免 TDZ）。 */
+const coinStorageSuffix = () => {
+  const coin = activeCoin();
+  return coin === BASE_COIN ? "" : "_" + coin;
+};
+// 与币种强相关的接口：请求时自动带上 symbol，服务端据此切换缓存 / SQLite / 合约。
+// 账户、登录、语音、AI 配置等不属于行情，不带。
+const COIN_SCOPED_API = ['/api/market', '/api/quote', '/api/status', '/api/forecast-history',
+  '/api/research-outlook', '/api/research-backfill', '/api/research-ablation',
+  '/api/research-candidates', '/api/funding-rates', '/api/macro-outcomes',
+  '/api/correlation-history', '/api/news', '/api/ai/'];
+function withCoin(url) {
+  if (typeof url !== 'string' || url.indexOf('/api/') < 0) return url;
+  const path = url.split('?')[0].split('#')[0];
+  if (!COIN_SCOPED_API.some((prefix) => path === prefix || path.startsWith(prefix + '/'))) return url;
+  if (/[?&]symbol=/.test(url)) return url;
+  return url + (url.indexOf('?') >= 0 ? '&' : '?') + 'symbol=' + activeCoin();
+}
+/* v2.11.80：前端请求调度器。同域仅 6 条 HTTP 连接，首屏曾并发 ~73 个 /api/ 请求，
+   把连接打满、实时价 quote 排队 20+ 秒。这里在 fetch 层（模块内 fetch 标识符 + window.fetch）
+   统一加并发限制（6）+ 优先级队列：实时价 quote 最高优先插队，语音/AI 外部依赖最低优先，
+   其余默认。非 /api/ 请求（静态资源、外部 API）原样放行。 */
+const _origFetch = window.fetch.bind(window);
+const _apiQueue = (() => {
+  const MAX = 6, queue = [];
+  let running = 0;
+  function pump() {
+    if (running >= MAX) return;
+    let bi = -1;
+    for (let i = 0; i < queue.length; i++) if (bi < 0 || queue[i].p > queue[bi].p) bi = i;
+    if (bi < 0) return;
+    const job = queue.splice(bi, 1)[0];
+    running++;
+    Promise.resolve().then(() =>
+      job.fn().then(job.res, job.rej).finally(() => { running--; pump(); })
+    );
+  }
+  return { add(fn, p) { return new Promise((res, rej) => { queue.push({ fn, p, res, rej }); pump(); }); } };
+})();
+function _apiPriority(u) {
+  if (u.indexOf('/api/quote') >= 0) return 3;
+  if (u.indexOf('/api/voice') >= 0 || u.indexOf('/api/ai/') >= 0) return 0;
+  return 1;
+}
+function _wrappedFetch(url, opts) {
+  const target = withCoin(url);
+  const u = typeof target === 'string' ? target : (target && target.url) || '';
+  if (u.indexOf('/api/') >= 0) return _apiQueue.add(() => _origFetch(target, opts), _apiPriority(u));
+  return _origFetch(target, opts);
+}
+const fetch = _wrappedFetch;
+window.fetch = _wrappedFetch;
+/* v2.11.83：脚本按需/空闲加载器 + 空闲调度。
+   ai-chat.js(144KB) 与 html2canvas.min.js(196KB) 与首屏无关，但此前作为 defer 脚本
+   仍会在 DCL 前下载并解析执行，占着主线程。这里把它们移出首屏关键路径：
+   先排队 html2canvas（AI 长截图依赖它），随后加载 ai-chat —— 后者是自启动 IIFE，
+   尾部 `readyState === "loading" ? DOMContentLoaded : boot()`，
+   所以即使延迟插入到已就绪的 DOM，它也会走 else 分支正常启动。 */
+const __loadedScripts = new Set();
+function loadScriptOnce(src) {
+  if (__loadedScripts.has(src)) return Promise.resolve(true);
+  __loadedScripts.add(src);
+  return new Promise((resolve, reject) => {
+    const el = document.createElement('script');
+    el.src = src;
+    el.async = true;
+    el.onload = () => resolve(true);
+    el.onerror = () => { __loadedScripts.delete(src); reject(new Error('script load failed: ' + src)); };
+    document.head.appendChild(el);
+  });
+}
+window.loadJsOnce = loadScriptOnce;
+const whenIdle = (fn) => (window.requestIdleCallback ? window.requestIdleCallback(fn, { timeout: 3000 }) : window.setTimeout(fn, 1));
+whenIdle(() => {
+  loadScriptOnce('/html2canvas.min.js?v=1').catch(() => {});
+  loadScriptOnce('/ai-chat.js?v=2.12.1').catch(() => {});
+});
 /* 极值辅助：用循环代替 Math.max(...arr) / Math.min(...arr) 的展开写法。
    当 arr 很大时，spread 会把每个元素当作函数实参展开，可能触发调用栈溢出
    （RangeError: maximum call stack size exceeded）。空数组行为与 Math 一致：
@@ -22,9 +131,9 @@ const DAILY_HISTORY_MAX_RETRIES = 3;             // 日线历史拉取失败后�
 const DAILY_HISTORY_RETRY_DELAY_MS = 4_000;      // 日线历史重试间隔（4s，避开上游限频）
 /* Use the application's dialog style instead of browser-native prompts. */
 function showAppDialog({
-  title = "提示",
+  title = tx("提示","Tip"),
   message = "",
-  confirmText = "我知道了",
+  confirmText = tx("我知道了","Got it"),
   cancelText = "",
   onConfirm,
   onCancel,
@@ -328,7 +437,7 @@ async function loadCurrent() {
   if (state.loading) return;
   state.loading = true;
   buttons();
-  $("connection").textContent = "正在加载当前图表…";
+  $("connection").textContent = tx("正在加载当前图表…","Loading the current chart…");
   try {
     const q = new URLSearchParams({
       interval: state.interval,
@@ -350,14 +459,14 @@ async function loadCurrent() {
     renderAnalysis();
     diagnostics(data);
     $("coverage").textContent =
-      `图表覆盖：${time(data.candles[0].time)} 至 ${time(data.candles.at(-1).time)} · ${data.candles.length} 根 · 仅此范围参与回测`;
+      `${tx("图表覆盖：","Chart coverage:")}${time(data.candles[0].time)}${tx(" 至 "," to ")}${time(data.candles.at(-1).time)} · ${data.candles.length}${tx(" 根 · 仅此范围参与回测"," bars · only this range is used for backtest")}`;
     $("connection").textContent = data.cached
-      ? "已显示缓存数据"
-      : "实时 REST 数据已更新";
+      ? tx("已显示缓存数据","Cached data shown")
+      : tx("实时 REST 数据已更新","Live REST data updated");
     $("freshness").textContent =
       `${new Date(data.fetchedAt).toLocaleTimeString("zh-CN")}`;
   } catch (e) {
-    $("connection").textContent = "行情暂不可用：保留最近成功数据";
+    $("connection").textContent = tx("行情暂不可用：保留最近成功数据","Market unavailable: keeping the last successful data");
     $("chartError").hidden = false;
     $("chartError").textContent =
       `无法获取数据。${e.error || "请检查本机网络或代理。"}\n${Object.entries(
@@ -370,35 +479,24 @@ async function loadCurrent() {
     state.loading = false;
   }
 }
-async function resonance() {
-  const btn = $("loadResonance");
-  btn.disabled = true;
-  btn.textContent = "计算中…";
-  $("resonance").textContent = "正在按需请求 15m、1h、4h、1d…";
-  try {
-    const arr = await Promise.all(
-      ["15m", "1h", "4h", "1d"].map(async (interval) => {
-        const r = await fetch(
-          "/api/market?" +
-            new URLSearchParams({ interval, limit: 200, source: state.source }),
-        );
-        const x = await r.json();
-        if (!r.ok) throw new Error(`${interval}: ${x.error}`);
-        const m = metrics(x.candles);
-        return `${interval}：${classification(m.score)[0]} ${m.score > 0 ? "+" : ""}${m.score}（${x.source}）`;
-      }),
-    );
-    $("resonance").textContent = arr.join("　|　");
-  } catch (e) {
-    $("resonance").textContent = "共振计算失败：" + e.message;
-  } finally {
-    btn.disabled = false;
-    btn.textContent = "重新计算共振";
-  }
-}
-let quoteLoading = false;
+// 旧版共振（按全周期并排展示、无一致性结论）已移除，统一由下方加权一致性实现替代。
+/* 实时报价轮询间隔：上游 OKX 流约每 100ms 推一次，本地取 250ms（4 次/秒）
+   —— 既跟得上报价变化，也不至于把渲染压过载。
+   Live-quote polling cadence: the OKX stream ticks about every 100ms, so 250ms
+   (4/s) keeps up with it without over-driving the render path. */
+const refreshIntervalMs = 2000;
+/* 报价请求去重：同一时刻只允许一条在飞；若某个 tick 因上一次尚未返回而被跳过，
+   记一个 pending，等请求落地后立刻补拉一次，避免「隔一拍才刷新」。
+   Only one quote request may be in flight; a tick skipped because of that sets a
+   pending flag so the value is fetched again as soon as the request lands. */
+let quoteLoading = false,
+  quotePending = false;
 async function loadQuote() {
-  if (quoteLoading || !state.ticker) return;
+  if (!state.ticker) return;
+  if (quoteLoading) {
+    quotePending = true;
+    return;
+  }
   quoteLoading = true;
   const started = performance.now();
   try {
@@ -423,13 +521,17 @@ async function loadQuote() {
   } catch {
   } finally {
     quoteLoading = false;
+    /* 有被跳过的 tick 就立刻补一次，保证刷新节奏不出现空档。 */
+    if (quotePending) {
+      quotePending = false;
+      setTimeout(loadQuote, 0);
+    }
   }
 }
 $("source").onchange = (e) => {
   state.source = e.target.value;
   loadCurrent();
 };
-$("loadResonance").onclick = resonance;
 buttons();
 setTimeout(() => loadCurrent(), 0);
 setInterval(() => {
@@ -438,7 +540,14 @@ setInterval(() => {
 setInterval(() => {
   if (!["5s", "10s", "30s"].includes(state.interval)) loadCurrent();
 }, 10_000);
-setInterval(() => loadQuote(), 1_000);
+setInterval(() => loadQuote(), refreshIntervalMs);
+/* 页面从后台切回时立即补一次：后台标签的定时器会被浏览器降频，切回来若干等
+   下一个 tick，看起来就像「卡住不刷新」。
+   Refresh immediately when the tab becomes visible again — background tabs are
+   throttled by the browser, so waiting for the next tick looks like a stall. */
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) loadQuote();
+});
 
 /* 图表与信号增强展示 / Enhanced chart and signal presentation */
 let hoverIndex = null,
@@ -569,11 +678,14 @@ function visibleCandles() {
   changes.className = "card change-card chart-periods";
   changes.id = "periodChangeCard";
   changes.innerHTML = '<h2>周期涨幅</h2><div id="changeTags"></div>';
-  // 周期涨幅放在主 K 线卡片内，紧跟 OKX 微观结构卡片，避免被右侧 side-stack 高度推下去。
+  // v2.10.56：K 线图、OKX 微观结构、周期涨幅拆为左列三张平级卡片，
+  // 不再嵌套在同一个大卡片内。.chart-column 纵向排列并提供卡片间距。
   // Keep period returns inside the main chart column, directly after the OKX microstructure card,
   // so the right column's height never creates an empty gap in the chart column.
-  chartCard.append(changes);
-  layout.append(chartCard, side);
+  const chartColumn = document.createElement("section");
+  chartColumn.className = "chart-column";
+  chartColumn.append(chartCard, changes);
+  layout.append(chartColumn, side);
   main.insertBefore(layout, grid);
   grid.remove();
   const title = main.querySelector("header h1"),
@@ -610,9 +722,15 @@ function visibleCandles() {
       // 桌面端：宏观与情绪固定在右侧 side-stack 的 indicatorDetailsCard 下方。
       if (sentiment && !side.contains(sentiment)) side.append(sentiment);
       layout.classList.remove("mobile-reading-layout");
-      layout.replaceChildren(chart, side);
-      // 周期涨幅固定在主 K 线卡片内（紧跟 OKX 微观结构），不让右列高度把它推下去。
-      if (changes && !chart.contains(changes)) chart.append(changes);
+      // 桌面端左列 = K 线卡 + OKX 微观结构卡 + 周期涨幅卡 三张平级卡片。
+      let column = layout.querySelector(".chart-column");
+      if (!column) {
+        column = document.createElement("section");
+        column.className = "chart-column";
+      }
+      const okx = $("okxMicrostructureCard");
+      column.replaceChildren(chart, ...(okx ? [okx] : []), changes);
+      layout.replaceChildren(column, side);
     }
     draw();
   }
@@ -878,7 +996,7 @@ async function loadCorrelation() {
   const status = $("correlationStatus"),
     out = $("correlationOutput");
   if (!out) return;
-  status.textContent = "正在对齐 BTC、SPY、QQQ 的共同交易日并训练…";
+  status.textContent = "正在对齐 " + coinLabel() + "、SPY、QQQ 的共同交易日并训练…";
   try {
     const r = await fetch("/api/correlation-history");
     const d = await r.json();
@@ -938,14 +1056,9 @@ async function loadCorrelation() {
   }
 }
 (() => {
-  // 创建美股联动卡片，并追加到主内容区末尾，避免依赖已移除的回测锚点。
-  const main = document.querySelector("main");
-  const card = document.createElement("section");
-  card.className = "card correlation-card";
-  card.innerHTML =
-    '<div class="forecast-head"><div><h2>BTC × 美股联动分析</h2><p id="correlationStatus">等待市场数据…</p></div><button id="refreshCorrelation">更新分析</button></div><div id="indexTickerCards" class="index-ticker-cards"></div><div id="correlationOutput" class="correlation-output"></div>';
-  main.append(card);
-  $("refreshCorrelation").onclick = loadCorrelation;
+  // v2.11.0：「BTC × 美股联动分析」不再创建独立卡片，整体并入
+  // 「宏观环境与跨市场联动」卡（fedMonitorCard）底部的联动面板。
+  // loadCorrelation 会把结果写入 correlationState，由 renderFedMonitor 渲染时回填。
   setTimeout(loadCorrelation, 950);
 })();
 (() => {
@@ -960,8 +1073,9 @@ async function loadCorrelation() {
   // updates the summary after boot when the user changes the interface language.
   details.innerHTML = "<summary>高杠杆强平缓冲参考</summary>";
   details.append(card);
-  const anchor = document.querySelector(".correlation-card");
-  anchor.after(details);
+  // v2.11.0：联动卡已并入 fedMonitorCard，这里直接挂到 main 末尾即可，
+  // 后续卡片会按各自锚点插入，阅读顺序由渲染函数维护。
+  document.querySelector("main")?.append(details);
   const select = $("leverageExchange");
   select.value = leverageExchange;
   select.onchange = () => {
@@ -978,7 +1092,7 @@ const I18N = {
     kline: "K 线周期",
     range: "查看范围",
     forecast: "多周期概率预测",
-    correlation: "BTC × 美股联动分析",
+    correlation: "BTC × 美股联动",
     theme: ["自动", "浅色", "深色"],
     fullscreen: "全屏",
     exitFullscreen: "退出全屏",
@@ -1067,10 +1181,12 @@ function applyLanguage() {
     .forEach((e, i) => (e.textContent = i ? x.range : x.kline));
   const f = document.querySelector(".forecast-card h2");
   if (f) f.textContent = x.forecast;
-  const c = document.querySelector(".correlation-card h2");
+  const c = document.querySelector(".fed-corr-panel h3");
   if (c) c.textContent = x.correlation;
   const b = $("langToggle");
   if (b) b.textContent = uiLang === "zh" ? "EN" : "中文";
+  const apiC = $("apiCenterToggle");
+  if (apiC) apiC.textContent = tx("API 接入中心", "API Center");
   applyTheme();
   syncFullscreenButton();
 }
@@ -1143,6 +1259,63 @@ async function loadUsEquityStrip() {
   }
 }
 var exchangeStripMarkup = "";
+// tx 必须在此处（首个 IIFE 之前）就绪：applyLanguage() 在 IIFE 加载期被调用且内部用到 tx，
+// 若按旧位置定义在 IIFE 之后，加载期触发 TDZ（Cannot access 'tx' before initialization），
+// 整个模块求值中断，后续顶层绑定（calendarEscape 等）全部处于未初始化状态。
+const tx = (zh, en) => (uiLang === "zh" ? zh : en);
+/* 多周期共振卡片「!」里的说明文案。放在这里（而不是就地写在安装函数里），
+   是因为同一个 help-dot 还挂着「数据源与更新频率」的追加写入，两边要共用一个真源。 */
+const RESONANCE_HELP = {
+  zh:
+    "<b>多周期共振 · 使用说明</b><br><br>" +
+    "自动聚合 15m / 1h / 4h / 1d / 1w 五个周期的方向一致性：把五个周期的规则信号方向放在一起比对，权重依次为 0.05 / 0.1 / 0.2 / 0.3 / 0.35 —— 周期越大，分量越重。<br><br>" +
+    "<b>怎么读</b><br>" +
+    "· 标题旁那句几个字的短语 = 一句话结论（全线偏多 / 多头占优 / 多空分歧 …）。<br>" +
+    "· 短语左边的徽标 = 更细的结论：强共振（5/5 同向）＞多数（4/5）＞单边待确认（只有一侧有方向、还没共振）＞多空分歧（两边都有人），括号里是同向的周期数。<br>" +
+    "· 徽标里的「强度 0–100」= 加权后的方向力度，越高越「一边倒」。<br>" +
+    "· 每个周期一个标签（按周期从小到大排）：周期 → 方向与评分（±100）；与主流方向相反的会加红色虚线框，标成冲突周期。<br><br>" +
+    "<b>怎么用</b><br>" +
+    "· 强共振且强度高：顺大势交易，规则信号的背景更可靠，但入场点与止损仍要单独判断。<br>" +
+    "· 出现分歧或冲突周期：大小周期打架，多为回调或震荡，宜减仓或等它重新同向。<br>" +
+    "· 优先做与日线、周线同向的交易；这两个大周期与你的方向相反时，短线胜率通常更差。<br><br>" +
+    "<b>自动计算</b>：打开页面自动算一次，之后按周期自动刷新 —— 15m 约每分钟、1h 约 5 分钟、4h 约 15 分钟、1d 约 1 小时、1w 约 6 小时各重算一次；点「计算共振」可立即强制全部重算。<br><br>" +
+    "<b>注意</b>：该结论只描述技术面是否同向，不含基本面与资金面，不构成投资建议。",
+  en:
+    "<b>Multi-timeframe resonance · how to use</b><br><br>" +
+    "Auto-aggregates direction agreement across 15m / 1h / 4h / 1d / 1w: it compares the rule-signal direction on all five, weighted 0.05 / 0.1 / 0.2 / 0.3 / 0.35 — the higher the timeframe, the more it counts.<br><br>" +
+    "<b>Reading it</b><br>" +
+    "· The few-word phrase next to the title = the one-line verdict (All bullish / Bulls lead / Diverged …).<br>" +
+    "· The badge left of it is the finer verdict: strong (5/5 agree) > majority (4/5) > one-sided but still pending > diverged (both sides present); the fraction is how many agree.<br>" +
+    "· \"strength 0–100\" = weighted conviction; higher means more one-sided.<br>" +
+    "· Each chip is one timeframe, ordered shortest → longest: interval → direction and score (±100); a red dashed box marks a timeframe fighting the dominant direction.<br><br>" +
+    "<b>Using it</b><br>" +
+    "· Strong resonance with high strength: trade with the dominant side — better context, but entry and stop still need their own check.<br>" +
+    "· Diverged, or a conflicting chip: timeframes disagree, usually a pullback or a range — trim, or wait until they realign.<br>" +
+    "· Prefer trades that agree with the daily and weekly timeframes; short-term win rate is usually worse against them.<br><br>" +
+    "<b>Auto refresh</b>: computed once on page load, then refreshed per timeframe — roughly every minute (15m), 5 min (1h), 15 min (4h), 1 hour (1d) and 6 hours (1w). The button forces a full recalculation.<br><br>" +
+    "<b>Note</b>: this only describes whether the technical picture agrees; no fundamentals or flows, and not investment advice.",
+};
+/* 「周期涨幅」的说明。原先它和共振共用同一段文字（两张卡共用一个 help 文案），拆开各写各的。 */
+const PERIOD_RETURNS_HELP = {
+  zh: "周期涨幅展示 15 分钟到 1 年共 9 个周期的涨跌幅，用来判断当前这一波在更长时间尺度上是延续还是背离。",
+  en: "Period returns show the change over 9 horizons from 15m to 1y, so you can tell whether the current move continues or diverges on longer scales.",
+};
+/* 说明按钮有两个写入方：这里的卡片用法说明，和数据节奏安装器追加的「数据源与更新频率」。
+   安装器可能先一步建好按钮（addHelp 遇到已存在的按钮会直接跳过），所以这里每次都强制归位 ——
+   说明为正文，频率由安装器追加在其后（它读的基准就是 cadenceBaseTip）。 */
+function setCardHelpTip(selector, zh, en) {
+  document.querySelectorAll(selector).forEach((x) => {
+    addHelp(x, zh, en);
+    const dot = x.querySelector(".help-dot");
+    if (!dot) return;
+    dot.dataset.tip = uiLang === "zh" ? zh : en;
+    dot.dataset.cadenceBaseTip = dot.dataset.tip;
+  });
+}
+function syncCardHelpTips() {
+  setCardHelpTip(".optional h2", RESONANCE_HELP.zh, RESONANCE_HELP.en);
+  setCardHelpTip(".change-card h2", PERIOD_RETURNS_HELP.zh, PERIOD_RETURNS_HELP.en);
+}
 function renderExchangeStrip() {
   const host = $("exchangeMeta");
   if (host) host.innerHTML = exchangeStripMarkup;
@@ -1171,8 +1344,8 @@ function updateClocks() {
   const apiCenter = document.createElement("button");
   apiCenter.id = "apiCenterToggle";
   apiCenter.type = "button";
-  apiCenter.textContent = "API 接入中心";
-  apiCenter.title = "管理数据源 API 接入";
+  apiCenter.textContent = tx("API 接入中心","API Center");
+  apiCenter.title = tx("管理数据源 API 接入","Manage data-source API keys");
   controls.append(apiCenter, lang, fullscreen, theme);
   const apiCenterModal=document.createElement("div");
   apiCenterModal.id="apiCenterModal";
@@ -1180,8 +1353,8 @@ function updateClocks() {
   apiCenterModal.hidden=true;
   document.body.append(apiCenterModal);
   const apiCenterRequest=async(path, options={})=>{const response=await fetch(path,{...options,headers:{'content-type':'application/json',...(options.headers||{})}}),body=await response.json().catch(()=>({}));if(!response.ok)throw new Error(body.error||"请求失败");return body;};
-  const apiCenterFree=[['市场行情','OKX · Coinbase · Binance · Gate','无需填入'],['宏观日程','美联储 · BLS 日程 · 美国财政部 · EIA 发布时间 · CFTC','无需填入'],['加密与链上','mempool.space · Deribit 公共行情 · CoinLore · Alternative.me','无需填入'],['市场环境','Yahoo Finance（公开入口）','无需填入']];
-  const apiCenterOptional=[['coingecko','CoinGecko','加密市场总市值、BTC 占比','可以填入高级或升级版的 API key，如果不填，就默认使用已接入的免费版'],['eia','EIA','原油库存的完整实际值与历史数据','可填写免费 EIA API key；不填仍默认使用已接入的 EIA 发布时间日历'],['custom','自定义 HTTPS API','手动订阅的数据源地址与可选 API Key','仅接受 HTTPS 地址；地址和 Key 均以相同的服务端加密逻辑保存，不会回显']];
+  const apiCenterFree=()=>uiLang==='zh'?[['市场行情','OKX · Binance','无需填入'],['宏观日程','美联储 · BLS 日程 · 美国财政部 · EIA 发布时间 · CFTC','无需填入'],['加密与链上','mempool.space · Deribit 公共行情 · CoinLore · Alternative.me','无需填入'],['市场环境','Yahoo Finance（公开入口）','无需填入']]:[['Market quotes','OKX · Binance','No entry needed'],['Macro calendar','Federal Reserve · BLS schedule · US Treasury · EIA releases · CFTC','No entry needed'],['Crypto & on-chain','mempool.space · Deribit public quotes · CoinLore · Alternative.me','No entry needed'],['Market environment','Yahoo Finance (public)','No entry needed']];
+  const apiCenterOptional=()=>uiLang==='zh'?[['coingecko','CoinGecko','加密市场总市值、BTC 占比','可以填入高级或升级版的 API key，如果不填，就默认使用已接入的免费版'],['eia','EIA','原油库存的完整实际值与历史数据','可填写免费 EIA API key；不填仍默认使用已接入的 EIA 发布时间日历'],['custom','自定义 HTTPS API','手动订阅的数据源地址与可选 API Key','仅接受 HTTPS 地址；地址和 Key 均以相同的服务端加密逻辑保存，不会回显']]:[['coingecko','CoinGecko','Crypto market cap, BTC dominance','You can enter a premium or higher-tier API key; if left blank, the free version already connected is used'],['eia','EIA','Complete actual & historical crude inventory','Enter a free EIA API key; if blank, the connected EIA release calendar is used'],['custom','Custom HTTPS API','Manually subscribed data source URL and optional API key','Only HTTPS URLs accepted; both URL and key are saved with the same server-side encryption and never echoed back']];
   // 千问 mini 额度卡的渲染：复用 /api/ai/quota，单函数一处渲染全部字段。
   // Qwen mini quota renderer: reuses /api/ai/quota, a single function covers all fields.
   const renderApiQwenQuota=async(card)=>{
@@ -1191,7 +1364,7 @@ function updateClocks() {
     const meta=card.querySelector('.api-qwen-quota-meta');
     let payload=null;
     try { const res=await fetch('/api/ai/quota'); if(res.ok)payload=await res.json(); } catch {}
-    if(!payload||!payload.configured){ card.setAttribute('data-empty','true'); pct.textContent='—'; fill.style.width='0%'; meta.textContent='保存 Key 后再提问一次即可显示额度'; return; }
+    if(!payload||!payload.configured){ card.setAttribute('data-empty','true'); pct.textContent='—'; fill.style.width='0%'; meta.textContent=tx('保存 Key 后再提问一次即可显示额度','Ask once after saving the key to see quota'); return; }
     const remote=payload.remote,local=payload.local||{};
     // 千问 API 不返回实时额度响应头，本地按模型换算表估算 credits 消耗。
     // Qwen API does not surface live quota headers; we estimate from the model conversion table.
@@ -1209,7 +1382,7 @@ function updateClocks() {
       const limitNum=Number.isFinite(remote.limit)?remote.limit.toLocaleString():'—';
       const cd=local.countdownMs?(()=>{const ms=local.countdownMs,totalMin=Math.floor(ms/60000),d=Math.floor(totalMin/1440),h=Math.floor((totalMin%1440)/60);return d>0?d+'d '+h+'h':h>0?h+'h':Math.max(1,totalMin)+'m';})():null;
       const resetAt=remote.resetAt?(new Date(remote.resetAt)).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):null;
-      meta.innerHTML=`剩余 <b>${remote.remaining.toLocaleString()}</b> / ${limitNum}（${usedNum} 已用 · ${usedPct.toFixed(1)}%）${resetAt?` · 重置 ${resetAt}`:''}${cd?` · ${cd} 后`:''} · 累计 ${local.calls||0} 次 / ${(local.totalTokens||0).toLocaleString()} tokens`;
+      meta.innerHTML=`${tx('剩余','Remaining')} <b>${remote.remaining.toLocaleString()}</b> / ${limitNum}（${usedNum} ${tx('已用','used')} · ${usedPct.toFixed(1)}%）${resetAt?` · ${tx('重置','reset')} ${resetAt}`:''}${cd?` · ${cd} ${tx('后','later')}`:''} · ${tx('累计','cumulative')} ${local.calls||0} ${tx('次','times')} / ${(local.totalTokens||0).toLocaleString()} tokens`;
     } else if(local.calls){
       // 没有远程响应头，用本地估算显示。进度条按 Lite 套餐 2,500 credits 估算。
       // No remote headers: render the local estimate. The bar compares against the Lite plan's 2,500 credits.
@@ -1226,41 +1399,41 @@ function updateClocks() {
       }
       const cd=local.countdownMs?(()=>{const ms=local.countdownMs,totalMin=Math.floor(ms/60000),d=Math.floor(totalMin/1440),h=Math.floor((totalMin%1440)/60);return d>0?d+'d '+h+'h':h>0?h+'h':Math.max(1,totalMin)+'m';})():null;
       const resetTxt=local.periodEnd?(new Date(local.periodEnd)).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}):null;
-      meta.innerHTML=`估算已用 <b>${estCredits.toFixed(1)}</b> credits / ${estimateLimit}（本地估算 · Token Plan Lite 默认） · 累计 ${local.calls} 次 / ${(local.totalTokens||0).toLocaleString()} tokens${resetTxt?` · 重置 ${resetTxt}`:''}${cd?`（${cd}）`:''} · <span style="color:#ffcb69">精确剩余请到 Token Plan 控制台查看</span>`;
+      meta.innerHTML=`${tx('估算已用','Est. used')} <b>${estCredits.toFixed(1)}</b> credits / ${estimateLimit}（${tx('本地估算','local estimate')} · Token Plan Lite ${tx('默认','default')}） · ${tx('累计','cumulative')} ${local.calls} ${tx('次','times')} / ${(local.totalTokens||0).toLocaleString()} tokens${resetTxt?` · ${tx('重置','reset')} ${resetTxt}`:''}${cd?`（${cd}）`:''} · <span style="color:#ffcb69">${tx('精确剩余请到 Token Plan 控制台查看','Check exact remaining in the Token Plan console')}</span>`;
     } else {
       card.setAttribute('data-empty','true');
       pct.textContent='—';
       fill.style.width='0%';
-      meta.textContent='尚未调用千问，额度无数据';
+      meta.textContent=tx('尚未调用千问，额度无数据','Qwen not called yet; no quota data');
     }
   };
   const renderApiCenter=async()=>{
     let credentials={},verification={},coinGeckoUsage=null; try { const payload=await apiCenterRequest('/api/api-center'); credentials=payload.credentials||{}; verification=payload.verification||{}; coinGeckoUsage=payload.coinGeckoUsage||null; } catch {}
     window.dispatchEvent(new CustomEvent('btc:ai-credential-changed', { detail:{ available:Boolean(credentials.qwen && verification.qwen) } }));
-    const free=apiCenterFree.map(([group,name,note])=>`<article class="api-center-row free"><div><b>${group}</b><span>${name}</span></div><em>${note}</em></article>`).join('');
+    const free=apiCenterFree().map(([group,name,note])=>`<article class="api-center-row free"><div><b>${group}</b><span>${name}</span></div><em>${note}</em></article>`).join('');
     // 千问配置需要模型列表与当前选择，单独从 AI 配置接口取。
     // The Qwen card needs the model list and current choice, fetched from the AI config endpoint.
     let aiConfig={configured:false,model:'',models:[]}; try { aiConfig=await (await fetch('/api/ai/config')).json(); } catch {}
     // 模型下拉：只列可用于问答的文本模型，并标出额度档位（省 / 中 / 贵）。
     // Model picker: only chat-capable text models, tagged with their credit tier.
-    const qwenTierTag={value:'省',balanced:'中',flagship:'贵'};
-    const qwenModels=(aiConfig.models||[]).filter(entry=>entry.usable!==false).map(entry=>{const tag=qwenTierTag[entry.tier]||'';return `<option value="${calendarEscape(entry.id)}"${entry.id===aiConfig.model?' selected':''}>${calendarEscape(entry.label)}${tag?' · '+tag:''}${entry.recommended?'（推荐）':''}</option>`;}).join('');
+    const qwenTierTag={value:tx('省','Econ'),balanced:tx('中','Mid'),flagship:tx('贵','Premium')};
+    const qwenModels=(aiConfig.models||[]).filter(entry=>entry.usable!==false).map(entry=>{const tag=qwenTierTag[entry.tier]||'';return `<option value="${calendarEscape(entry.id)}"${entry.id===aiConfig.model?' selected':''}>${calendarEscape(entry.label)}${tag?' · '+tag:''}${entry.recommended?tx('（推荐）',' (recommended)'):''}</option>`;}).join('');
     // 端点快捷选择：千问两套体系（按量付费 / Token Plan 订阅），端点与 Key 必须配套。
     // Endpoint picker: Qwen has two isolated systems and the endpoint must match the key.
     const qwenEndpoints=(aiConfig.endpoints||[]).map(entry=>`<option value="${calendarEscape(entry.baseUrl)}"${entry.baseUrl===aiConfig.baseUrl?' selected':''}>${calendarEscape(entry.label)}</option>`).join('');
-    const qwenEndpointNote=aiConfig.baseUrl?`<p class="api-endpoint-note">当前端点：<code>${calendarEscape(aiConfig.baseUrl)}</code> · 识别为${aiConfig.keyKind==='token-plan'?'Token Plan 订阅 Key（sk-sp-）':'按量付费 Key（sk-）'}${aiConfig.mismatch?'<b class="api-endpoint-warn"> · ⚠️ 与 Key 前缀不匹配，调用会返回 401</b>':''}${aiConfig.autoCorrected?'<b class="api-endpoint-warn"> · 已自动纠正为匹配端点</b>':''}</p>`:'';
+    const qwenEndpointNote=aiConfig.baseUrl?`<p class="api-endpoint-note">${tx('当前端点：','Current endpoint: ')}<code>${calendarEscape(aiConfig.baseUrl)}</code> · ${tx('识别为','detected as ')}${aiConfig.keyKind==='token-plan'?tx('Token Plan 订阅 Key（sk-sp-）','Token Plan subscription key (sk-sp-)'):tx('按量付费 Key（sk-）','pay-as-you-go key (sk-)')}${aiConfig.mismatch?'<b class="api-endpoint-warn"> · ⚠️ ' + tx('与 Key 前缀不匹配，调用会返回 401','key prefix mismatch; calls return 401') + '</b>':''}${aiConfig.autoCorrected?'<b class="api-endpoint-warn"> · ' + tx('已自动纠正为匹配端点','auto-corrected to the matching endpoint') + '</b>':''}</p>`:'';
     // 千问额度小卡：进度条 + 剩余 % + 倒计时，与右下角 AI 助手面板同源。
     // Qwen quota mini card: bar + remaining % + countdown, mirrors the chat-panel source.
-    const qwenQuotaMarkup=`<div class="api-qwen-quota" data-empty="true"><div class="api-qwen-quota-bar"><div class="api-qwen-quota-fill"></div></div><span class="api-qwen-quota-pct">—</span><span class="api-qwen-quota-meta">尚未调用千问，额度无数据</span></div>`;
-    const qwen=`<article class="api-center-row"><div><b>千问 Qwen<small>AI 行情助手</small>${verification.qwen?'<span class="badge bull api-verified">已验证</span>':''}</b><span>为右下角 AI 助手提供行情解读与涨跌判断；默认 <code>${calendarEscape(aiConfig.defaultModel||'qwen3.8-flash')}</code>，额度消耗约为旗舰的 1/15</span><p>两种 Key 体系，<b>端点必须配套</b>，混用一律 401：① 按量付费（<code>sk-</code> / <code>sk-ws-</code>）→ DashScope 端点；② Token Plan 个人版订阅（<code>sk-sp-</code>）→ Token Plan 端点。Token Plan 的 Key 在「我的订阅」页面生成，只完整显示一次。Key 仅以服务端加密方式保存，不会回显。</p>${qwenEndpointNote}${qwenQuotaMarkup}</div><form data-api-provider="qwen" autocomplete="off"><input name="key" type="password" autocomplete="new-password" placeholder="${credentials.qwen?'已保存，重新填写以更新':'sk-… / sk-sp-… 千问 API Key'}" data-1p-ignore="true" data-lpignore="true" ${credentials.qwen?'data-saved="true"':''}><label>模型<select name="model">${qwenModels}</select></label><label>端点类型<select name="endpoint" class="qwen-endpoint"><option value="">按 Key 前缀自动匹配（推荐）</option>${qwenEndpoints}</select></label><label>API 地址（可选，留空自动匹配）<input name="url" type="url" inputmode="url" autocomplete="off" aria-label="Qwen compatible endpoint" placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1"></label><button>${credentials.qwen?'更新 Key':'保存 Key'}</button><button type="button" class="api-verify-qwen">验证 Key</button>${credentials.qwen?'<button type="button" class="api-clear">清除</button>':''}</form></article>`;
-    const coinGeckoUsageMarkup=(()=>{if(!credentials.coingecko)return '<div class="coingecko-usage muted">保存 CoinGecko Demo Key 后显示月度额度统计。</div>';if(!coinGeckoUsage?.available)return `<div class="coingecko-usage error">额度暂不可用：${calendarEscape(coinGeckoUsage?.reason||'请稍后重试')}</div>`;const used=coinGeckoUsage.used,limit=coinGeckoUsage.monthlyLimit,remaining=coinGeckoUsage.remaining,pct=Number.isFinite(used)&&Number.isFinite(limit)&&limit>0?Math.min(100,used/limit*100):0,next=new Date();next.setMonth(next.getMonth()+1,1);next.setHours(0,0,0,0);return `<div class="coingecko-usage"><div><b>CoinGecko 月度额度 · ${calendarEscape(coinGeckoUsage.plan)}</b><strong>${Number.isFinite(pct)?pct.toFixed(1):'--'}%</strong></div><i><span style="width:${pct}%"></span></i><p>${Number.isFinite(used)?used.toLocaleString():'--'} 已用 · ${Number.isFinite(remaining)?remaining.toLocaleString():'--'} 剩余 · 月度总额 ${Number.isFinite(limit)?limit.toLocaleString():'--'}</p><small>${coinGeckoUsage.rateLimit?`限额 ${coinGeckoUsage.rateLimit}/分钟 · `:''}下次重置 ${next.toLocaleDateString('zh-CN')} · 统计缓存 5 分钟</small></div>`;})();
-    const optional=apiCenterOptional.map(([id,name,scope,hint])=>`<article class="api-center-row"><div><b>${name}<small>可选升级（默认免费）</small>${verification[id]?'<span class="badge bull api-verified">已验证</span>':''}</b><span>${scope}</span><p>${hint}</p>${id==='coingecko'?coinGeckoUsageMarkup:''}</div><form data-api-provider="${id}" autocomplete="off">${id==='custom'?`<label>API URL<input name="url" type="url" inputmode="url" autocomplete="url" aria-label="HTTPS API URL" placeholder="https://api.example.com/v1/data" data-1p-ignore="true" data-lpignore="true" ${credentials[id]?'data-saved="true"':''}></label><label>API Key（${credentials[id]?'重新填写以更新':'可选'}）<input name="key" type="password" autocomplete="new-password" aria-label="Optional API key" placeholder="可选 API Key（不会回显）" data-1p-ignore="true" data-lpignore="true"></label>`:`<input name="key" type="password" autocomplete="off" placeholder="${hint}" ${credentials[id]?'data-saved="true"':''}>`}<button>${credentials[id]?'更新':'保存'}${id==='custom'?'配置':' Key'}</button>${credentials[id]&&id!=='custom'?'<button type="button" class="api-verify">验证 Key</button>':''}${credentials[id]?'<button type="button" class="api-clear">清除</button>':''}</form></article>`).join('');
-    apiCenterModal.innerHTML=`<section role="dialog" aria-modal="true" aria-labelledby="apiCenterTitle"><header><div><b id="apiCenterTitle">API 接入中心</b><small>密钥仅保存于本机服务端，不会回显到浏览器</small></div><button type="button" data-close-api-center aria-label="关闭">×</button></header><div class="api-center-body"><h3>默认免费（无需填入）</h3>${free}<h3>可选升级（默认免费）</h3>${optional}<h3>AI 大模型（可选）</h3>${qwen}<h3>付费数据（可选）</h3><article class="api-center-row required"><div><b>Finnhub Economic Calendar<small>付费套餐</small>${verification.finnhub?'<span class="badge bull api-verified">Key 已验证</span>':''}</b><span>宏观实际值、市场一致预期、前值</span><p>免费 Key 可验证基础行情，但 Economic Calendar 需要付费套餐；未开通时自动使用内置公开宏观日历。</p></div><form data-api-provider="finnhub"><input name="key" type="password" autocomplete="off" placeholder="可选：仅付费套餐可启用 Economic Calendar" ${credentials.finnhub?'data-saved="true"':''}><button>${credentials.finnhub?'更新 Key':'保存 Key'}</button>${credentials.finnhub?'<button type="button" class="api-verify">验证 Key</button><button type="button" class="api-clear">清除</button>':''}</form></article></div></section>`;
+    const qwenQuotaMarkup=`<div class="api-qwen-quota" data-empty="true"><div class="api-qwen-quota-bar"><div class="api-qwen-quota-fill"></div></div><span class="api-qwen-quota-pct">—</span><span class="api-qwen-quota-meta">${tx('尚未调用千问，额度无数据','Qwen not called yet; no quota data')}</span></div>`;
+    const qwen=`<article class="api-center-row api-center-qwen"><div><b>千问 Qwen<small>${tx('AI 行情助手','AI market assistant')}</small>${verification.qwen?'<span class="badge bull api-verified">' + tx('已验证','Verified') + '</span>':''}</b><span>${tx('为右下角 AI 助手提供行情解读与涨跌判断；默认 ','Provides market readouts and trend calls for the bottom-right AI assistant; default ')}<code>${calendarEscape(aiConfig.defaultModel||'qwen3.8-flash')}</code>${tx('，额度消耗约为旗舰的 1/15','; credit cost ≈ 1/15 of the flagship')}</span><div class="api-key-systems"><b>${tx('两种 Key 体系 · 端点必须配套，混用一律 401','Two key systems · endpoint must match, mismatched = 401')}</b><span><code>sk-</code> / <code>sk-ws-</code> ${tx('按量付费 → DashScope 端点','pay-as-you-go → DashScope endpoint')}</span><span><code>sk-sp-</code> ${tx('Token Plan 个人版订阅 → Token Plan 端点','Token Plan personal subscription → Token Plan endpoint')}</span><small>${tx('Token Plan 的 Key 在「我的订阅」页面生成，只完整显示一次；Key 仅以服务端加密方式保存，不会回显。','The Token Plan key is generated on the “My Subscriptions” page and shown in full only once; keys are saved server-side encrypted and never echoed back.')}</small></div>${qwenEndpointNote}${qwenQuotaMarkup}</div><form data-api-provider="qwen" autocomplete="off"><input name="key" type="password" autocomplete="new-password" placeholder="${credentials.qwen?tx('已保存，重新填写以更新','Saved — re-enter to update'):tx('sk-… / sk-sp-… 千问 API Key','sk-… / sk-sp-… Qwen API Key')}" data-1p-ignore="true" data-lpignore="true" ${credentials.qwen?'data-saved="true"':''}><label>${tx('模型','Model')}<select name="model">${qwenModels}</select></label><label>${tx('端点类型','Endpoint type')}<select name="endpoint" class="qwen-endpoint"><option value="">${tx('按 Key 前缀自动匹配（推荐）','Auto-match by key prefix (recommended)')}</option>${qwenEndpoints}</select></label><label>${tx('API 地址（可选，留空自动匹配）','API URL (optional, auto-matched if blank)')}<input name="url" type="url" inputmode="url" autocomplete="off" aria-label="Qwen compatible endpoint" placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1"></label><div class="api-qwen-actions"><button>${credentials.qwen?tx('更新 Key','Update Key'):tx('保存 Key','Save Key')}</button><button type="button" class="api-verify-qwen">${tx('验证 Key','Verify Key')}</button>${credentials.qwen?'<button type="button" class="api-clear">' + tx('清除','Clear') + '</button>':''}</div></form></article>`;
+    const coinGeckoUsageMarkup=(()=>{if(!credentials.coingecko)return '<div class="coingecko-usage muted">' + tx('保存 CoinGecko Demo Key 后显示月度额度统计。','Save a CoinGecko Demo Key to see monthly quota stats.') + '</div>';if(!coinGeckoUsage?.available)return `<div class="coingecko-usage error">${tx('额度暂不可用：','Quota temporarily unavailable: ')}${calendarEscape(coinGeckoUsage?.reason||tx('请稍后重试','please retry later'))}</div>`;const used=coinGeckoUsage.used,limit=coinGeckoUsage.monthlyLimit,remaining=coinGeckoUsage.remaining,pct=Number.isFinite(used)&&Number.isFinite(limit)&&limit>0?Math.min(100,used/limit*100):0,next=new Date();next.setMonth(next.getMonth()+1,1);next.setHours(0,0,0,0);return `<div class="coingecko-usage"><div><b>${tx('CoinGecko 月度额度','CoinGecko monthly quota')} · ${calendarEscape(coinGeckoUsage.plan)}</b><strong>${Number.isFinite(pct)?pct.toFixed(1):'--'}%</strong></div><i><span style="width:${pct}%"></span></i><p>${Number.isFinite(used)?used.toLocaleString():'--'} ${tx('已用','used')} · ${Number.isFinite(remaining)?remaining.toLocaleString():'--'} ${tx('剩余','remaining')} · ${tx('月度总额','monthly total')} ${Number.isFinite(limit)?limit.toLocaleString():'--'}</p><small>${coinGeckoUsage.rateLimit?`${tx('限额','limit')} ${coinGeckoUsage.rateLimit}${tx('/分钟','/min')} · `:''}${tx('下次重置','next reset')} ${next.toLocaleDateString(uiLang==='zh'?'zh-CN':'en-US')} · ${tx('统计缓存 5 分钟','stats cached 5 min')}</small></div>`;})();
+    const optional=apiCenterOptional().map(([id,name,scope,hint])=>`<article class="api-center-row"><div><b>${name}<small>${tx('可选升级（默认免费）','Optional upgrade (free by default)')}</small>${verification[id]?'<span class="badge bull api-verified">' + tx('已验证','Verified') + '</span>':''}</b><span>${scope}</span><p>${hint}</p>${id==='coingecko'?coinGeckoUsageMarkup:''}</div><form data-api-provider="${id}" autocomplete="off">${id==='custom'?`<label>API URL<input name="url" type="url" inputmode="url" autocomplete="url" aria-label="HTTPS API URL" placeholder="https://api.example.com/v1/data" data-1p-ignore="true" data-lpignore="true" ${credentials[id]?'data-saved="true"':''}></label><label>API Key（${credentials[id]?tx('重新填写以更新','refill to update'):tx('可选','optional')}）<input name="key" type="password" autocomplete="new-password" aria-label="Optional API key" placeholder="${tx('可选 API Key（不会回显）','Optional API key (never echoed)')}" data-1p-ignore="true" data-lpignore="true"></label>`:`<input name="key" type="password" autocomplete="off" placeholder="${hint}" ${credentials[id]?'data-saved="true"':''}>`}<button>${credentials[id]?tx('更新','Update'):tx('保存','Save')}${id==='custom'?tx('配置',' config'):tx(' Key',' Key')}</button>${credentials[id]&&id!=='custom'?'<button type="button" class="api-verify">' + tx('验证 Key','Verify Key') + '</button>':''}${credentials[id]?'<button type="button" class="api-clear">' + tx('清除','Clear') + '</button>':''}</form></article>`).join('');
+    apiCenterModal.innerHTML=`<section role="dialog" aria-modal="true" aria-labelledby="apiCenterTitle"><header><div><b id="apiCenterTitle">${tx('API 接入中心','API Center')}</b><small>${tx('密钥仅保存于本机服务端，不会回显到浏览器','Keys are stored server-side only and never echoed back')}</small></div><button type="button" data-close-api-center aria-label="${tx('关闭','Close')}">×</button></header><div class="api-center-body"><h3>${tx('默认免费（无需填入）','Free by default (no entry)')}</h3>${free}<h3>${tx('可选升级（默认免费）','Optional upgrade (free by default)')}</h3>${optional}<h3>${tx('AI 大模型（可选）','AI models (optional)')}</h3>${qwen}<h3>${tx('付费数据（可选）','Paid data (optional)')}</h3><article class="api-center-row required"><div><b>Finnhub Economic Calendar<small>${tx("付费套餐","Paid plan")}</small>${verification.finnhub?'<span class="badge bull api-verified">' + tx("Key 已验证","Key verified") + '</span>':''}</b><span>${tx("宏观实际值、市场一致预期、前值","Actual macro values, market consensus, previous values")}</span><p>${tx("免费 Key 可验证基础行情，但 Economic Calendar 需要付费套餐；未开通时自动使用内置公开宏观日历。","A free key validates basic quotes, but the Economic Calendar needs a paid plan; when unavailable, the built-in public macro calendar is used automatically.")}</p></div><form data-api-provider="finnhub"><input name="key" type="password" autocomplete="off" placeholder="${tx("可选：仅付费套餐可启用 Economic Calendar","Optional: paid plan enables the Economic Calendar")}" ${credentials.finnhub?'data-saved="true"':''}><button>${credentials.finnhub?tx('更新 Key','Update Key'):tx('保存 Key','Save Key')}</button>${credentials.finnhub?'<button type="button" class="api-verify">' + tx('验证 Key','Verify Key') + '</button><button type="button" class="api-clear">' + tx('清除','Clear') + '</button>':''}</form></article></div></section>`;
     apiCenterModal.querySelector('[data-close-api-center]').onclick=()=>{apiCenterModal.hidden=true;};
     apiCenterModal.onclick=event=>{if(event.target===apiCenterModal)apiCenterModal.hidden=true;};
-    apiCenterModal.querySelectorAll('form[data-api-provider]').forEach(form=>form.onsubmit=async event=>{event.preventDefault();const provider=form.dataset.apiProvider,key=(form.elements.key?.value||'').trim(),url=(form.elements.url?.value||'').trim(),model=(form.elements.model?.value||'').trim();if(provider==='custom'?!url:!key){showAppDialog({title:'API 接入中心',message:provider==='custom'?'请填写有效的 HTTPS API 地址。':'请填写 API Key。'});return;}try{await apiCenterRequest('/api/api-center',{method:'PUT',body:JSON.stringify({provider,key,url,model})});const saved=await window.btcSecureVault?.get('api-center')||{};await window.btcSecureVault?.put('api-center',{...saved,[provider]:{key,url}});await renderApiCenter();}catch(error){showAppDialog({title:'API 接入中心',message:error.message});}});
-    apiCenterModal.querySelectorAll('.api-clear').forEach(button=>button.onclick=async()=>{try{const provider=button.closest('form').dataset.apiProvider;await apiCenterRequest(`/api/api-center?provider=${provider}`,{method:'DELETE'});const saved=await window.btcSecureVault?.get('api-center')||{};delete saved[provider];await window.btcSecureVault?.put('api-center',saved);await renderApiCenter();}catch(error){showAppDialog({title:'API 接入中心',message:error.message});}});
-    apiCenterModal.querySelectorAll('.api-verify').forEach(button=>button.onclick=async()=>{const provider=button.closest('form').dataset.apiProvider;button.disabled=true;button.textContent='验证中…';try{const result=await apiCenterRequest('/api/api-center/verify',{method:'POST',body:JSON.stringify({provider})});if(result.valid)await renderApiCenter();showAppDialog({title:'API Key 验证',message:result.message});}catch(error){showAppDialog({title:'API Key 验证',message:error.message});}finally{button.disabled=false;button.textContent='验证 Key';}});
+    apiCenterModal.querySelectorAll('form[data-api-provider]').forEach(form=>form.onsubmit=async event=>{event.preventDefault();const provider=form.dataset.apiProvider,key=(form.elements.key?.value||'').trim(),url=(form.elements.url?.value||'').trim(),model=(form.elements.model?.value||'').trim();if(provider==='custom'?!url:!key){showAppDialog({title:tx('API 接入中心','API Center'),message:provider==='custom'?tx('请填写有效的 HTTPS API 地址。','Enter a valid HTTPS API URL.'):tx('请填写 API Key。','Enter the API Key.')});return;}try{await apiCenterRequest('/api/api-center',{method:'PUT',body:JSON.stringify({provider,key,url,model})});const saved=await window.btcSecureVault?.get('api-center')||{};await window.btcSecureVault?.put('api-center',{...saved,[provider]:{key,url}});await renderApiCenter();}catch(error){showAppDialog({title:tx('API 接入中心','API Center'),message:error.message});}});
+    apiCenterModal.querySelectorAll('.api-clear').forEach(button=>button.onclick=async()=>{try{const provider=button.closest('form').dataset.apiProvider;await apiCenterRequest(`/api/api-center?provider=${provider}`,{method:'DELETE'});const saved=await window.btcSecureVault?.get('api-center')||{};delete saved[provider];await window.btcSecureVault?.put('api-center',saved);await renderApiCenter();}catch(error){showAppDialog({title:tx('API 接入中心','API Center'),message:error.message});}});
+    apiCenterModal.querySelectorAll('.api-verify').forEach(button=>button.onclick=async()=>{const provider=button.closest('form').dataset.apiProvider;button.disabled=true;button.textContent=tx('验证中…','Verifying…');try{const result=await apiCenterRequest('/api/api-center/verify',{method:'POST',body:JSON.stringify({provider})});if(result.valid)await renderApiCenter();showAppDialog({title:tx('API Key 验证','API Key verification'),message:result.message});}catch(error){showAppDialog({title:tx('API Key 验证','API Key verification'),message:error.message});}finally{button.disabled=false;button.textContent=tx('验证 Key','Verify Key');}});
     // 千问验证：输入框里填了新 Key 就先保存再验证，一次点击走完整个流程。
     // Qwen verify: save first when a new key is typed, so one click completes the whole flow.
     // 端点下拉只是填充工具：选中即写入 API 地址输入框；留空表示交给服务端按 Key 前缀自动匹配。
@@ -1272,7 +1445,7 @@ function updateClocks() {
     const qwenKeyInput=apiCenterModal.querySelector('form[data-api-provider="qwen"] input[name="key"]');
     if(qwenKeyInput&&qwenEndpointSelect){const tokenPlanOption=[...qwenEndpointSelect.options].find(option=>option.value.includes('token-plan'));if(tokenPlanOption)qwenKeyInput.oninput=()=>{qwenEndpointSelect.value=/^sk-sp-/i.test(qwenKeyInput.value.trim())?tokenPlanOption.value:'';};}
     const qwenVerifyButton=apiCenterModal.querySelector('.api-verify-qwen');
-    if(qwenVerifyButton)qwenVerifyButton.onclick=async()=>{const form=apiCenterModal.querySelector('form[data-api-provider="qwen"]');const key=(form?.elements.key?.value||'').trim(),model=(form?.elements.model?.value||'').trim(),url=(form?.elements.url?.value||'').trim();if(!key&&!credentials.qwen){showAppDialog({title:'千问 API Key 验证',message:'请先填写 API Key 再验证。'});return;}qwenVerifyButton.disabled=true;qwenVerifyButton.textContent='验证中…';try{if(key){await apiCenterRequest('/api/api-center',{method:'PUT',body:JSON.stringify({provider:'qwen',key,url,model})});window.dispatchEvent(new CustomEvent('btc:ai-credential-changed',{detail:{available:false}}));}const result=await apiCenterRequest('/api/api-center/verify',{method:'POST',body:JSON.stringify({provider:'qwen'})});await renderApiCenter();showAppDialog({title:'千问 API Key 验证',message:result.message});}catch(error){await renderApiCenter();showAppDialog({title:'千问 API Key 验证',message:error.message});}finally{qwenVerifyButton.disabled=false;qwenVerifyButton.textContent='验证 Key';}};
+    if(qwenVerifyButton)qwenVerifyButton.onclick=async()=>{const form=apiCenterModal.querySelector('form[data-api-provider="qwen"]');const key=(form?.elements.key?.value||'').trim(),model=(form?.elements.model?.value||'').trim(),url=(form?.elements.url?.value||'').trim();if(!key&&!credentials.qwen){showAppDialog({title:tx('千问 API Key 验证','Qwen API Key verification'),message:tx('请先填写 API Key 再验证。','Enter the API Key before verifying.')});return;}qwenVerifyButton.disabled=true;qwenVerifyButton.textContent=tx('验证中…','Verifying…');try{if(key){await apiCenterRequest('/api/api-center',{method:'PUT',body:JSON.stringify({provider:'qwen',key,url,model})});window.dispatchEvent(new CustomEvent('btc:ai-credential-changed',{detail:{available:false}}));}const result=await apiCenterRequest('/api/api-center/verify',{method:'POST',body:JSON.stringify({provider:'qwen'})});await renderApiCenter();showAppDialog({title:'千问 API Key 验证',message:result.message});}catch(error){await renderApiCenter();showAppDialog({title:'千问 API Key 验证',message:error.message});}finally{qwenVerifyButton.disabled=false;qwenVerifyButton.textContent=tx('验证 Key','Verify Key');}};
 
     // 千问额度小卡渲染：与右下角对话窗同源（同一接口），数据保留 60s。
     // Mini Qwen quota card: same endpoint as the chat panel; data cached for 60s.
@@ -1313,7 +1486,6 @@ function updateClocks() {
 /* 交互、说明与完整语言层 / Interaction, explanations, and complete language layer */
 let chartSelection = null,
   requestLatency = 0;
-const tx = (zh, en) => (uiLang === "zh" ? zh : en);
 // 通用「按 key 取本地化名」辅助：maps 为 { key: [zh, en] }，缺失时回退到 key 本身。
 const tname = (maps, key) => {
   const entry = maps && maps[key];
@@ -1501,13 +1673,45 @@ function hideFloatingHelpTip(dot) {
   activeHelpDot = null;
   if (floatingHelpTip) floatingHelpTip.hidden = true;
 }
+/* 说明的触发节奏：鼠标要「停住」才弹 —— 「!」上 260ms、卡片标题文字上 800ms。
+   这是 NN/g 与 Material 的通行量级（300–500ms），扫过不该弹东西；键盘 focus 仍然即时。 */
+let helpShowTimer = null;
+const HELP_DOT_DELAY_MS = 260,
+  HELP_HOST_DELAY_MS = 800;
+function scheduleHelpShow(dot, delay) {
+  if (activeHelpDot === dot && floatingHelpTip && !floatingHelpTip.hidden) return;
+  clearTimeout(helpShowTimer);
+  helpShowTimer = setTimeout(() => showFloatingHelpTip(dot), delay);
+}
 document.addEventListener("pointerover", (event) => {
-  const dot = event.target.closest?.(".help-dot[data-tip]");
-  if (dot) showFloatingHelpTip(dot);
+  const target = event.target,
+    dot = target.closest?.(".help-dot[data-tip]");
+  if (dot) {
+    scheduleHelpShow(dot, HELP_DOT_DELAY_MS);
+    return;
+  }
+  /* 不想去瞄那个小图标也行：指针停在卡片标题（h2 / h3 / summary）上同样给说明。 */
+  const hostDot = target
+    .closest?.("h2, h3, summary")
+    ?.querySelector(".help-dot[data-tip]");
+  if (hostDot) {
+    scheduleHelpShow(hostDot, HELP_HOST_DELAY_MS);
+    return;
+  }
+  /* 说明层本身可以悬停（长说明要在里面滚），所以指针移到浮层上不算离开。 */
+  clearTimeout(helpShowTimer);
+  if (floatingHelpTip && !floatingHelpTip.contains(target)) hideFloatingHelpTip();
 });
 document.addEventListener("pointerout", (event) => {
   const dot = event.target.closest?.(".help-dot[data-tip]");
-  if (dot && !dot.contains(event.relatedTarget)) hideFloatingHelpTip(dot);
+  if (!dot) return;
+  const to = event.relatedTarget;
+  if (dot.contains(to) || floatingHelpTip?.contains(to)) return;
+  /* 指针挪到同一张卡片的标题文字上不算离开（那边会重新计时再显示）。 */
+  const host = dot.closest("h2, h3, summary");
+  if (host && to && host.contains(to)) return;
+  clearTimeout(helpShowTimer);
+  hideFloatingHelpTip(dot);
 });
 document.addEventListener("focusin", (event) => {
   const dot = event.target.closest?.(".help-dot[data-tip]");
@@ -1523,7 +1727,15 @@ document.addEventListener("click", (event) => {
   event.preventDefault();
   activeHelpDot === dot ? hideFloatingHelpTip(dot) : showFloatingHelpTip(dot);
 });
-window.addEventListener("scroll", () => hideFloatingHelpTip(), true);
+window.addEventListener(
+  "scroll",
+  (event) => {
+    /* 在说明浮层内部滚动查看长说明时，别把浮层本身收掉。 */
+    if (floatingHelpTip && event.target === floatingHelpTip) return;
+    hideFloatingHelpTip();
+  },
+  true,
+);
 window.addEventListener("resize", () => hideFloatingHelpTip());
 function addHelp(el, zh, en) {
   if (!el || el.querySelector(".help-dot")) return;
@@ -1599,15 +1811,7 @@ function ensureInteractionUI() {
       `<small>Note: signals are derived from technical indicators (EMA/RSI/MACD/Bollinger) for observational aid only, not investment advice. Use extra caution with high leverage.</small>`,
     );
   }
-  document
-    .querySelectorAll(".optional h2,.change-card h2")
-    .forEach((x) =>
-      addHelp(
-        x,
-        "多周期共振用于检查 15 分钟、1 小时、4 小时和日线的方向是否一致；一致性越高，规则信号的背景一致性越好，但不等于预测必然正确。",
-        "Multi-period resonance checks whether 15m, 1h, 4h and daily signals point in the same direction. Higher agreement is contextual support, not certainty.",
-      ),
-    );
+  syncCardHelpTips();
   document
     .querySelectorAll(".metrics .metric span")
     .forEach((x) =>
@@ -1798,12 +2002,18 @@ loadCurrent = async function () {
     $("connection").textContent =
       `${mode} · ${requestLatency} ms · ${tx("K线/指标每10秒更新；价格每秒刷新", "Candles/indicators every 10s; quote every second")}`;
     $("freshness").textContent = pointTime(data.fetchedAt);
+    try {
+      if (typeof window.saveMarketSnapshot === "function")
+        window.saveMarketSnapshot(data);
+    } catch {}
+    document.documentElement.classList.remove("pre-boot");
     return true;
   } catch (e) {
     $("connection").textContent = tx(
       "行情暂不可用，保留最近成功图表",
       "Market unavailable; keeping the last successful chart",
     );
+    document.documentElement.classList.remove("pre-boot");
     if (!state.candles.length) {
       $("chartError").hidden = false;
       $("chartError").textContent =
@@ -1870,7 +2080,7 @@ applyLanguage = function () {
   document.querySelector(".controls label").dataset.label = x.source;
   const f = document.querySelector(".forecast-card h2");
   if (f) f.textContent = x.forecast;
-  const c = document.querySelector(".correlation-card h2");
+  const c = document.querySelector(".fed-corr-panel h3");
   if (c) c.textContent = x.correlation;
   const rb = $("refreshForecast");
   if (rb) rb.textContent = tx("训练并更新", "Train & update");
@@ -1897,6 +2107,8 @@ applyLanguage = function () {
     );
   const b = $("langToggle");
   if (b) b.textContent = uiLang === "zh" ? "EN" : "中文";
+  const apiC = $("apiCenterToggle");
+  if (apiC) apiC.textContent = tx("API 接入中心", "API Center");
   applyTheme();
   buttons();
   if (state.candles.length) renderAnalysis();
@@ -1932,12 +2144,29 @@ function draw() { if (chartPaused) return; renderChart(); }
       el.innerHTML = `<b>${tx("已选区段", "Selected")}</b> ${pointTime(s[0].time)} — ${pointTime(s.at(-1).time)} · <span class="high">${tx("最高", "High")} ${money(hi)}</span> · <span class="low">${tx("最低", "Low")} ${money(lo)}</span> · <span class="${change >= 0 ? "bull" : "bear"}">${tx("涨跌", "Return")} ${pct(change)}</span>`;
   };
   cv.addEventListener("pointerdown", (e) => {
+    /* 价格标签优先于框选：点在某个价格数字上只把它点亮（再点一次收回），不启动框选；
+       已经点亮时点空白处，先把点亮收回、这一次点击也不落到框选上 ——
+       用户要的是「点一下把数字收回去」，不该顺手再画出一段选区。 */
+    const chip = priceChipHitTest(e, cv);
+    if (chip >= 0) {
+      priceChipPinned = priceChipPinned === chip ? -1 : chip;
+      draw();
+      return;
+    }
+    if (priceChipPinned >= 0) {
+      priceChipPinned = -1;
+      draw();
+      return;
+    }
     chartSelection = { start: index(e), end: index(e) };
     cv.setPointerCapture(e.pointerId);
     stats();
     draw();
   });
   cv.addEventListener("pointermove", (e) => {
+    /* 悬停在价格数字上给出手型光标，提示这里可以点。 */
+    if (!cv.hasPointerCapture(e.pointerId))
+      cv.style.cursor = priceChipHitTest(e, cv) >= 0 ? "pointer" : "";
     if (!chartSelection || !cv.hasPointerCapture(e.pointerId)) return;
     chartSelection.end = index(e);
     stats();
@@ -1965,12 +2194,12 @@ applyLanguage = function () {
       const el = document.querySelector(selector);
       if (el) el.textContent = zh ? cn : en;
     };
-  set(".optional h2", "多周期共振", "Multi-period resonance");
-  set(
-    ".optional p",
-    "仅在点击后请求额外 4 个周期。",
-    "Requests four additional timeframes only when selected.",
-  );
+  set(".optional h2", "多周期共振", "Multi-timeframe resonance");
+  /* 卡片上不再挂副标题（那行说明已并进「!」里），所以这里也不再需要写 `.optional p`
+     —— 留着的话，哪次渲染再插进一个 p 就会被塞上这句。 */
+  /* 每次切语言都重写一遍卡片说明（含 cadence 基准），否则切到英文后
+     说明仍是中文 —— 说明是整段 HTML，不归 data-zh/data-en 那套静态替换管。 */
+  syncCardHelpTips();
   const diagnosticsTitle = $("diagnostics")
     ?.closest(".card")
     ?.querySelector("h2");
@@ -2306,463 +2535,17 @@ const drawLive = () => renderChart({ immediate: true });
   window.addEventListener("blur", clearHover);
 })();
 
-/* Modal-style local alert composer.  The SendKey and alert rules remain in
-   this browser only; ServerChan receives a push directly from the browser. */
+/* 消息推送模块自 v2.10.52 起拆分到 public/notification.js（多渠道推送：总开关 /
+   渠道管理 / 价格预警 / 持仓亏损联动），此处只负责注入依赖并初始化。 */
 setTimeout(() => {
-  const old = $("wechatAlertCard");
-  if (old) old.remove();
-  const main = document.querySelector("main");
-  if (!main) return;
-  const keyStore = "btc_local_serverchan_sendkey_v1",
-    ruleStore = "btc_local_notification_rules_v1";
-  let previous = null,
-    repeat = false,
-    rules = [];
-  try {
-    const saved = JSON.parse(localStorage.getItem(ruleStore) || "[]");
-    if (Array.isArray(saved))
-      rules = saved
-        .filter((x) => x && x.id && Number(x.targetPrice) > 0)
-        .slice(0, 30)
-        .map((x) => ({
-          ...x,
-          kind: x.kind || "price_reached",
-          repeat: x.repeat === false ? false : true,
-          cooldownMinutes: Math.max(1, Number(x.cooldownMinutes) || 5),
-        }));
-  } catch {}
-  // Migrate any legacy plaintext once, then keep only AES-GCM ciphertext in
-  // IndexedDB.  The key is non-extractable and never written to localStorage.
-  const legacyAlertState=rules.length?rules:null,legacySendKey=localStorage.getItem(keyStore)||'';
-  if(/^SCT/i.test(legacySendKey))sessionStorage.setItem(keyStore,legacySendKey);
-  localStorage.removeItem(ruleStore);
-  localStorage.removeItem(keyStore);
-  const save = () => { window.btcSecureVault?.put('alerts',{rules,sendKey:(sessionStorage.getItem(keyStore)||'').trim()}).catch(error=>console.warn('Local encrypted save failed:',error.message)); },
-    price = () => state?.ticker?.last,
-    fmt = (n) =>
-      Number(n).toLocaleString("en-US", { maximumFractionDigits: 2 });
-  const card = document.createElement("section"),
-    details = document.createElement("details");
-  details.id = "wechatAlertDetails";
-  details.className = "position-details alert-details";
-  details.innerHTML = `<summary>${tx("消息推送", "Message alerts")}</summary>`;
-  card.id = "wechatAlertCard";
-  card.className = "card wechat-alert-card";
-  card.innerHTML = `<div class="forecast-head"><div><h2>${tx("消息推送", "Message alerts")}</h2><p id="localAlertDescription">${tx("未登录时 SendKey 仅保存在当前会话；登录后可加密保存到云端。", "When signed out, SendKey stays only in this session; sign in to encrypt it in the cloud.")}</p></div><span id="localAlertState" class="badge flat"></span></div><form id="localKeyForm" class="wechat-key-form"><label>${tx("Server酱 SendKey", "ServerChan SendKey")}<input name="key" type="password" autocomplete="off" placeholder="SCT…"></label><a href="https://sct.ftqq.com/sendkey" target="_blank" rel="noopener">${tx("获取 SendKey", "Get SendKey")}</a><button id="localKeySave">${tx("保存到当前会话", "Save for this session")}</button><button type="button" id="localAlertTest">${tx("测试当前市价", "Test current price")}</button><button type="button" id="localAlertClear" class="danger">${tx("清除本机 Key", "Clear local Key")}</button></form><div class="alert-rule-toolbar"><b>₿ BTCUSDT ${tx("永续", "Perpetual")}</b><div><button type="button" id="clearLocalAlerts" class="danger">${tx("批量全删", "Delete all")}</button><button type="button" id="openLocalAlert">＋ ${tx("添加预警", "Add alert")}</button></div></div><div id="localAlertList" class="wechat-alert-detail"></div><div id="localAlertModal" class="alert-composer" hidden><section><header><b>${tx("添加预警", "Add alert")}</b><button type="button" id="closeLocalAlert">×</button></header><p class="alert-symbol">₿ <b>BTCUSDT ${tx("永续", "Perpetual")}</b></p><form id="localAlertForm"><label>${tx("预警类型", "Alert type")}<select name="kind"><option value="price_reached">${tx("价格达到", "Price reached")}</option><option value="price_above">${tx("价格上涨至", "Price rises to")}</option><option value="price_below">${tx("价格下跌至", "Price falls to")}</option><option value="long_liquidation">${tx("多头爆仓价", "Long liquidation")}</option><option value="short_liquidation">${tx("空头爆仓价", "Short liquidation")}</option></select></label><label>${tx("价格", "Price")}<span class="mark-price">${tx("市价", "Mark")} <button type="button" id="useLocalMark">--</button></span><input name="target" type="number" inputmode="decimal" min="0" step="0.01" required placeholder="80000"><em>USDT</em></label><div class="frequency"><b>${tx("频率", "Frequency")}</b><div><button type="button" data-local-frequency="once" class="active">${tx("仅提醒一次", "Once")}</button><button type="button" data-local-frequency="repeat">${tx("重复提醒", "Repeat")}</button></div></div><label id="localCooldown" hidden>${tx("冷却时间（分钟）", "Cooldown (minutes)")}<input name="cooldown" type="number" inputmode="numeric" min="1" step="1" value="5"></label><label class="voice-rule-option"><input name="voiceEnabled" type="checkbox" checked>${tx("触发时语音播报", "Speak when triggered")}</label><button class="alert-submit">${tx("添加", "Add")}</button></form></section></div>`;
-  const submitAlert = card.querySelector(".alert-submit"),
-    alertActions = document.createElement("div");
-  alertActions.className = "alert-actions";
-  alertActions.innerHTML = `<button type="button" id="localRuleTest">${tx("测试当前规则（不保存）", "Test rule (not saved)")}</button>`;
-  submitAlert.before(alertActions);
-  alertActions.append(submitAlert);
-  const notice = document.createElement("div");
-  notice.id = "localRuleNotice";
-  notice.className = "alert-composer alert-notice";
-  notice.hidden = true;
-  notice.innerHTML = `<section role="dialog" aria-modal="true" aria-labelledby="localRuleNoticeTitle"><header><b id="localRuleNoticeTitle">${tx("规则测试已发送", "Rule test sent")}</b><button type="button" id="closeLocalRuleNotice" aria-label="${tx("关闭", "Close")}">×</button></header><div class="notice-body"><span>✓</span><p>${tx("当前规则测试请求已发送。通知标题会标注“【测试】”，该规则不会被保存，也不会影响已有规则的冷却时间。", "The current-rule test was sent. Its notification is labeled “Test”; this rule is not saved and does not affect existing cooldowns.")}</p></div><button type="button" id="confirmLocalRuleNotice" class="alert-submit">${tx("我知道了", "Got it")}</button></section>`;
-  document.body.append(notice);
-  details.append(card);
-  (main.querySelector("footer") || main.lastElementChild).before(details);
-  const keyForm = $("localKeyForm"),
-    keyInput = keyForm.elements.key,
-    stateEl = $("localAlertState"),
-    description = $("localAlertDescription"),
-    saveKeyButton = $("localKeySave"),
-    testButton = $("localAlertTest"),
-    clearKeyButton = $("localAlertClear"),
-    list = $("localAlertList"),
-    modal = $("localAlertModal"),
-    form = $("localAlertForm");
-  let cloudSession = { loggedIn: false, hasSendKey: false };
-  keyInput.value = sessionStorage.getItem(keyStore) || "";
-  const showRuleNotice = (open) => {
-    notice.hidden = !open;
-  };
-  $("closeLocalRuleNotice").onclick = () => showRuleNotice(false);
-  $("confirmLocalRuleNotice").onclick = () => showRuleNotice(false);
-  notice.onclick = (event) => {
-    if (event.target === notice) showRuleNotice(false);
-  };
-  const label = (kind) =>
-    ({
-      price_reached: tx("价格达到", "Price reaches"),
-      price_above: tx("价格上涨至", "Price rises to"),
-      price_below: tx("价格下跌至", "Price falls to"),
-      long_liquidation: tx("多头爆仓价", "Long liquidation"),
-      short_liquidation: tx("空头爆仓价", "Short liquidation"),
-    })[kind] || kind;
-  const alertCategory = (kind) =>
-    kind === "long_liquidation" || kind === "short_liquidation"
-      ? tx("爆仓告警", "Liquidation alert")
-      : tx("价格告警", "Price alert");
-  const alertPhrase = (kind, price) =>
-    uiLang === "zh"
-      ? ({
-          price_reached: `BTC价格达到 ${price}`,
-          price_above: `BTC价格上涨至 ${price}`,
-          price_below: `BTC价格下跌至 ${price}`,
-          long_liquidation: `BTC价格接近多头爆仓价 ${price}`,
-          short_liquidation: `BTC价格接近空头爆仓价 ${price}`,
-        })[kind] || `BTC价格 ${price}`
-      : ({
-          price_reached: `BTC price reaches ${price}`,
-          price_above: `BTC price rises to ${price}`,
-          price_below: `BTC price falls to ${price}`,
-          long_liquidation: `BTC price nears long liquidation ${price}`,
-          short_liquidation: `BTC price nears short liquidation ${price}`,
-        })[kind] || `BTC price ${price}`;
-  const alertTitle = (kind, target, { test = false } = {}) => {
-    const phrase = alertPhrase(kind, target);
-    if (test) return `${alertCategory(kind)}【${tx("测试", "Test")}】 ${phrase}`;
-    return kind === "long_liquidation" || kind === "short_liquidation"
-      ? `【${tx("爆仓", "Liquidation")}】${phrase.replace(/^BTC价格/, uiLang === "zh" ? "BTC价格" : "BTC price")}`
-      : `【${tx("价格", "Price")}】${phrase}`;
-  };
-  const triggerText = (rule) =>
-    rule.lastTriggeredAt
-      ? `${new Date(rule.lastTriggeredAt).toLocaleString(uiLang === "zh" ? "zh-CN" : "en-US", { hour12: false })} · ${tx("实时", "Live")} ${Number.isFinite(Number(rule.lastTriggeredPrice)) ? `${fmt(rule.lastTriggeredPrice)} USDT` : "--"}`
-      : "";
-  const render = () => {
-    const ready = /^SCT/i.test((sessionStorage.getItem(keyStore) || "").trim()),
-      cloudCount = rules.filter((r) => r.cloudManaged).length,
-      localCount = rules.length - cloudCount,
-      cloudReady = cloudSession.loggedIn && cloudSession.hasSendKey;
-    stateEl.className = `badge ${cloudCount || ready || cloudReady ? "bull" : "flat"}`;
-    stateEl.textContent = cloudSession.loggedIn
-      ? cloudReady
-        ? tx(`云端接管 ${cloudCount} 条`, `Cloud takes over ${cloudCount} rule(s)`)
-        : tx("云端待配置 Key", "Cloud key not set")
-      : ready
-        ? tx("本机推送已就绪", "Local push ready")
-        : tx("未填本机 Key", "No local key set");
-    description.textContent = cloudSession.loggedIn
-      ? tx("已登录：当前 SendKey 会加密保存到云端；云端规则会在网页关闭后继续监测并推送。", "Signed in: the SendKey is saved encrypted to the cloud; cloud rules keep monitoring after the page closes.")
-      : tx("未登录时，SendKey 与规则只保存在本机浏览器；登录后可保存到云端。", "Signed out: the SendKey and rules stay in this browser; sign in to save them to the cloud.");
-    saveKeyButton.textContent = cloudSession.loggedIn
-      ? tx("保存到云端", "Save to cloud")
-      : tx("仅保存到本机", "Save locally only");
-    testButton.textContent = cloudSession.loggedIn
-      ? tx("测试云端推送", "Test cloud push")
-      : tx("测试当前市价", "Test current price");
-    clearKeyButton.textContent = cloudSession.loggedIn
-      ? tx("清空输入", "Clear input")
-      : tx("清除本机 Key", "Clear local Key");
-    const summary = cloudCount
-      ? `<p><b>${tx(`云端已接管 ${cloudCount} 条规则`, `Cloud takes over ${cloudCount} rule(s)`)}</b>：${tx("由服务器后台持续监测，网页关闭后仍会推送。", "Monitored by the server in the background and pushed even after the page closes.")}${localCount ? tx(`其余 ${localCount} 条为本地触发，页面关闭后停止。`, `The other ${localCount} are local-triggered and stop when the page closes.`) : tx("当前没有本地触发规则。", "No local-triggered rules now.")}</p>`
-      : `<p>${tx("当前浏览器独立保存；页面保持打开时才会监测。", "Saved independently in this browser; only monitored while the page stays open.")}</p>`;
-    list.innerHTML = `${summary}<div class="notification-rule-list">${
-      rules.length
-        ? rules
-            .map((r) => {
-              const cloudManaged = Boolean(r.cloudManaged),
-                triggered =
-                  !cloudManaged && r.repeat === false && r.lastTriggeredAt;
-              return `<article class="${cloudManaged ? "cloud-managed-rule" : ""}"><span><b>→ BTC-USDT ${tx("价格预警", "price alert")}</b><small>${label(r.kind)} ${fmt(r.targetPrice)} · ${r.repeat === false ? tx("仅提醒一次", "Once only") : tx(`重复提醒 · ${r.cooldownMinutes} 分钟冷却`, `Repeat · ${r.cooldownMinutes} min cooldown`)}</small>${triggered ? `<small class="notification-triggered">${tx("已触发执行：", "Triggered: ")}${triggerText(r)}</small>` : ""}</span><em class="${cloudManaged ? "cloud-managed" : triggered ? "flat" : "bull"}">${cloudManaged ? tx("云端接管", "Cloud-managed") : triggered ? tx("已执行", "Executed") : tx("本地触发", "Local")}</em><button type="button" data-remove-local-alert="${r.id}">${tx("删除", "Delete")}</button></article>`;
-            })
-            .join("")
-        : `<small>${tx("尚未添加预警。", "No alerts added yet.")}</small>`
-    }</div>`;
-    list.querySelectorAll("[data-remove-local-alert]").forEach(
-      (b) =>
-        (b.onclick = () => {
-          rules = rules.filter((r) => r.id !== b.dataset.removeLocalAlert);
-          save();
-          render();
-        }),
-    );
-  };
-  const alertShort = (kind, target) =>
-    ({
-      price_reached: `BTC 达到 ${target} USDT`,
-      price_above: `BTC 上涨至 ${target} USDT`,
-      price_below: `BTC 下跌至 ${target} USDT`,
-      long_liquidation: `多头爆仓价 ${target} USDT`,
-      short_liquidation: `空头爆仓价 ${target} USDT`,
-    })[kind] || `BTC ${target} USDT`;
-  const push = async (current, rule = null) => {
-    const key = (sessionStorage.getItem(keyStore) || "").trim();
-    if (!/^SCT/i.test(key)) throw new Error("请先保存有效的本机 SendKey。");
-    const currentText = fmt(current),
-      targetText = rule ? fmt(rule.targetPrice) : currentText,
-      phrase = rule
-        ? alertPhrase(rule.kind, targetText)
-        : `BTC当前价格 ${currentText}`,
-      title = rule
-        ? alertTitle(rule.kind, targetText)
-        : `价格告警【测试】 ${phrase}`,
-      short = rule
-        ? alertShort(rule.kind, targetText)
-        : `BTC 当前价格 ${currentText} USDT`,
-      body = new URLSearchParams({
-        title,
-        short,
-        desp: rule
-          ? `${title}\n\n${phrase} USDT\n触发时市价 ${currentText} USDT`
-          : `${title}\n\n${phrase} USDT`,
-      });
-    try {
-      await fetch(`https://sctapi.ftqq.com/${encodeURIComponent(key)}.send`, {
-        method: "POST",
-        mode: "no-cors",
-        body,
-        keepalive: true,
-      });
-    } catch {
-      navigator.sendBeacon?.(
-        `https://sctapi.ftqq.com/${encodeURIComponent(key)}.send`,
-        body,
-      );
-    }
-  };
-  const pushRuleTest = async (current, rule) => {
-    const key = (sessionStorage.getItem(keyStore) || "").trim();
-    if (!/^SCT/i.test(key)) throw new Error("请先保存有效的本机 SendKey。");
-    const targetText = fmt(rule.targetPrice),
-      currentText = fmt(current),
-      phrase = alertPhrase(rule.kind, targetText),
-      title = alertTitle(rule.kind, targetText, { test: true }),
-      body = new URLSearchParams({
-        title,
-        short: alertShort(rule.kind, targetText),
-        desp: `${title}\n\n${phrase} USDT\n当前市价 ${currentText} USDT\n\n该规则不会被保存。`,
-      });
-    try {
-      await fetch(`https://sctapi.ftqq.com/${encodeURIComponent(key)}.send`, {
-        method: "POST",
-        mode: "no-cors",
-        body,
-        keepalive: true,
-      });
-    } catch {
-      navigator.sendBeacon?.(
-        `https://sctapi.ftqq.com/${encodeURIComponent(key)}.send`,
-        body,
-      );
-    }
-  };
-  const matched = (r, from, to) => {
-    if (r.kind === "price_reached")
-      return (from - r.targetPrice) * (to - r.targetPrice) <= 0 && from !== to;
-    const up = r.kind === "price_above" || r.kind === "short_liquidation";
-    return up
-      ? from < r.targetPrice && to >= r.targetPrice
-      : from > r.targetPrice && to <= r.targetPrice;
-  };
-  const syncMarkPrice = () => {
-    const mark = $("useLocalMark"),
-      current = price();
-    if (mark) mark.textContent = Number.isFinite(current) ? fmt(current) : "--";
-  };
-  setInterval(() => {
-    syncMarkPrice();
-    const current = price();
-    if (!Number.isFinite(current)) return;
-    if (previous === null) {
-      previous = current;
-      return;
-    }
-    const now = Date.now();
-    for (const r of rules) {
-      if (r.cloudManaged || (r.repeat === false && r.lastTriggeredAt)) continue;
-      const gap =
-        r.repeat === false
-          ? 0
-          : Math.max(1, Number(r.cooldownMinutes) || 1) * 60_000;
-      if (
-        matched(r, previous, current) &&
-        (!gap || !r.lastTriggeredAt || now - r.lastTriggeredAt >= gap)
-      ) {
-        r.lastTriggeredAt = now;
-        r.lastTriggeredPrice = current;
-        save();
-        render();
-        if (r.voiceEnabled)
-          window.dispatchEvent(
-            new CustomEvent("btc:voice-alert", {
-              detail: { rule: r, price: current },
-            }),
-          );
-        push(current, r).catch(() => {});
-      }
-    }
-    previous = current;
-  }, 1_000);
-  keyForm.onsubmit = async (e) => {
-    e.preventDefault();
-    const key = keyInput.value.trim();
-    if (!/^SCT/i.test(key)) {
-      alert("请输入以 SCT 开头的 Server酱 Turbo SendKey。");
-      return;
-    }
-    try {
-      if (cloudSession.loggedIn) {
-        const response = await fetch("/api/alerts/credentials", {
-          method: "PUT",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ sendKey: key }),
-        });
-        if (!response.ok)
-          throw new Error(
-            (await response.json().catch(() => ({}))).error || "云端保存失败",
-          );
-        sessionStorage.setItem(keyStore, key);
-        save();
-        window.dispatchEvent(new Event("btc:cloud-refresh"));
-        showAppDialog({
-          title: "云端推送",
-          message: "SendKey 已加密保存到云端。",
-        });
-      } else {
-        sessionStorage.setItem(keyStore, key);
-        save();
-        render();
-      }
-    } catch (error) {
-      showAppDialog({ title: "消息推送", message: error.message });
-    }
-  };
-  clearKeyButton.onclick = () => {
-    if (cloudSession.loggedIn) {
-      keyInput.value = "";
-      return;
-    }
-    sessionStorage.removeItem(keyStore);
-    save();
-    keyInput.value = "";
-    render();
-  };
-  $("clearLocalAlerts").onclick = () => {
-    if (!rules.length) return;
-    showAppDialog({
-      title: "确认批量删除",
-      message: "确定删除全部本机预警规则吗？",
-      confirmText: "全部删除",
-      cancelText: "取消",
-      onConfirm: () => {
-        rules = [];
-        save();
-        render();
-      },
-    });
-  };
-  testButton.onclick = async () => {
-    const current = price();
-    if (!Number.isFinite(current)) {
-      alert("实时价格尚未加载，请稍后重试。");
-      return;
-    }
-    try {
-      if (cloudSession.loggedIn) {
-        const response = await fetch("/api/alerts/test", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ price: current }),
-        });
-        if (!response.ok)
-          throw new Error(
-            (await response.json().catch(() => ({}))).error || "云端测试失败",
-          );
-        showAppDialog({
-          title: "云端测试已发送",
-          message: "测试推送已由服务器提交到 Server酱，请查看微信。",
-        });
-      } else {
-        await push(current);
-        showAppDialog({
-          title: "本机测试已发送",
-          message: "测试推送请求已由当前浏览器发出，请查看微信。",
-        });
-      }
-    } catch (error) {
-      showAppDialog({ title: "消息推送", message: error.message });
-    }
-  };
-  $("localRuleTest").onclick = async () => {
-    const target = Number(form.elements.target.value),
-      current = price();
-    if (!Number.isFinite(target) || target <= 0) {
-      alert("请先填写有效的规则价格。");
-      return;
-    }
-    if (!Number.isFinite(current)) {
-      alert("实时价格尚未加载，请稍后重试。");
-      return;
-    }
-    try {
-      await pushRuleTest(current, {
-        kind: form.elements.kind.value,
-        targetPrice: target,
-      });
-      showRuleNotice(true);
-    } catch (error) {
-      alert(error.message);
-    }
-  };
-  const show = (open) => {
-    modal.hidden = !open;
-    if (open) {
-      repeat = false;
-      form
-        .querySelectorAll("[data-local-frequency]")
-        .forEach((button) =>
-          button.classList.toggle(
-            "active",
-            button.dataset.localFrequency === "once",
-          ),
-        );
-      $("localCooldown").hidden = true;
-      syncMarkPrice();
-    }
-  };
-  $("openLocalAlert").onclick = () => show(true);
-  $("closeLocalAlert").onclick = () => show(false);
-  $("useLocalMark").onclick = () => {
-    const current = price();
-    if (Number.isFinite(current))
-      form.elements.target.value = current.toFixed(2);
-  };
-  form.querySelectorAll("[data-local-frequency]").forEach(
-    (b) =>
-      (b.onclick = () => {
-        repeat = b.dataset.localFrequency === "repeat";
-        form
-          .querySelectorAll("[data-local-frequency]")
-          .forEach((x) => x.classList.toggle("active", x === b));
-        $("localCooldown").hidden = !repeat;
-      }),
-  );
-  form.onsubmit = (e) => {
-    e.preventDefault();
-    const target = Number(form.elements.target.value),
-      cooldown = Math.max(1, Number(form.elements.cooldown.value) || 1);
-    if (!Number.isFinite(target) || target <= 0) return;
-    rules.push({
-      id: crypto.randomUUID(),
-      kind: form.elements.kind.value,
-      targetPrice: target,
-      repeat,
-      cooldownMinutes: cooldown,
-      voiceEnabled: form.elements.voiceEnabled.checked,
-      lastTriggeredAt: null,
-    });
-    save();
-    form.reset();
-    repeat = false;
-    $("localCooldown").hidden = true;
-    form.querySelector('[data-local-frequency="once"]').click();
-    show(false);
-    render();
-  };
-  window.addEventListener("btc:cloud-rules-synced", () => { window.btcSecureVault?.get('alerts').then(saved=>{if(Array.isArray(saved?.rules))rules=saved.rules;render()}).catch(()=>render()); });
-  window.addEventListener("btc:account-state", (event) => {
-    cloudSession = {
-      loggedIn: Boolean(event.detail?.loggedIn),
-      hasSendKey: Boolean(event.detail?.hasSendKey),
-    };
-    render();
+  window.BTCNotification?.init({
+    $,
+    tx,
+    showAppDialog,
+    getLang: () => uiLang,
+    getState: () => state,
+    getCoin: () => activeCoin(),
   });
-  render();
-  window.btcSecureVault?.get('alerts').then(saved=>{if(Array.isArray(saved?.rules))rules=saved.rules;if(/^SCT/i.test(String(saved?.sendKey||'')))sessionStorage.setItem(keyStore,saved.sendKey);if(!saved&&(legacyAlertState||/^SCT/i.test(legacySendKey)))save();render()}).catch(error=>console.warn('Local encrypted restore failed:',error.message));
 }, 0);
 
 /* Browser speech uses the device's native voice and stays entirely local. */
@@ -3596,15 +3379,15 @@ setTimeout(() => {
     status.textContent = tx("正在连接语音服务…", "Connecting to voice service…");
   };
   $("voiceAlertAddRule").onclick = () => $("openLocalAlert")?.click();
-  const voiceRuleStore = "btc_voice_alert_rules_v1";
-  let voiceRules = [],
-    voicePrevious = null,
-    voicePriceHistory = [],
-    voiceRuleEditingId = null;
-  try {
-    const stored = JSON.parse(localStorage.getItem(voiceRuleStore) || "[]");
-    if (Array.isArray(stored))
-      voiceRules = stored
+  /* 多币种（v2.12.5）：语音规则按币种独立存储 —— BTC 沿用旧键保留历史数据，
+     其余币种各用 btc_voice_alert_rules_v1_<COIN>；没设置过的币种就是空，不借 BTC 的规则。 */
+  const voiceRuleStoreKey = () =>
+    "btc_voice_alert_rules_v1" + coinStorageSuffix();
+  const loadVoiceRulesFromStorage = () => {
+    try {
+      const stored = JSON.parse(localStorage.getItem(voiceRuleStoreKey()) || "[]");
+      if (!Array.isArray(stored)) return [];
+      return stored
         .filter((rule) => rule && rule.id && Number(rule.targetPrice) > 0)
         .slice(0, 30)
         .map((rule) => ({
@@ -3634,9 +3417,16 @@ setTimeout(() => {
           repeat: Boolean(rule.repeat),
           cooldownMinutes: Math.max(0, Number(rule.cooldownMinutes) || 0),
         }));
-  } catch {}
+    } catch {
+      return [];
+    }
+  };
+  let voiceRules = loadVoiceRulesFromStorage(),
+    voicePrevious = null,
+    voicePriceHistory = [],
+    voiceRuleEditingId = null;
   const saveVoiceRules = () => {
-    localStorage.setItem(voiceRuleStore, JSON.stringify(voiceRules));
+    localStorage.setItem(voiceRuleStoreKey(), JSON.stringify(voiceRules));
     /* 同步页面设置供状态恢复；服务端不执行关闭页面后的接力播报。 */
     syncVoiceToServer();
   };
@@ -3645,6 +3435,7 @@ setTimeout(() => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
+        symbol: activeCoin(),
         settings: {
           enabled: Boolean(settings.enabled),
           livePriceEnabled: Boolean(settings.livePriceEnabled),
@@ -3686,12 +3477,22 @@ setTimeout(() => {
           }
         }
         if (changed) {
-          localStorage.setItem(voiceRuleStore, JSON.stringify(voiceRules));
+          localStorage.setItem(voiceRuleStoreKey(), JSON.stringify(voiceRules));
           renderVoiceRules();
         }
       })
       .catch(() => {});
   }, 10_000);
+  /* 多币种：切换币种时重读该币种自己的语音规则，并重置价格基准与短窗历史
+     （跨币种价格量级差异巨大，沿用旧基准会把切换瞬间当成暴涨暴跌误触发）。 */
+  window.addEventListener("btc:coin-changed", () => {
+    voiceRules = loadVoiceRulesFromStorage();
+    voicePrevious = null;
+    voicePriceHistory = [];
+    voiceRuleEditingId = null;
+    renderVoiceRules();
+    syncVoiceToServer();
+  });
   const voiceRuleName = (kind, direction, positionSide = "long") =>
     ({
       price_reached: tx("价格达到", "Price reached"),
@@ -4489,27 +4290,42 @@ setTimeout(() => {
       voicePrevious = current;
       return;
     }
+    /* 异常报价跳变保护：单拍价格不可能合法地跳 3% 以上，只有「页面刚打开时先拿到本地
+       快照价（或行情源短暂串到别的币种）」这类坏读数才会如此。坏读数一旦进入规则判定，
+       所有「价格达到／越过」类规则会在同一拍被同时判成穿越 —— 实测 09:44:39.433 有 6 条
+       规则在同一毫秒全部播报（当时 BTC 实际 81,43x，不可能同时穿越 74,500~80,300 六个
+       价位）。这一拍只用来把基准对齐到新价格，不参与任何规则判定。 */
+    if (
+      voicePrevious > 0 &&
+      Math.abs(current - voicePrevious) / voicePrevious > 0.03
+    ) {
+      voicePrevious = current;
+      return;
+    }
     const triggeredBatch = [];
     if (settings.enabled)
       for (const rule of voiceRules) {
         if (!rule.repeat && rule.lastTriggeredAt) continue;
         const satisfied = voiceMatched(rule, voicePrevious, current, now);
-        /* 状态类规则（上涨至／下跌至）在价格持续满足期间每秒都为真：
-           只有“从不满足→满足”的边沿立即播报；持续满足期间重复规则按冷却重复，
-           且冷却下限 30 秒，避免“重复播报 · 不冷却”每秒狂响。 */
+        /* 冷却时间对「重复播报」规则是唯一的闸门 —— 包括每一次新的边沿。
+           曾经的写法是 freshEdge（“上一拍不满足、这一拍满足”）直接短路冷却：对状态类
+           规则（上涨至／下跌至，持续满足时 satisfied 恒为真）没问题，但 price_reached
+           （价格达到）这类穿越规则的 satisfied 只在穿越那一拍为真、紧接着就回到 false，
+           于是价格在目标位附近来回震荡时每一次穿越都被当成“新边沿”立即播报，冷却形同
+           虚设（实测设了 5 分钟冷却的「价格达到 81,000」在 18 秒内播报两次；当时价格在
+           81,000 上下 ±40 反复穿越，32 分钟内穿越 15 次）。现在：重复规则首次触发照旧
+           立即出声，之后一律等冷却（不冷却也为 30 秒下限）；一次性规则语义不变，仍由
+           上面的 continue 保证只播一次。 */
         const cooldown = rule.repeat
           ? Math.max(
               30_000,
               Math.max(0, Number(rule.cooldownMinutes) || 0) * 60_000,
             )
           : 0;
-        const freshEdge = !rule.satisfied;
-        if (
-          satisfied &&
-          (freshEdge ||
-            !rule.lastTriggeredAt ||
-            now - rule.lastTriggeredAt >= cooldown)
-        ) {
+        const cooldownReady =
+          !rule.lastTriggeredAt || now - rule.lastTriggeredAt >= cooldown;
+        /* 一次性规则到这一步时 lastTriggeredAt 必为空（上面已 continue），恒为真。 */
+        if (satisfied && (rule.repeat ? cooldownReady : true)) {
           const direction = voiceDirection(rule, voicePrevious, current, now);
           rule.lastTriggeredAt = now;
           if (rule.kind === "price_move" && rule.repeat)
@@ -4610,7 +4426,7 @@ function addGlobalHelp() {
     "The probability model estimates future direction from historical price features. It is research context only, not a profit guarantee or a substitute for risk management.",
   );
   addHelp(
-    document.querySelector(".correlation-card h2"),
+    document.querySelector(".fed-corr-panel h3"),
     "比较 BTC 与 SPY、QQQ 的滚动相关和跨市场特征，辅助识别联动环境；相关性会随时间变化。",
     "Compares rolling BTC correlations with SPY and QQQ. It helps identify market linkage; correlations vary over time.",
   );
@@ -5186,14 +5002,29 @@ function traceSmoothChartLine(c, values, x, y) {
 
 /* 主图绘图区几何：renderChart 与十字线 syncHoverPoint 必须共用同一套数值。
    成交量和 RSI 已经在独立画布（#chartRsi）里，主图画布只到时间轴上方，
-   所以不能再沿用「扣掉副图高度」的旧公式，否则定位点会提前卡在半空。 */
-const CHART_PAD = { l: 52, r: 74, t: 15, b: 8 },
+   所以不能再沿用「扣掉副图高度」的旧公式，否则定位点会提前卡在半空。
+   右侧留白 r 从 74 收为 0（价格轴不再独占画布右侧空白带），再回到与左侧相同的 18：
+   K 线两端都不贴画布边，价格数字作为浮层压在绘图区右端之上，不占独立空间。 */
+const CHART_PAD = { l: 18, r: 18, t: 15, b: 8 },
   CHART_TIME_AXIS_H = 28;
 function chartPlotGeom(rect) {
   const cw = rect.width - CHART_PAD.l - CHART_PAD.r,
     ch = rect.height - CHART_PAD.t - CHART_PAD.b;
   return { cw, ch, priceHeight: Math.max(80, ch - CHART_TIME_AXIS_H) };
 }
+/* 价格标签的「点一下凸显」状态：默认 -1 表示 K 线优先（标签整体压暗），
+   点中某个标签后它单独恢复不透明度并跳到最前，点空白处再收回。
+   priceChipRects 每帧由绘制过程写入，供点击命中判定使用。 */
+let priceChipPinned = -1,
+  priceChipRects = [];
+const priceChipHitTest = (event, cv) => {
+  const r = cv.getBoundingClientRect(),
+    px = event.clientX - r.left,
+    py = event.clientY - r.top;
+  return priceChipRects.findIndex(
+    (b) => b && px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h,
+  );
+};
 
 /* 主图每次绘制都会写入当前价格标尺。极值标签与 hover 命中判定共用这一标尺，
    标注点才会落在 K 线真实位置，而不是另一套估算出来的坐标上。 */
@@ -5248,6 +5079,38 @@ function chartPlotMapper(rect, d) {
     y: (v) =>
       CHART_PAD.t + priceHeight - ((v - lo) / (hi - lo || 1)) * priceHeight,
   };
+}
+
+/* 买入/卖出气球标记的数据源：欧易同步扩展（tools/okx-position-filler）在填卡的
+   同时把每笔仓的开仓时间按「方向@开仓均价」指纹存进 localStorage["okxFiller:openedAt"]
+   （rec.at 为毫秒；精度四级：成交明细秒级 > K 线反查 > 首次同步 > 手动）。
+   匹配顺序：精确指纹命中 → 同方向、价差 ≤0.2% 里取最近的一条（防两侧数字格式抖动）。
+   找不到（没装扩展 / 没同步过 / 用户改过方向）返回 null —— 没有时间锚点就不画气球。 */
+function personalEntryOpenedAt(side, price) {
+  let map = null;
+  try {
+    map = JSON.parse(localStorage.getItem("okxFiller:openedAt") || "{}");
+  } catch {
+    return null;
+  }
+  if (!map || typeof map !== "object") return null;
+  const hit = map[side + "@" + price];
+  if (hit && Number(hit.at) > 0) return Number(hit.at);
+  let best = null,
+    bestGap = Infinity;
+  for (const [key, rec] of Object.entries(map)) {
+    if (!key.startsWith(side + "@")) continue;
+    const at = Number(rec?.at);
+    if (!(at > 0)) continue;
+    const p = Number(key.slice(side.length + 1));
+    if (!(p > 0)) continue;
+    const gap = Math.abs(p - price) / price;
+    if (gap <= 0.002 && gap < bestGap) {
+      bestGap = gap;
+      best = at;
+    }
+  }
+  return best;
 }
 
 function drawCandlestickChart() {
@@ -5382,6 +5245,22 @@ function drawCandlestickChart() {
   liqLevelsWithPlacement
     .filter((entry) => entry.placement === "inside")
     .forEach((entry) => values.push(entry.price));
+  /* 买入/卖出气球（B/S）：做多=买入点（绿 B），做空=卖出开空点（红 S）。
+     时间锚点 = 扩展记录的开仓时间，落在可见范围内最近的那根 K 线上；
+     不参与价格缩放（values 之外），否则远价位的仓会把 K 线压扁。 */
+  const markerSpacing = d.length > 1 ? d[1].time - d[0].time : 0;
+  const tradeMarkers = (window.btcPersonalEntries || [])
+    .map((entry) => {
+      const price = Number(entry?.price);
+      if (!(price > 0) || !markerSpacing) return null;
+      const side = entry.side === "short" ? "short" : "long",
+        at = personalEntryOpenedAt(side, price);
+      if (!(at > 0)) return null;
+      const idx = Math.round((at - d[0].time) / markerSpacing);
+      if (idx < 0 || idx > d.length - 1) return null;
+      return { side, idx };
+    })
+    .filter(Boolean);
   let lo = minOf(values),
     hi = maxOf(values),
     margin = (hi - lo || 1) * 0.075;
@@ -5397,18 +5276,35 @@ function drawCandlestickChart() {
   c.lineWidth = 1;
   c.strokeStyle = "rgba(144,169,199,.14)";
   c.fillStyle = "#75849a";
-  // Y 轴价格标签：右对齐到右侧留白边界内，避免长数字（如 80019.01）起点侵入图表绘制区
-  // Right-align Y-axis labels inside the right padding so long price strings (e.g. 80019.01) don't bleed into the chart area.
-  c.textAlign = "right";
+  /* Y 轴价格刻度：内嵌到绘图区右缘。
+     原先价格轴独占画布右侧 74px 的空白带，数字离图很远、K 线可用宽度却被压掉一截。
+     现在网格线一路画到画布右边缘，价格坐在半透明圆角底片上、贴着右缘，
+     既能一眼对上线，也不再吃掉横向空间（数字带底片是为了不糊住最右侧那几根 K 线）。 */
+  /* Y-axis price ticks, overlaid on the plot's right edge. The grid line runs to the
+     canvas edge and the value sits on a translucent rounded chip pinned there, so the
+     axis no longer costs 74px of horizontal space while staying readable. */
+  /* Y 轴价格刻度：内嵌到绘图区右缘。
+     原先价格轴独占画布右侧 74px 的空白带，数字离图很远、K 线可用宽度却被压掉一截。
+     现在网格线一路画到画布右边缘；价格数字与底片留到全部图形画完之后再落笔
+     （见本函数末尾的 priceChips 段），否则会被最右侧那几根 K 线盖住。 */
+  const priceLight = document.documentElement.getAttribute("data-theme") === "light",
+    priceChips = [];
   for (let g = 0; g < 5; g++) {
     const yy = P.t + (g * priceHeight) / 4;
     c.beginPath();
     c.moveTo(P.l, yy);
+    /* 网格线停在绘图区右边界（= 画布宽 − 18），与左端同样留出 18px；
+       一路顶到画布边缘的话，会跟容器边框贴在一起，左右看着一头齐一头空。 */
     c.lineTo(P.l + cw, yy);
     c.stroke();
-    c.fillText((hi - ((hi - lo) * g) / 4).toFixed(2), w - 6, yy + 4);
+    priceChips.push([
+      (hi - ((hi - lo) * g) / 4).toLocaleString("en-US", {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      }),
+      yy,
+    ]);
   }
-  c.textAlign = "start";
   const candleWidth = Math.max(2, Math.min(14, (cw / d.length) * 0.64)),
     lines = state.chartLines || { ma20: true, ma50: true, ma200: true, boll: true, vwap: true },
     series = state.chartSeries || { candles: true, close: false, volume: true, rsi: true };
@@ -5622,7 +5518,14 @@ function drawCandlestickChart() {
       labelY: outerAbove ? yy - 20 : yy + 5,
     });
   });
-  const labelXOf = (d) => (d.isShort ? P.l + cw / 2 - d.width / 2 : P.l + 5),
+  /* 价格坐标一旦切到左端，会占住绘图区最左约 80px：做多线的线名往右让开这一段，
+     否则两串文字会叠在一起。切回右端（或关掉坐标）时线名回到原来的贴左位置。 */
+  const priceAxisLeftPad =
+      state.priceAxis !== false && state.priceAxisSide === "left" ? 82 : 0,
+    labelXOf = (d) =>
+      d.isShort
+        ? P.l + cw / 2 - d.width / 2
+        : P.l + 5 + priceAxisLeftPad,
     clampLabelY = (v) =>
       Math.max(P.t + 3, Math.min(P.t + priceHeight - LABEL_H - 3, v)),
     placedRects = [],
@@ -5718,6 +5621,45 @@ function drawCandlestickChart() {
     c.stroke();
     c.restore();
   }
+  /* 买入/卖出气球：挂在锚定 K 线的影线端点外侧 —— 做多 B（绿）在下、做空 S（红）在上，
+     气球圆 + 指向 K 线的小尾巴，TradingView 风格。亮主题补一圈白描边保证对比度。 */
+  if (tradeMarkers.length) {
+    c.save();
+    c.font = "700 10px ui-sans-serif,system-ui";
+    c.textAlign = "center";
+    c.textBaseline = "middle";
+    const markerLight =
+      document.documentElement.getAttribute("data-theme") === "light";
+    for (const m of tradeMarkers) {
+      const v = d[m.idx],
+        isLong = m.side === "long",
+        dir = isLong ? 1 : -1,
+        anchorY = isLong ? y(v.low) : y(v.high),
+        col = isLong ? "#28c76f" : "#ef4d78",
+        xx = x(m.idx),
+        cy = anchorY + dir * 16;
+      c.fillStyle = col;
+      /* 尾巴：从影线端点指向气球圆。 */
+      c.beginPath();
+      c.moveTo(xx, anchorY + dir * 1);
+      c.lineTo(xx - 3.2, anchorY + dir * 7.5);
+      c.lineTo(xx + 3.2, anchorY + dir * 7.5);
+      c.closePath();
+      c.fill();
+      /* 气球主体：圆心距影线端点 16px，半径 9 —— 近端刚好压住尾巴底边。 */
+      c.beginPath();
+      c.arc(xx, cy, 9, 0, Math.PI * 2);
+      c.fill();
+      if (markerLight) {
+        c.strokeStyle = "rgba(255,255,255,.85)";
+        c.lineWidth = 1;
+        c.stroke();
+      }
+      c.fillStyle = "#fff";
+      c.fillText(isLong ? "B" : "S", xx, cy + dir * 0.5);
+    }
+    c.restore();
+  }
   if (chartSelection) {
     const a = Math.min(chartSelection.start, chartSelection.end),
       b = Math.max(chartSelection.start, chartSelection.end);
@@ -5769,19 +5711,51 @@ function drawCandlestickChart() {
     c.font = "700 11px ui-sans-serif,system-ui";
     c.textAlign = "right";
     let by = P.t + 14;
+    /* 右侧要给价格底片让位（约 72px 宽），角标右边缘退到它左边，免得在右上角叠在一起。
+       价格坐标被切到左端或关掉时这里仍保持同样的退让量，免得角标跟着左右横跳。 */
+    const chipReserve = 78;
     for (const [txt, col] of badges) {
-      const tw = c.measureText(txt).width + 14;
+      const tw = c.measureText(txt).width + 14,
+        bxx = P.l + cw - chipReserve - tw;
       c.fillStyle = lightTheme ? "rgba(255,255,255,.82)" : "rgba(20,28,40,.78)";
-      c.fillRect(P.l + cw - tw, by - 12, tw, 17);
+      c.fillRect(bxx, by - 12, tw, 17);
       c.strokeStyle = col;
       c.lineWidth = 1;
-      c.strokeRect(P.l + cw - tw, by - 12, tw, 17);
+      c.strokeRect(bxx, by - 12, tw, 17);
       c.fillStyle = lightTheme ? "#7a4a00" : col;
-      c.fillText(txt, P.l + cw - 7, by);
+      c.fillText(txt, bxx + tw - 7, by);
       by += 21;
     }
     c.restore();
   }
+  /* 价格数字与底片最后落笔：此时 K 线、均线、各种标注都已经画完，它们压在最上层，
+     否则最右边那几根 K 线会把数字吃掉。
+     贴哪一端、要不要显示，都由图表菜单里的「价格坐标」控制（默认右侧、显示）。 */
+  c.save();
+  c.font = "11px system-ui";
+  priceChipRects = [];
+  if (state.priceAxis !== false) {
+    const onLeft = state.priceAxisSide === "left";
+    c.textAlign = onLeft ? "left" : "right";
+    priceChips.forEach(([txt, yy], idx) => {
+      const bw = c.measureText(txt).width + 12,
+        bx = onLeft ? P.l + 3 : P.l + cw - bw - 3,
+        by = yy - 8,
+        pinned = idx === priceChipPinned;
+      c.globalAlpha = pinned ? 1 : 0.58;
+      c.fillStyle = priceLight ? "rgba(255,255,255,.88)" : "rgba(13,22,36,.84)";
+      c.beginPath();
+      if (c.roundRect) c.roundRect(bx, by, bw, 16, 4);
+      else c.rect(bx, by, bw, 16);
+      c.fill();
+      c.fillStyle = priceLight ? "#4a5b73" : "#96a8c2";
+      c.fillText(txt, onLeft ? P.l + 9 : P.l + cw - 9, yy + 4);
+      c.globalAlpha = 1;
+      priceChipRects.push({ x: bx, y: by, w: bw, h: 16 });
+    });
+  }
+  c.restore();
+
   /* X 轴时间刻度：随可见 K 线范围、缩放与周期动态调整密度/格式。 */
   c.save();
   const intervalMins = intervalMinutes[state.interval] || 1;
@@ -5812,15 +5786,28 @@ function drawCandlestickChart() {
   c.stroke();
   c.fillStyle = "#75849a";
   c.font = "11px system-ui";
-  c.textAlign = "center";
   c.textBaseline = "top";
+  /* 时间刻度：只落在标签所在的关键时间点上，每个位置一条竖线（像刻度尺的短线），
+     不额外加密。线改用偏蓝的亮色、并且比轴线粗一档 —— 和网格线同一个色系时，
+     一眼扫过去根本找不到刻度在哪儿。
+     首尾两个标签改成贴边对齐 —— 居中的话第一个标签会有一半落在画布外，
+     显示成「-19 22:37」这样被裁掉一截。 */
+  c.strokeStyle = "rgba(126,178,238,.72)";
+  c.lineWidth = 2;
   for (let i = 0; i < d.length; i += timeStep) {
-    const xx = x(i);
+    const xx = x(i),
+      txt = formatTimeAxisLabel(d[i].time, showDate, showYear),
+      tw = c.measureText(txt).width;
     c.beginPath();
-    c.moveTo(xx, axisY - 4);
+    c.moveTo(xx, axisY - 7);
     c.lineTo(xx, axisY);
     c.stroke();
-    c.fillText(formatTimeAxisLabel(d[i].time, showDate, showYear), xx, axisY + 3);
+    c.textAlign = xx - tw / 2 < P.l ? "left" : xx + tw / 2 > P.l + cw ? "right" : "center";
+    c.fillText(
+      txt,
+      c.textAlign === "left" ? P.l : c.textAlign === "right" ? P.l + cw : xx,
+      axisY + 3,
+    );
   }
   c.restore();
   renderRangeExtremaPoints();
@@ -5872,7 +5859,9 @@ function drawRsiChart() {
   if (cv.width !== nextW) cv.width = nextW;
   if (cv.height !== nextH) cv.height = nextH;
   const c = cv.getContext("2d");
-  const P = { l: 52, r: 74, t: 8, b: 8 },
+  /* 与主图共用左右几何（CHART_PAD）：主图把价格轴内嵌之后右留白已归零，
+     副图必须跟着走同一条边界，否则右侧会空出一截、与主图对不齐。 */
+  const P = { l: CHART_PAD.l, r: CHART_PAD.r, t: 8, b: 8 },
     cw = w - P.l - P.r,
     ch = h - P.t - P.b;
   c.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -5959,9 +5948,14 @@ function drawRsiChart() {
     c.restore();
   }
   if (!showRsi) return;
-  /* RSI 曲线（在 RSI 区域绘制；聚焦时加粗发光，柱聚焦时略退后）。 */
-  const closes = d.map((v) => v.close),
-    rsiArr = rsi(closes, 14),
+  /* RSI 曲线（在 RSI 区域绘制；聚焦时加粗发光，柱聚焦时略退后）。
+     RSI(14) 的前 14 根天然没有值 —— 需要 14 个涨跌幅做预热。若直接拿「可见范围」
+     那一段收盘价去算，曲线左端就永远缺一截，而且每横向滚动一次都会重新缺一次。
+     这里改成用整段 K 线算完之后再切出可见的那一段，于是只有数据最开头才缺。 */
+  const allCloses = (frozenCandles || state.candles || []).map((v) => v.close),
+    fullRsi = allCloses.length > d.length ? rsi(allCloses, 14) : null,
+    closes = d.map((v) => v.close),
+    rsiArr = fullRsi ? fullRsi.slice(fullRsi.length - d.length) : rsi(closes, 14),
     /* RSI 用中性白（亮色主题用石板灰）：与红绿成交量柱、各指标线色差都最大。 */
     rsiColor =
       document.documentElement.getAttribute("data-theme") === "light"
@@ -6038,7 +6032,9 @@ function drawRsiChart() {
 (() => {
   const cv = $("chartRsi");
   if (!cv) return;
-  const P = { l: 52, r: 74, t: 8, b: 8 };
+  /* 必须与 drawRsiChart 的绘制几何完全一致（原先这里写 l:52、绘制却用 l:18，
+     点选命中的柱子与眼睛看到的相差 34px。 */
+  const P = { l: CHART_PAD.l, r: CHART_PAD.r, t: 8, b: 8 };
   const pick = (event) => {
     const rect = cv.getBoundingClientRect(),
       d = visibleCandles();
@@ -6760,7 +6756,7 @@ $("source")?.addEventListener("change", () => {
   derivativeMarketContext = null;
   loadDerivativeMarketContext(true);
 });
-loadDerivativeMarketContext(true);
+whenIdle(() => loadDerivativeMarketContext(true));
 setInterval(() => loadDerivativeMarketContext(true), 10_000);
 
 /* 连通性诊断在启动稍后执行，并将服务器给出的本地与上游耗时分别呈现。
@@ -6918,10 +6914,8 @@ setTimeout(() => {
   const checks = () => [
     { cat: "market", name: tx("OKX WebSocket（优先）", "OKX WebSocket (preferred)"), contract: "wss://ws.okx.com:8443/ws/v5/public", run: webSocketCheck },
     { cat: "market", name: tx("本站后端", "Site backend"), contract: "/api/status", run: backendCheck },
-    { cat: "market", name: "OKX", contract: "BTC-USDT-SWAP", run: marketCheck("okx", "OKX", "BTC-USDT-SWAP") },
-    { cat: "market", name: "Coinbase", contract: "BTC-PERP", run: marketCheck("coinbase", "Coinbase", "BTC-PERP") },
-    { cat: "market", name: "Gate", contract: "BTC_USDT", run: marketCheck("gate", "Gate", "BTC_USDT") },
-    { cat: "market", name: "Binance", contract: "BTCUSDT", run: marketCheck("binance", "Binance", "BTCUSDT") },
+    { cat: "market", name: "OKX", contract: coinMetaOf().okx.swap, run: marketCheck("okx", "OKX", coinMetaOf().okx.swap) },
+    { cat: "market", name: "Binance", contract: coinMetaOf().binance, run: marketCheck("binance", "Binance", coinMetaOf().binance) },
     { cat: "market", name: tx("衍生品上下文", "Derivatives context"), contract: "/api/market-context · OKX", run: async () => {
         const result = await timedFetch("/api/market-context?source=okx"),
           { data } = result;
@@ -7362,7 +7356,7 @@ renderRangeExtremaPoints = function () {
   const version = document.createElement("button");
   version.type = "button";
   version.id = "appVersion";
-  version.textContent = "v2.10.34";
+  version.textContent = "v2.12.5";
   version.title = "查看更新日志";
   version.setAttribute("aria-expanded", "false");
   const sourceLabel = controls.querySelector("label");
@@ -7459,8 +7453,8 @@ renderRangeExtremaPoints = function () {
   const v2111Changelog = log.innerHTML;
   log.innerHTML = `<b>v2.10.12 更新日志</b><dl><dt>「填入我的持仓价」改为读取顶部两个舱段</dt><dd>修复「填入我的持仓价」浮层里两个价格一直显示「--」的问题：原实现只读旧的「我的持仓与盈亏估算」卡片留言记录，没有读取顶部「我的持仓」卡片的两个舱段。现在浮层直接列出顶部两个舱段的开仓均价，并附带持仓量、保证金与有效杠杆，哪一格没填就明确置灰并提示。</dd><dt>选中舱段 = 一次填好整笔持仓</dt><dd>点选某个舱段不再是只填开仓均价，而是把方向、开仓均价、持仓量、有效杠杆一起写入计算器（有效杠杆 = 持仓量 ÷ 保证金，与顶部卡片显示的理论强平价同口径），上下两块数字从此一致。</dd><dt>「引用顶部持仓数据」同样优先取顶部舱段</dt><dd>该按钮原先读旧持仓卡；现在优先取与当前方向一致、且已填价格的顶部舱段，顶部为空时才回退旧卡片，并在回执里写明取的是哪个舱段、填了哪些值。</dd><dt>浮层实时跟随顶部卡片</dt><dd>顶部持仓卡保存或修改后，浮层内容与本地记录立即刷新，不会出现「卡片已改、菜单还是旧值」。</dd></dl><hr>` + v2111Changelog;
   // v2.10.13：宏观与情绪卡片更名为「关注宏观事件实时数据」，并移除恐惧贪婪指数。
-  const v2112Changelog = log.innerHTML;
-  log.innerHTML = `<b>v2.10.13 更新日志</b><dl><dt>卡片更名并聚焦实时数据</dt><dd>「宏观与情绪」卡片标题改为「关注宏观事件实时数据」，右上角标签改为「实时数据」。</dd><dt>移除恐惧贪婪指数</dt><dd>该卡片不再显示恐惧贪婪指数，整块区域只保留「关注事件 · 实时数据」。</dd><dt>关注事件放大展示</dt><dd>「关注事件 · 实时数据」区块现在占满整张卡片，内部事件标题、倒计时、预期/前值/实际与阈值解读的字号、间距同步放大，阅读更醒目。</dd></dl><hr>` + v2112Changelog;
+  const v21013Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.10.13 更新日志</b><dl><dt>卡片更名并聚焦实时数据</dt><dd>「宏观与情绪」卡片标题改为「关注宏观事件实时数据」，右上角标签改为「实时数据」。</dd><dt>移除恐惧贪婪指数</dt><dd>该卡片不再显示恐惧贪婪指数，整块区域只保留「关注事件 · 实时数据」。</dd><dt>关注事件放大展示</dt><dd>「关注事件 · 实时数据」区块现在占满整张卡片，内部事件标题、倒计时、预期/前值/实际与阈值解读的字号、间距同步放大，阅读更醒目。</dd></dl><hr>` + v21013Changelog;
   // v2.10.14：去掉套娃标题，事件公布后 30 分钟内显示并高频抓取，过期自动移除。
   const v2113Changelog = log.innerHTML;
   log.innerHTML = `<b>v2.10.14 更新日志</b><dl><dt>去掉内部套娃标题</dt><dd>「关注宏观事件实时数据」卡片不再套一层「关注事件 · 实时数据」子标题，整块区域直接展示关注的数据本身。</dd><dt>已公布数据保留 30 分钟</dt><dd>事件公布后的实际值与解读只保留 30 分钟，超过后自动从卡片移除，避免把过期数据当成实时参考。</dd><dt>第一时间抓取实际值</dt><dd>事件到达公布时间前后 2 分钟内以及公布后 30 分钟内，每 15 秒强制刷新一次投资日历，跳过服务端 5 分钟缓存，确保实际值一经发布就立即回填。</dd></dl><hr>` + v2113Changelog;
@@ -7491,6 +7485,122 @@ renderRangeExtremaPoints = function () {
   // v2.10.34：修复极值悬浮卡片金额口径与右缘标记错位。
   const v2122Changelog = log.innerHTML;
   log.innerHTML = `<b>v2.10.34 更新日志</b><dl><dt>悬浮极值 K 线时显示极值价</dt><dd>鼠标悬浮到最低／最高点所在 K 线时，卡片大字原先固定显示该 K 线的收盘价（如 02:50 显示 $75,846.30），与蓝点标注的影线最低价 $74,896.60 对不上。现在悬浮的正是极值 K 线时，大字直接显示标记所标的最低价／最高价，口径与标注一致；悬浮其他 K 线仍显示选中价（收盘价）。</dd><dt>右缘标记不再错位</dt><dd>最低／最高点靠近图表右缘时，标签位置原先被硬性夹回边界内，蓝点被拉离真实 K 线约几十像素，导致悬浮蓝点时提示不出现、卡片定位到旁边的 K 线。现在标记点始终落在真实 K 线上，标签改为贴近右缘时向左展开，圆点仍精确锚在 K 线位置。</dd></dl><hr>` + v2122Changelog;
+  // v2.10.51：修复共振重构引入的 TDZ，恢复下半部分动态板块。
+  const v2123Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.10.51 更新日志</b><dl><dt>修复下半部分板块丢失</dt><dd>多周期共振加权一致性重构时，RES_INTERVALS / resonanceCache 的 const 声明位于 applyLanguage 早期调用点之后，触发暂时性死区（TDZ）ReferenceError，导致模块初始化在共振逻辑处中断，投资日历、宏观与情绪、BTC 多因子研究预测、A/B 实验中心等动态板块不再创建。已将常量上移，并在自动刷新中改用 refreshResonance，下半部分板块恢复正常。</dd></dl><hr>` + v2123Changelog;
+  const v21052Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.10.52 更新日志</b><dl><dt>消息推送模块拆分</dt><dd>消息推送整体拆分为独立文件 public/notification.js（前端）与 notification.mjs（后端发送器），app.js 减少约 640 行；app.js 中只保留依赖注入与初始化调用，为后续逐板块拆分建立模板。</dd><dt>多渠道推送</dt><dd>推送渠道从单一 Server酱 升级为多渠道：Server酱（微信）、Bark（iOS）、飞书自定义机器人、钉钉自定义机器人与通用 Webhook，可同时启用多个；每个渠道支持添加、编辑、启停、删除与一键验证（发送标注【验证】的测试消息），密钥 AES-GCM 加密存储且列表仅回传掩码。</dd><dt>消息总开关</dt><dd>新增推送总开关：关闭后云端规则与亏损联动均不再入队推送，本机模式不受影响。</dd><dt>亏损推送（联动持仓）</dt><dd>新增与「我的持仓」联动的亏损推送：按各笔持仓的保证金收益率（ROE = 价格变动% × 杠杆）计算，支持自定义警告 ROE、推送 ROE 与冷却时间；触发后向所有启用渠道推送并记录投递结果。</dd><dt>测试推送升级</dt><dd>「测试云端推送」改为向所有启用渠道逐渠道发送并回报成功数，便于确认每条链路可用。</dd><dt>旧代码清理</dt><dd>移除已被替代的旧版本机推送卡死代码（其后台轮询会造成同规则重复推送的隐患）。</dd></dl><hr>` + v21052Changelog;
+  // v2.10.53：缩小 K 线图左侧留白，让主图与 RSI 副图向左边延伸。
+  const v21053Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.10.53 更新日志</b><dl><dt>主图左侧留白缩小</dt><dd>将主 K 线 canvas 的左侧内边距从 52px 减至 18px，原先左侧无内容的宽边距不再挤压 K 线主体；Y 轴价格标签仍在右侧，整体绘图区更宽。</dd><dt>RSI 副图同步对齐</dt><dd>RSI/成交量副图的左侧内边距同样从 52px 减至 18px，确保主图与副图的 K 线竖直对齐，悬浮十字线贯穿时不错位。</dd><dt>图表容器向卡片边缘延伸</dt><dd>chart-box 在桌面端的左右负边距从 -3/-4px 扩至 -16px，让 canvas 更接近卡片内边距，进一步放大可视区域。</dd></dl><hr>` + v21052Changelog;
+  // v2.10.54：消息推送卡片 UI/交互重构（仿 8899 分渠道交互）。
+  const v21054Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.10.54 更新日志</b><dl><dt>消息推送 UI 重构</dt><dd>重新设计「消息推送」卡片：标题行右侧并列「推送设置」入口，总开关打开时正文只展示推送规则（明确标注 BTC/USDT 交易对，为未来多币种预留），关闭时整段收起。推送设置改为仿苹果补货监控（8899）的分渠道交互：每个渠道一个独立开关，打开后展开表单填写 API Key，点「确认并验证」真实发送测试消息，验证通过输入框自动收起、仅留「重新编辑」；状态徽章区分已验证（绿）／验证失败（红）／待验证（黄）／未验证（灰）。</dd></dl><hr>` + v21054Changelog;
+  // v2.10.55：修复顶部登录按钮空白失效，并重排「账户与云端服务」弹窗布局。
+  const v21055Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.10.55 更新日志</b><dl><dt>登录按钮修复</dt><dd>修复「API 接入中心」旁登录按钮显示为空白胶囊且点击无反应的问题：推送卡片重构后 cloud-alerts.js 的缓存戳未随代码更新，浏览器强缓存中的旧脚本在已被移除的节点上挂载云端面板时抛错，登录状态刷新链路整体中断。现已更新缓存戳，并在按钮创建时即写入初始文字、渲染异常时显示错误提示而非空白，杜绝同类静默失效。</dd><dt>账户弹窗重排</dt><dd>「账户与云端服务」改为分层布局：说明文字整行显示不再被挤成竖条；账户卡内为头像（邮箱首字母）、邮箱地址与「已登录」徽章一行，同步说明独立整行，「一键同步全部」与「退出登录」并列为主次按钮，配色沿用全局主题令牌。</dd></dl><hr>` + v21055Changelog;
+  // v2.10.56：图表区三块拆为左列三张平级独立卡片。
+  const v21056Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.10.56 更新日志</b><dl><dt>图表区拆分为三张独立卡片</dt><dd>K 线图、OKX 市场微观结构、周期涨幅原先嵌在同一个大卡片内，现拆为左列三张平级卡片纵向排列，各自拥有独立边框与间距，视觉层级更清晰；桌面端右列高度不再影响左列排版，移动端编排保持不变。</dd></dl><hr>` + v21056Changelog;
+  // v2.10.67：i18n 国际化修复
+  const v21067Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.10.67 更新日志</b><dl><dt>国际化（i18n）修复</dt><dd>修复英文模式下多处中文残留与 undefined：消息推送 / 账户云端 / AI 助手三大子模块切换语言时现可即时重渲染；API 接入中心弹窗与千问额度卡改为双语；连接状态、图表覆盖、缓存提示等运行时文案接入翻译；修正单参数 tx 导致的「同步中…」英文显示 undefined。</dd></dl><hr>` + v21067Changelog;
+  // v2.10.68：修复清除推送渠道后被 legacy SendKey 复活的问题
+  const v21068Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.10.68 更新日志</b><dl><dt>推送渠道修复</dt><dd>修复「推送设置 → 清除」Server酱 渠道后仍显示「未验证」的问题：老版账户级 SendKey（alert_credentials 迁移源）会在渠道列表刷新时静默复活刚删除的渠道；现在清除最后一条 Server酱 渠道时会同步清掉老版 SendKey，清除后与初始状态一致。</dd></dl><hr>` + v21068Changelog;
+  const v2_11_0Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.11.0 更新日志</b><dl><dt>宏观板块整合：5 卡并为 2 卡</dt><dd>「宏观经济数据」「数据公布影响预测」「投资日历」三卡合并为「宏观事件中枢」：默认按「今天」时间流排列，「现在」分隔线上方为已公布事件（实际值实时回填 + 利好/利空 BTC 偏差标签 + 实际值高亮），下方为即将发布事件（倒计时 + 预期）；点任意带方向模型的事件行可展开「情景（高于/低于预期）× 比特币/加密货币/美股/黄金」影响预测矩阵，原「宏观经济数据」独立卡下线。</dd><dt>宏观环境与跨市场联动</dt><dd>「BTC × 美联储监控」升级为「宏观环境与跨市场联动」：综合指标（黄金/美元指数/原油/VIX/BTC 占比等）与 FOMC/CPI/非农倒计时保留，「BTC × 美股联动分析」整体并入卡底联动面板（SPY/QQQ 报价、60 日相关性、下一交易日 BTC 看多概率），不再单独占卡，联动结果在卡每 10 分钟重渲染后自动回填不丢失。</dd><dt>时间流交互</dt><dd>日历默认范围改为「今天」并置于范围按钮首位；新增「现在」分隔线；已公布事件行绿色高亮实际值。</dd></dl><hr>` + v2_11_0Changelog;
+
+  // v2.11.2：图表悬浮缩略图 + 一键返回顶部
+  const v2112FloatChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.11.2 更新日志</b><dl><dt>图表悬浮缩略图</dt><dd>图表工具栏「重置」旁新增「缩略图」开关：开启后往下滚动浏览其他数据时，K 线主图 + RSI 副图的实时缩略图置顶悬浮在屏幕边（约 0.5 秒刷新），标题栏同步显示最新价格与涨跌幅；图表滚回视野内时自动隐藏避免遮挡。按住标题栏可拖动位置，拖右下角手柄或点 − /＋ 按钮自定义大小，点击缩略图本体在常用尺寸与放大尺寸间切换；位置与尺寸记忆在本机。</dd><dt>一键返回顶部</dt><dd>屏幕右下方新增「↑」悬浮按钮：页面下滑超过约半屏后出现，点击平滑滚回最顶部，解决长页面回滚慢的问题。</dd></dl><hr>` + v2112FloatChangelog;
+  // v2.11.3：研究预测改为终点三分类，并让采样与结算脱离页面访问
+  const v2113ThreeClassChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.11.3 更新日志</b><dl><dt>研究预测：三分类准确性验证</dt><dd>多因子研究预测改为「偏多 / 中性震荡 / 偏空」三分类：中性阈带 = 1.15σ·√周期并随每条预测存库，训练标签与结算标签统一为「终点收益是否越过阈带」，不再用「先触及哪边屏障」训练、却用「终点涨跌」评分。记分卡新增三分类准确率、混淆矩阵、漏报率，并强制并列展示「永远猜震荡」与「按频率随机」两条基线——只有差值才是模型的贡献。窗口卡片改为同时显示三类概率与当周期阈带。</dd><dt>研究预测：采样与结算脱离页面访问</dt><dd>预测写入过去只发生在有人打开页面时，样本因此是「谁来过」的便利样本（15 分钟桶覆盖率仅 20%）。现在采样与结算各走自己的服务端时钟：每 15 分钟生成四周期预测，每 60 秒结算到期预测。预测锚点改为已收盘 K 线，修复 entry 价格与桶时间错位 15 分钟的问题；同一桶在结算前会被最新模型重新定价，不再被 IGNORE 静默丢弃。日线缓存改为按末根 K 线时间判断新鲜度，修复日线冻结 20 天导致 1 天周期无法验证的问题。另修复未平仓合约交互项因运算符优先级恒为正号、候选进度条「1119/120」等缺陷，并对历史已结算行回填三分类结论。</dd></dl><hr>` + v2113ThreeClassChangelog;
+  // v2.11.4：影子评估门槛按周期展开 + 回填补全旧样本
+  const v2114GateChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.11.4 更新日志</b><dl><dt>影子评估：门槛进度按周期展开</dt><dd>候选模型的「已配对结算」此前只给总数与每周期门槛，看不出是哪个周期在等，等待期容易误判成按钮坏了。现在治理区直接列出四个周期各自的进度（如 1d 2/30），已达标的周期标红、未达标的置灰。同时修复历史回填受内存 K 线窗口限制的问题：早于窗口的已结算行匹配不到锚点，会被静默跳过而缺失三分类结论；回填改为按时间范围直读库存 K 线，约 440 条旧样本补回标签，记分卡不再丢掉这段历史。</dd></dl><hr>` + v2114GateChangelog;
+  // v2.11.5：修掉会让整页白屏的重复标识符隐患
+  const v2115RenameChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.11.5 更新日志</b><dl><dt>修复更新日志变量重名隐患</dt><dd>早期版本的日志块留下了一个错位命名的常量（v2.10.13 的块用了 v2112Changelog 这个名字）。它与后续版本按惯例命名的新块一旦撞名，重复声明会让 app.js 整个模块加载失败、页面全白。现改回与自身版本一致的命名，消除这个隐患。本次仅重命名，不改任何显示内容。</dd></dl><hr>` + v2115RenameChangelog;
+  // v2.11.6：宏观板块整合收尾（语言切换重渲 + 时间流交互）
+  const v2116MacroLangChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.11.6 更新日志</b><dl><dt>宏观板块整合收尾：语言切换同步</dt><dd>「宏观事件中枢」与「宏观环境与跨市场联动」按当前语言整卡渲染，语言切换那一刻不会逐节点替换，导致标题、范围按钮、副标题要等下一次数据刷新才变成新语言。现在切中英文会立即重渲这两张卡（保留当前范围、筛选与已展开的事件行），并同步刷新卡底 BTC × 美股联动面板的文案。</dd><dt>宏观事件中枢：时间流与展开矩阵</dt><dd>确认并保留三项交互：默认按「今天」排列、事件按北京时间升序，「现在」分隔线把今天一分为二（上方已公布、实际值绿色高亮并给出利好/利空 BTC 偏差标签；下方即将发布，带倒计时与预期）；点任意带方向模型的事件行可展开「情景（高于预期 / 低于预期）× 比特币 / 加密货币 / 美股 / 黄金」影响预测矩阵。当前若无已公布事件，则只显示单一时间轴，不画分隔线。</dd></dl><hr>` + v2116MacroLangChangelog;
+  // v2.11.7：修正持有窗口的整根 K 线偏差，并把不可比的旧样本单独标出
+  const v2117WindowChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.11.7 更新日志</b><dl><dt>研究预测：修正持有窗口的整根 K 线偏差</dt><dd>此前结算时刻按「锚定桶 + 持有期」计算，而入场价取的是锚定 K 线的收盘（即桶的收盘时刻），两者相差整整一根 K 线。实测结果是：15 分钟周期的名义持有窗口塌缩成 0，1 小时与 4 小时各少 15 分钟。更糟的是结算取的是「起点 ≥ 结算时刻的第一根 K 线」，而它此时尚未收盘，于是拿到的是盘中残价，刚开盘就立刻结算（实测新样本的实际持有只有约 1 分钟）。现在结算时刻改为「锚定桶 + (持有期 + 1) 根」，结算只采用在该时刻之前已经收盘的最后一根，实际持有窗口严格等于名义持有期。</dd><dt>研究预测：不可比的旧样本单独标出，不再稀释准确率</dt><dd>窗口定义固定之前结算的历史样本，其实际持有长度取决于「谁在什么时候打开页面」，与当前口径不可比（15 分钟这一档尤其严重）。这些行保留在库内，但记分卡改为只统计新口径样本，并在卡片上显式报出被排除的条数；分子分母都不再含糊。候选模型的配对对照不在此列——它两侧用的是同一批行，窗口偏差对两边同等作用，属于相对比较。</dd><dt>研究预测：候选快照与现役对齐</dt><dd>候选训练快照的桶时间原先盖的是训练时刻，永远配不上现役行；且参数少传两个，把方向字符串写进了震荡概率字段。现已与现役共用同一锚定与持有期定义。</dd></dl><hr>` + v2117WindowChangelog;
+  // v2.11.8：把旧样本失真的量级写进提示
+  const v2118LegacyNoteChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.11.8 更新日志</b><dl><dt>研究预测：旧样本排除提示补上量级</dt><dd>上一条只说旧窗口样本「与当前口径不可比」，没给严重程度。补上实测：旧逻辑结算时不检查目标 K 线是否已收盘，三个周期中只有约 27% / 29% / 30% 的旧样本结算价恰好等于该根的最终收盘，另有 15%–26% 在收盘前就结算了，因此这批样本的持有窗口无法复原。本次仅改提示文案。</dd></dl><hr>` + v2118LegacyNoteChangelog;
+  // v2.11.9：A/B 实验中心归位到研究板块 + 涨跌配色反向残留清理
+  const v2119PanelOrderChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.11.9 更新日志</b><dl><dt>A/B 实验中心归位到研究板块</dt><dd>A/B 实验中心原先挂在 main 末尾（footer 之前），下方被整组决策工具卡隔开，与它同属研究类的「BTC 多因子研究预测」之间隔了十几张卡。现在它紧贴研究卡之后，页面阅读顺序固定为：研究预测 → A/B 实验中心 → 宏观事件中枢 → 宏观环境与跨市场联动。这四张卡由不同异步流程创建，任一张被其他布局逻辑挪走后，由 syncMacroPanels 链式校正拉回原位。</dd><dt>涨跌配色：清理反向残留定义</dt><dd>样式表里存在两组早期残留的反向涨跌定义（.bull 红 / .bear 绿），一直被下方的 var(--bull)/--bear 规则覆盖、从未生效，但层叠顺序一旦变动就会让全站涨跌色整体翻转。现已移除，并在生效规则处标注唯一真源。全站约定保持欧美习惯：涨=绿、跌=红（K 线图同为涨 #28c76f / 跌 #ef4d78）。本次为清理，不改变任何已生效的显示颜色。</dd><dt>研究区两张卡：语言切换即时生效</dt><dd>「BTC 多因子研究预测」与「A/B 实验中心」同样是整卡渲染，语言切换那一刻不会逐节点替换文案，标题、副标题、按钮与实验注册表会停留在上一语言直到下次数据刷新（最长约 15 分钟）。现在切中英文会立即用缓存数据就地重渲这两张卡，与已按同样方式处理的「宏观事件中枢」「宏观环境与跨市场联动」保持一致。</dd></dl><hr>` + v2119PanelOrderChangelog;
+  // v2.11.10：智能顶部栏（滚动即隐 / 可唤回）
+  const v21110SmartBarChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.11.10 更新日志</b><dl><dt>智能顶部栏：向下滚动自动收起，内容让出空间</dt><dd>红框里的那条顶栏此前固定在文档流顶端，滚动时会一直占着头一屏的位置。现在它改为浮动条：向下滚动超过约一个栏高的距离后整条上滑出视口并释放点击（不会挡住底下的内容，也不会被误点到），向上滚动约 24 像素即自动滑回。鼠标移到视口顶部边缘、或键盘焦点进入栏内同样会唤回，三条通道任意一条都能把栏拿回来。</dd><dt>唤回后静置自动再收起</dt><dd>把两种方案合并了：唤回后若鼠标不在栏上、焦点不在栏内、栏内浮层（版本日志 / 连通性 / API 接入中心 / 账户卡等）未打开，静置 4 秒会再次收起，避免顶栏长期压住图表；鼠标停在栏上或浮层开着时不收起。回到页面顶部（滚动位置 ≤24 像素）则恢复常显，不参与自动收起。</dd><dt>实现方式：固定定位 + 等高占位，首屏布局零位移</dt><dd>栏体改用固定定位，原位插入一个高度跟随栏体自适应的占位块，首屏位置与改造前逐像素一致；栏体宽度与左边距跟随主内容区实时同步，窗口缩放、字体加载与中英文切换后都会重新对位。打印时栏体回归文档流，不会在导出里出现悬空的一条。跟随系统「减少动态效果」时取消过渡动画。</dd></dl><hr>` + v21110SmartBarChangelog;
+  const v21112Changelog = log.innerHTML;
+  log.innerHTML = `<b>v2.11.12 更新日志</b><dl><dt>新增：历史回放（walk-forward 三分类验证）</dt><dd>用本地已存 K 线把历史重放成已评分样本：每一段只用该段起点之前的数据训练，再逐桶预测其后的桶，因此不含前瞻偏差。首次运行约 20 秒，结果在服务端缓存 30 分钟。需要它的原因是实时样本的攒够速度由市场决定 —— 日线一天只产生一个独立结果，等 30 条就是等 30 天；回放同一条命令即可拿到约 600 条日线样本（覆盖 20 个月）与每个日内周期约 1700 条。回放不含新闻、情绪与微观结构（它们没有历史），震荡概率来自近邻池，与实时同源。</dd><dt>修正：候选升级门槛改为按周期独立判定</dt><dd>原先要求四个周期同时攒够 30 条名义样本，等于把否决权交给日线（30 天），而 4h 的重叠桶只是把计数撑大、并未增加证据。现改为每个周期按自己的「不重叠独立样本」计数（门槛 20），先达标的周期可先评估；四周期全部达标前不会给出升级结论。进度文案同步显示各周期的独立样本数。</dd><dt>记分卡新增独立样本口径</dt><dd>实时样本每 15 分钟采一个桶，只要持有期长于一根 K 线，这些桶就会互相重叠，于是统计条数会高估它实际持有的独立证据量。记分卡现在额外报出同一批行经贪心去重叠后的独立样本数及其三分类结果，不再让重叠桶虚增统计功效。</dd><dt>实时报价：主字号放大</dt><dd>顶部 BTC/USDT 主报价由 39px 提到 44px，数字本身更清晰；下方的涨跌幅、涨跌额、来源与刷新时间等小字保持原尺寸不变。</dd><dt>报价跳动：变化数字轻微放大后回落</dt><dd>逐位刷新时，发生变化的数字除了原本的变色与光晕，还会轻微放大一次（峰值 1.16 倍，以该字符底线为原点向上生长），约 0.95 秒内平滑回落到正常大小。颜色与光晕方案完全保持原样，未变化的数字位不受影响，整行基线与行高也不发生位移。</dd><dt>语音喇叭入口随之右移</dt><dd>报价变宽后，右上角的语音快捷喇叭与数字尾部贴得过近，已把它在桌面端的定位右移到 300 像素处重新留出间隔；窄屏布局不受影响。</dd></dl><hr>` + v21112Changelog;
+  // v2.11.13：首页静置也让位（静置收起 + 顶部热区唤回）
+  const v21113TopIdleStowChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.11.13 更新日志</b><dl><dt>首页静置 5 秒，顶栏自动收起并让出空间</dt><dd>上一条只做了「向下滚动收起 + 唤回后静置收起」，停在页面顶部不动时顶栏仍然常显。现在补上：停在首页顶部（滚动位置 ≤24 像素）且约 5 秒内没有任何交互 —— 鼠标不移动、不滚动、不按键、不点击 —— 顶栏同样会整条收起隐藏，并把它的占位一起收掉，下方内容整体上提约一个栏高，真正拿到这部分信息空间。</dd><dt>鼠标回到顶部区域即唤回</dt><dd>收起后把鼠标移到视口顶部边缘（约 36 像素内）就会把它唤回，与滚动到一半时的唤回方式一致：滑回栏体、占位同步展开、内容回到原位，随后重新开始计时。唤回后再静置 5 秒仍会再次收起 —— 静止不动就一直是让位的状态，鼠标一动就到手。</dd><dt>不收起的情况保持不变</dt><dd>鼠标停在栏体上、键盘焦点在栏内、栏内浮层（版本日志 / 连通性 / API 接入中心 / 账户卡 / 通知与语音设置）开着，以及栏内刚点过的 2.5 秒免打扰窗口内，都不会收起。离开顶部后的静置时长仍是 4 秒，与滚动收起配合使用。</dd><dt>实现细节：占位块只在顶部收，下滑时先补回再补偿滚动</dt><dd>占位块的高度只在「页面顶部 + 已收起」这个组合下收成 0；一旦开始下滑就先把占位补回原高，同时等量补偿滚动位置，两步相抵后画面完全不动，因此下滑途中唤回栏体也不会把内容再顶一次。占位高度过渡在首帧之后才启用，避免开屏时把首次赋值当成动画而跳一下。跟随系统「减少动态效果」时取消过渡。</dd><dt>实时报价刷新提到 4 次/秒</dt><dd>报价轮询间隔由 1 秒缩短到 250 毫秒（来源行会显示「刷新 0.25 秒/次」）。同一时刻只允许一条报价请求在飞：若有刷新节拍因上一次请求尚未返回而被跳过，会立刻补拉一次，不再出现「隔一拍才刷新」的空档；页面从后台标签切回时也立即补一次（浏览器会降频后台标签的定时器）。服务端同步收紧：WS 报价的新鲜度窗口从 5 秒收到 1.5 秒、REST 回退缓存从 1 秒降到 0.3 秒 —— 行情流一旦抖动就尽快回退到 REST 取值，而不是把几秒前的旧价继续当作实时返回。</dd><dt>跳动脉冲时长随之缩短到 0.5 秒</dt><dd>刷新变快后，若沿用原先 0.95 秒的脉冲，同一位数字连续变化时动画会在播完前被下一次刷新打断、看上去「一直亮着」。脉冲时长改为 0.5 秒，让每次跳动都能回落到常态；颜色与光晕方案完全不变。另需说明：这里显示的是 OKX 永续的「最新成交价」，行情清淡时该价本身可能几秒不动（例如在一档价位上反复成交），那属于市场行为，不是页面卡住。</dd></dl><hr>` + v21113TopIdleStowChangelog;
+  // v2.11.19：宏观事件因子（阶段 2）—— 把 CPI / 非农 / FOMC 与 BTC 事件窗口收益对齐
+  const v21119MacroEventChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.11.19 更新日志</b><dl><dt>新增：宏观事件因子（CPI / 核心 CPI / 非农 / FOMC）</dt><dd>研究预测卡片新增「宏观事件因子」面板，可按需回填至少 24 个月的宏观事件样本：从 FRED 取 CPI、核心 CPI、非农的观测序列，从美联储官方页取 FOMC 决议日，再把每次发布的时刻与 BTC 在该时刻之后 1 小时 / 4 小时 / 1 天的真实表现对齐。首批回填 110 条事件，覆盖 2024-03 至 2026-09。</dd><dt>它衡量的是波动，不是方向</dt><dd>宏观事件日的 BTC 日线波动幅度中位数比平常一天高 28% 到 56%（FOMC 1.42 倍、CPI 1.52 倍、非农 1.56 倍），且 55% 到 70% 的事件日波动被放大。这条证据比「涨还是跌」稳健得多，也正好说明这类因子应该进入波动与风险通道，而不是直接当方向信号。</dd><dt>窗口基准严格取「事件时刻前已收盘」的 K 线</dt><dd>事件当天那根日线在事件发生时仍在运行，拿它的收盘价当事件前基准就是前视偏差。实现上所有窗口都只取「收盘时刻早于事件瞬间」的最后一根 K 线，1 天窗口因此等于事件当日的完整日收益。</dd><dt>明确标注三条方法学边界</dt><dd>一、免费源拿不到市场预期，所谓的「意外」是实际值减上一次发布值，只用于事后分层，不能当发布瞬间可用的预测特征。二、FOMC 决议时刻精确到分钟（官方决议日 14:00 东部时间），非农按「次月首个周五」的稳定惯例到日，CPI 因 BLS 不承诺固定发布日只能到日级估计，所以 CPI 的 1 小时窗口不出统计。三、FRED 给的是修订后终值而非发布瞬间初值，因此修订只影响「大意外 / 小意外」的分层，不影响窗口收益本身。</dd><dt>修正：FOMC 决议日不再混入纪要发布日</dt><dd>第一版从美联储日历页的正文里提取日期，而页面正文混着会议纪要的发布日等非会议日期，凭空造出十几个不存在的「决议日」（30 个月里数到 40 次）。改为只认文件名里的日期（会议纪要与决议声明的命名惯例严格对应决议日），并保留「决议固定在周二或周三」的过滤，次数回到真实的 20 次。</dd><dt>修正：利率决议改用日度序列对齐</dt><dd>联邦基金目标利率是日度序列，原先和月度指标一样按「期」聚合，同一月内多次变动会互相覆盖。改为按事件瞬间前后各取一个观测，决议后的目标利率上限与决议前直接相减，20 次决议全部拿到了利率变动值。</dd><dt>修正：「没有意外」不再被当成小意外</dt><dd>FOMC 多数会议利率不动，若把它们按标准化的符号分到正负两侧，分层结论会凭空冒出来。现在「零意外」单独作为一类样本报出，正负意外只统计真正发生变动的那些。</dd></dl><hr>` + v21119MacroEventChangelog;
+  // v2.11.20：缩略图价格标明身份 + 逐位跳动对齐大价格
+  const v21120ThumbPriceTickChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.11.20 更新日志</b><dl><dt>缩略图价格写明白是什么价</dt><dd>悬浮缩略图标题栏原来只有一个孤零零的数字，看不出是什么价格。现在拆成两行：上行为「实时缩略图」与缩放/关闭按钮，下行在数字前明确标出「BTC/USDT 最新价」。标的是 OKX 永续的最新成交价，与页面顶部大报价同源同一时刻。</dd><dt>刷新提到 4 次每秒，与大报价同节奏</dt><dd>价格刷新原来跟着缩略图的画面一起每 0.5 秒走一次，看起来比大报价慢半拍。现在价格单独用 250 毫秒的节拍刷新（与大报价的轮询节奏一致），画面重绘仍是 0.5 秒一次，两者互不影响。</dd><dt>逐位跳动，与大报价同一套样式</dt><dd>数字改为逐位渲染并复用大报价同一套跳动样式：方向取自「本次价 vs 上次价」，涨为绿（#00d4aa）、跌为红（#ff4d6a），被跳到的数字位各做一次放大 1.16 倍并伴随光晕的脉冲后回落，0.5 秒走完，整行基线不发生位移。与顶部大报价唯一的差别是范围：大报价从第一个变化的数字位一路跳到末尾，这里改为严格按位比对，只跳真正变了的那几位（按右对齐比较，价格进位多出一位数时新出现的高位同样算变化）；逗号、小数点与货币符号不参与比较也不跳动。未变化的数字位全程静止。</dd></dl><hr>` + v21120ThumbPriceTickChangelog;
+  // v2.11.21：宏观事件列表的展开 / 收起控制条
+  const v2122ListExpandChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.11.22 更新日志</b><dl><dt>修复：展开到底后收不回来</dt><dd>宏观事件中枢底部的控制条此前只在「还有更多事件」时才渲染，一旦把范围内的事件全部展开，整块会连同「已显示 N / N 条」统计一起消失，页面上再也找不到回退入口，只能靠切换时间范围把列表重置换回来。现在控制条改为常驻：只要该范围内的事件多于折叠态的 6 条，它就一直在，并按当前状态动态切换按钮。</dd><dt>展开 / 全部展开 / 收起三档操作</dt><dd>新增「全部展开」一次到底，省去连点十余次；展开后「收起」按钮始终出现，点击即回到默认的 6 条。按钮文案随状态切换（继续展开 10 条 ⇄ 收起），符合「Show more / Show less」的通行做法。收起时若列表已滚出视口，会自动把它带回视野中央，不会让操作停在半空。</dd><dt>右侧新增进度指示</dt><dd>原先只有一行「已显示 x / y 条」小字，现在补充一条细进度轨，并用「全部」徽标标出已完全展开的状态，一眼就能判断当前展开到什么程度、还剩多少。</dd><dt>展开超过 30 条改为框内滚动</dt><dd>一旦展开超过 30 条，列表容器自动切换为固定高度（最高约 62% 视口高）的内部滚动区域，事件再多也只在框内滚，不会把整页拉成超长文档 —— 实测全部展开 116 条时页面总高 6663 像素，反而比展开 26 条时的 8219 像素更矮。同时日期分组标题吸顶，滚到任何位置都能立刻知道当前是哪一天。框内滚动时列标题行会隐藏：该行只在列表顶部出现一次，滚下去本就不可见，而每行数据自带「今值 / 预期 / 前值」标签，信息并无缺失。列表下方附「回到顶部」按钮与滚动提示。</dd></dl><hr>` + v2122ListExpandChangelog;
+  // v2.11.23：推送设置里「已验证」的渠道输入框没真正收起（hidden 被 display:flex 盖掉）
+  const v21123PushFieldsHiddenChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.11.23 更新日志</b><dl><dt>修复：渠道验证通过后，输入框没有真正收起</dt><dd>推送设置里本该在验证通过后自动收起 API Key 输入框、只留「重新编辑」和「清除」，实际却是输入框和这两个按钮同时出现 —— 判断本身是对的（按钮就是按「已收起」的状态渲染的），只是隐藏没生效：样式表给输入框容器写了 display:flex，而作者样式会盖掉浏览器对 hidden 属性的默认隐藏，于是 hidden 加不加这个容器都照常显示。现在给该容器补上 hidden 时的显式隐藏。</dd><dt>输入框的显示 / 隐藏规则（所有渠道一致）</dt><dd>收起：已经保存过配置且验证通过、当前又没在编辑时，输入框收起，只留「重新编辑」和「清除」。显示：还没保存过任何地址或 Key（例如刚打开推送开关）、验证未通过或验证失败、以及点了「重新编辑」之后，输入框显示，按钮相应换成「确认并验证」和「清除」。未登录时的本机 Server酱 走同一套规则。</dd><dt>顺带说明：钉钉 / 飞书的 Webhook 地址按原样回填</dt><dd>只有标注为密钥的字段（如加签密钥、SendKey、设备 Key）会以掩码形式返回，回填时显示「已保存，留空则不修改」；Webhook 地址属于非密钥字段，重新编辑时会带出完整地址（钉钉地址里含 access_token），属于既有设计，本次未改动。</dd></dl><hr>` + v21123PushFieldsHiddenChangelog;
+  // v2.11.26：图表工具栏「横向移动」的小字提示默认收起，悬停标题时原位替换
+  const v21126PanHintChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.11.26 更新日志</b><dl><dt>「横向移动」下方的小字提示默认收起</dt><dd>图表工具栏中间的「横向移动」原先占两行：上面是标题，下面常驻一行小字「按住 ⌘ / Ctrl + 滚轮」。这行字占着一行高度却很少被读到，现在默认收起，中间只剩单行标题，与左右两枚箭头按钮在垂直方向对齐。</dd><dt>鼠标移到标题文字上，标题当场被提示替换</dt><dd>指针进入中间文字区（左右两枚箭头按钮不参与，各自保持原来的悬停提示）时，「横向移动」立刻消失、原位换成「按住 ⌘ / Ctrl + 滚轮」，移开即恢复成标题。这一下不加过渡动画：本意是「凑近看一眼」的瞬时替换，淡入淡出反而像卡顿。</dd><dt>做法：两块文字叠进同一格，命中区只由标题承担</dt><dd>先把两行文字改为叠放在同一个网格单元里，替换时不会发生纵向位移；再把悬停中的标题设为文字透明而不是隐藏元素，这样它的盒子尺寸不变、指针判定不会自己松开。提示层设为不接收指针事件，否则它浮到上层后会截走悬停，形成「显示↔隐藏」的高频闪烁。</dd><dt>中英文长短差异不会推动两侧箭头</dt><dd>实测提示文字中文 91 像素、英文 100 像素，都窄于标签固有的 112 像素最小宽度，且工具栏容器高度固定，因此替换前后箭头的位置与工具栏高度都不变。</dd></dl><hr>` + v21126PanHintChangelog;
+  // v2.11.27：因子消融实验 —— 宏观日程特征入模的边际贡献
+  const v21127AblationChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.11.27 更新日志</b><dl><dt>研究卡片新增「因子消融」面板</dt><dd>加一个新因子最容易自欺的一步是「只看准确率有没有涨」——在大部分时间震荡的行情里，永不预测方向就能拿到很高的准确率。消融让两臂跑完全相同的回放流程与 K 线，唯一差别是待验证的那三列宏观日程特征，头条指标改成相对「永远猜多数类」的增量，判定阈值 ±0.5pp，指标基于互不重叠的独立样本子集，避免重叠桶把显著性撑大。</dd><dt>入模的只有事件「日期」，没有发布值</dt><dd>三个特征是距上次事件的小时数、距下次事件的小时数、是否在事件后 24 小时内，全部取对数归一。FOMC / 非农 / CPI 的日程由官方提前数月公布，因此在任何历史时点都真实可得，把它们当特征不构成前视偏差。发布值（actual / surprise）被有意排除：它们从发布瞬间才存在，而 FRED 用「所描述的时间段」给观测打戳而非「公开时刻」，按观测日期对齐会把未来泄漏进过去。</dd><dt>把「没用」和「只在事件期有用」拆开</dt><dd>全局无差异可能掩盖两种相反的情况：特征根本没用，或者它只在事件窗口打开时有用——而窗口期只占全部桶的少数。因此消融会把同一批样本按「是否落在事件后 24 小时内」再拆一次分别对比。</dd><dt>实测结论：四个周期都没有正增量</dt><dd>特征列确实从 8 变成 11（模型真的吃到了这三列），但 15m 与 1d 的预测分布毫无变化，1h 与 4h 反而变差，其中 1h 在事件窗口内是 −1.51pp。这与前一轮的发现自洽：宏观事件影响的是波动而不是方向（事件日 1 日幅度中位数是平常一天的 1.4–1.6 倍），所以这三列特征不进入实时方向模型，只留在消融面板里作为后续因子验收的基准设施。</dd></dl><hr>` + v21127AblationChangelog;
+  // v2.11.28：推送设置弹层改为整屏居中（原先继承底部 sheet 的 align-items:end）
+  const v21128PushModalCenterChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.11.28 更新日志</b><dl><dt>修复：推送设置弹层贴着浏览器底部，没有居中</dt><dd>推送设置用的是全站弹层的公共外壳，而这个外壳是按「交易所风格底部弹层」写的 —— 里面明确写着底对齐，本来就是给「添加预警」那种一步输入的表单用的。推送设置属于设置面板，却没带改回居中的修饰类，于是继承到的是「底对齐」而不是「居中」，视觉上就成了贴在浏览器底部。现在按站内既有的做法（语音设置、账户卡都这么做）给它补上居中修饰类：纵向居中、四周留 20 像素、圆角统一。</dd><dt>同一外壳下各弹层现在的对齐方式</dt><dd>居中：推送设置、语音设置、语音规则、API 接入中心、账户卡。保持底部弹层：添加预警（从卡片直接拉起的一步输入表单，底部弹出更顺手）。改的只是推送设置这一个类，其余弹层行为不变。</dd><dt>弹层过高时不会溢出屏幕</dt><dd>居中后内容上限仍是「视口高度减去四周留白」，超长时在面板内部滚动，不会把上下两端的留白吃掉、也不会顶出屏幕外。窗口很矮或很窄时按较小的一边收敛宽度，与其它居中弹层一致。</dd><dt>图表工具栏：一排按钮重新对齐，高度统一</dt><dd>工具栏右侧原先三种高度混用 —— 缩放组里的 − / 100% / + / 重置 只有 26 像素高，左边「K 线周期 / 查看范围 / 图表」是 28 像素，中间「横向移动」那一块更是独占 40 像素，一排扫过去高低不齐。现在统一到 28 像素，所有控件落在同一条水平线上。</dd><dt>「缩略图」从「重置」旁独立出来，改名「悬浮缩略图」</dt><dd>这个开关原先挤在「重置」右侧、共用缩放组那个圆角框，读起来像缩放功能的一部分。现在把它从缩放组里移出来、自带边框单独成一颗按钮，文案由「缩略图」改为「悬浮缩略图」（悬停说明「图表悬浮缩略图：滚动离开图表后置顶显示」不变，开启时的高亮样式也不变）。</dd><dt>一行重新分成左右两组</dt><dd>「横向移动」归到左边那组，跟 K 线周期 / 查看范围 / 图表连在一起；右边只留缩放组（− / 100% / + / 重置）和「悬浮缩略图」，两者紧挨着整体贴住右边缘。右对齐的支点挂在右侧组的第一个元素（缩放组）上，组内彼此只隔工具栏统一的 6 像素 —— 支点若挂到组内靠后的元素上，就会在组内空出一大片。窄屏下这颗按钮的位置与改造前一致，小屏时不会跳到别处。</dd><dt>多周期共振：结论挪到卡片头部，落在标题右侧</dt><dd>原先结论徽标（如「强共振·多 (4/4) 强度 83」）和四个周期的标签挤在右侧同一栏里，看结论得先在一排小标签上方找。现在结论单独渲染到标题右侧的槽位，卡片变成「左侧标题 + 结论 → 右侧逐周期标签」的读法：一眼先看到结论，再往下看是哪个周期在拖后腿。</dd><dt>周期标签不再标注数据源</dt><dd>每个周期标签尾部原本还挂着一个数据源小字，与这个模块要表达的「方向是否一致」无关，只会让一行标签更宽更挤，现已去掉，标签只保留周期、方向与评分。</dd><dt>感叹号里补上完整用法</dt><dd>说明从一句「一致性越高越好」扩成完整的使用说明：四个周期的权重、结论与「强度 0–100」怎么读、红色虚线框代表与主流方向相反的冲突周期、强共振时该注意什么、出现分歧时怎么处理、为什么优先做与日线同向的交易。说明较长，浮层现在有高度上限并可在内部滚动，鼠标停在说明上也不会把它关掉。顺手把「周期涨幅」卡片的说明拆出来单独写（原先两张卡共用同一段共振说明）。</dd><dt>自动计算：打开就算一次，之后按周期各自刷新</dt><dd>原先只有点按钮才计算（那个 15 秒的静默定时器还会每次强制把四个周期全部重拉）。现在打开页面、等首屏 K 线画完就自动算一次；之后每 20 秒做一次「到期检查」，只重算缓存已过期的周期 —— 15m 约每分钟、1h 约 5 分钟、4h 约 15 分钟、1d 约 1 小时各发一次请求，四个周期共 800 根 K 线不会被每分钟重拉一遍。检查本身不发请求，所以节拍可以取得比刷新间隔小得多。点「计算共振」仍是立即强制全部重算；浏览器标签切到后台时暂停，切回来恢复。</dd><dt>工具栏按钮的边框统一成一档</dt><dd>同样一排按钮，边框颜色原先分成三档：左边三个控制按钮是 0.26 的不透明度，缩放组 0.18，「横向移动」与「悬浮缩略图」只有 0.13 —— 都是 1 像素的线，浅的那几条看着就比深的细。现在统一到与左侧控制按钮相同的 0.26，圆角也一并统一成 8 像素，一排扫过去粗细与深浅一致。</dd><dt>图例区整排上提，省下的高度让给图表</dt><dd>工具栏与「锤子线 / 流星线」那行注释之间原来隔着 20 像素（工具栏下边距 12 + 图例区上内边距 8），两行图例之间 10 像素，图例到图表顶之间还有 10 像素。现在收成 8 / 8 / 4，图例区整体上提 6 到 14 像素，画面更紧凑；省下来的高度直接补给图表主体，绘图区高度由 580 提到 600 像素，实际可绘制的画面部分相应高出一截。<dt>多周期共振：加周线、加一句短结论、按钮贴到标签旁</dt><dd>① 周期加了一档周线，现在是 15m / 1h / 4h / 1d / 1w 五个，权重依次 0.05 / 0.1 / 0.2 / 0.3 / 0.35（周期越长分量越重）；判定门槛改成按比例算，五个周期里 4 个同向算「多数」、全部同向算「强共振」，以后再加周期门槛会自动跟着走。周线一根 K 线是一周，所以它的自动刷新节奏是约 6 小时一次，不必勤刷。② 五个周期标签按时间从小到大排（原先大周期在前，读起来是倒的）。③ 标题右侧补了一句几个字的短结论 —— 全线偏多 / 多头占优 / 空头占优 / 多空分歧 / 方向不明，跟着方向变色；原先徽标与按钮之间那块是空的，整行看着左重右轻。④ 「计算共振」按钮从卡片正中挪到最右侧，紧挨着周期标签，改完这一行是「左边看结论、右边看细节与操作」。</dd></dl><hr>` + v21128PushModalCenterChangelog;
+  // v2.11.36：研究参数外置 —— 门槛与权重收进单一配置源
+  const v21136TuningChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.11.36 更新日志</b><dl><dt>研究模块的门槛与权重收进一个配置源</dt><dd>震荡带倍数、独立样本门槛、成本模型、融合权重此前散在十几个函数里，没人能把它们放在一起审查，改一个数得先确认它到底有几个副本。现在全部集中在服务端一个配置块（105 项），可由环境变量 BTC_RESEARCH_TUNING 覆盖，并在研究卡片新增的「参数与门槛」面板里摊开。<br>配置带指纹：每份研究结果都标明自己是在哪套配置下产出的，两份结果只有指纹相同才允许互相比较 —— 指纹不同就说明规则变了，不该被读成「模型变好了」或「模型变差了」。<br>新增一项构建期自检（<code>npm run check</code> 内），检查每个参数是否真被读取、每处引用是否都能解析；它当天就抓到一个只声明未使用的死参数。<br><span class="muted">默认值与重构前逐项相同，回放结果完全复现（15m/1h/4h/1d 的 flat 占比 98.9%/97.4%/96.1%/100% 不变），本次改动不改变任何现有结论。</span></dd></dl><hr>` + v21136TuningChangelog;
+  // v2.11.39：两个悬浮按钮统一「贴边吸附 + 静置淡化」，并修复 AI 助手按钮被推出视口后消失
+  const v21139FloatDockChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.11.39 更新日志</b><dl><dt>修复：AI 助手按钮有时会「不见了」</dt><dd>按钮的位置是按坐标记在本机的。在较宽的窗口里把它拖到右侧、之后换到更窄的窗口（或把窗口调小），旧坐标就落到了屏幕外 —— 按钮其实一直在页面上，只是停在看不见的地方，而恢复位置时没有把它拉回可视区。现在读取记忆位置时会先把坐标夹回当前视口，窗口尺寸变化时再夹一次；已经被旧坐标推到屏幕外的，刷新页面就会自己回到可见区域。</dd><dt>修复：AI 配置接口偶发失败时按钮不再整个消失</dt><dd>按钮原先只认一次接口结果：本机服务正在重启、或网络抖一下就会读不到配置，于是按钮被直接隐藏，看着像这个功能被删掉了。现在会退避重试几次；确实读不到配置时也保留按钮（点开有明确提示），入口不会凭空消失。</dd><dt>两个悬浮按钮统一：拖到边缘自动吸附，只露 45% 在外面</dt><dd>「AI 助手」与「从欧易同步持仓」现在行为一致：把按钮拖到屏幕左边缘或右边缘附近松手，它会吸附到那条边上、并沿边藏起 55%，屏幕里正好留下 45%；鼠标搭上去按钮滑回完整形态，移开再收回。想恢复完整显示，把它拖离边缘即可。吸附状态会记住，刷新后仍贴在同一条边上（换了窗口大小会跟到新的边缘）。</dd><dt>两颗按钮的尺寸规格完全对齐，并排贴着不会一大一小</dt><dd>收起后两者统一成同一个盒子（宽 80 × 高 40），露出的 45% 都是 36 像素宽；展开态的高度、圆角、字号、字重、边框粗细也逐项对齐 —— 此前「同步持仓」比「AI 助手」矮一档、字也小一号，并排吸在屏幕两侧时一个大一个小很扎眼。图标统一 18 像素，在露出的 36 像素里居中。<br>收窄用的是宽度上限而不是写死宽度：写死宽度会把「从欧易同步持仓」挤成竖排三行、「AI 助手」挤成两行（鼠标搭上去展开时尤其明显）—— 用上限则既能收窄、又能平滑放开回一行。</dd><dt>露在外面的那一半显示图标，一眼能分清哪个是哪个</dt><dd>贴边之后文字收起，留下的半个只显示一个图标：<b>AI 助手</b>是星芒，<b>从欧易同步持仓</b>是循环箭头。两个按钮都带光效：AI 助手沿用原有的红→青辉光与彩虹色循环，同步持仓新增一层向外扩散的波纹环加呼吸光晕。拖动过程中光效会暂时停下，免得和缩放动画叠在一起显得吵。</dd><dt>页面侧兜底：扩展那颗按钮即使没更新，也会被钉到同一规格</dt><dd>「从欧易同步持仓」由浏览器扩展注入，而扩展是本机手动加载的 —— 扩展代码改完必须去扩展页点一次刷新才会进浏览器。漏刷一次，页面上就会出现「页面这颗已经更新、扩展那颗还是旧规格」，并排看就是一个大一个小（甚至被折行的文字撑高），而这事从页面上完全看不出来。现在页面会用优先级更高的样式把它的尺寸、半隐藏位移、宽度上限与图标位置一并钉住：<b>只要刷新页面，两颗就一致</b>，不必再单独去动扩展。扩展更新到新版后两边数值相同，不会打架。</dd><dt>不用的时候自动淡化，不再常亮挡着看盘</dt><dd>光标离开按钮约 2.6 秒后，按钮整体淡化到三成左右；鼠标移回去立刻恢复。已贴边收起时只露一条，不再叠加淡化。AI 助手原有的光效与闪烁动效保持不变 —— 淡化只是整体透明度变化，动效照常运行。</dd><dt>怎么让按钮立刻回到默认位置</dt><dd>把按钮拖离边缘即可恢复完整形态；想彻底回到初始的右下角，在本机页面控制台执行 <code>localStorage.removeItem("btc_ai_launch_pos")</code>（AI 助手）或 <code>localStorage.removeItem("okxFiller:btnPos")</code>（同步持仓）后刷新页面。</dd><dt>图表卡片内的元素左边缘与 K 线主体对齐</dt><dd>图表本身用负外边距铺到卡片内边距之外，而工具栏还留着 10 像素的左内缩、图例区 2 像素、底部两行说明各 20 像素，从上往下看左边就一节一节地参差 —— 有的缩在里、有的探在外。现在工具栏、图例区、底部说明都跟图表走同一条边界（左右各外扩 10 像素、水平内边距归零），整列左边缘与 K 线主体落在同一条竖线上，同时与卡片边框之间留出约 11 像素的空隙（外扩量一开始取 16 像素，会贴死卡片边框、只剩 5 像素余量，已收回 10 像素）。顺带右侧的「悬浮缩略图」也贴到图表右边缘，一排按钮与图表同宽。</dd></dl><hr>` + v21139FloatDockChangelog;
+  // v2.11.46：研究侧两件事 —— 升级门槛按周期分别配置、合约资金费率接成第二个消融因子
+  const v21146FundingFactorChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.11.46 更新日志</b><dl><dt>升级门槛改为按周期分别配置</dt><dd>四个周期此前共用同一个独立样本门槛（20 条）。但一个独立样本的代价就是一个持有期：20 条在 15m 约 5 小时、在 4h 约 3.3 天、在 1d 却是整整 20 天 —— 日线因此成了升级链上唯一的串行约束，把另外三个周期一起拖了三周。现在门槛可以按周期给出，日线降到 10 天证据；每道门槛同时折算成真实等待时间显示在候选进度上，「20 条」不再让人误以为四个周期等得一样久。这是有意用统计功效换决策节奏：降低门槛本身不会导致提前升级，质量、校准与稳健三道门仍要在同一批配对样本上通过。</dd><dt>合约资金费率接成第二个消融因子</dt><dd>资金费率是持有永续的代价，为正即多头拥挤。已从交易所回填约三年、3285 条结算（每 8 小时一条），覆盖远超现有 K 线；每个派生值只用它之前的结算计算，并按 funding_at ≤ 桶时刻 对齐，不构成前视。消融装置也从「宏观 vs 无宏观」泛化为逐因子对比：每个因子臂与基线臂只差它自己那一块列，并各自给出「暴露」条件分组 —— 全局均值会掩盖一个只在窄区间起作用的因子。</dd><dt>结算出来的结论</dt><dd>资金费率在四个周期上都没有方向增量：15m −0.12pp、1h −0.29pp、4h +0.23pp、1d 0.00pp，全部落在 ±0.5pp 判定带内；而在它本该起作用的拥挤极端子集（|z| 大于 1，约 680 条）上，1h 反而录得 −0.73pp。这与宏观日程的结论一致 —— 这类「拥挤度」因子影响的是波动与尾部，不是方向。另一个观察：4h 在非极端区间 +0.48pp、在极端区间 −0.15pp，方向相反，说明那点正值更像噪声。两臂列数 8 → 12 是「它真的进了模型」的前提断言；宏观臂的数值与上一轮逐项一致，说明这次泛化重构没有改变任何已有结论。</dd><dt>顺带修掉的两处</dt><dd>一是消融的「暴露分组」此前把包装过的臂对象传给了对比函数，导致所有条件差值静默变成 null（面板显示成「--」而不是报错）；二是调参接线自检识别不了「按变量键读取配置」这种用法，会把按周期的门槛表误判成死参数 —— 现在它显式识别该模式，并单独报出有多少叶子是经计算键读取的。</dd><dt>价格轴从右侧独立一条改成内嵌进图表</dt><dd>价格刻度原先独占画布右侧 74 像素的空白带，数字离图很远、K 线的可用宽度却被压掉一截。现在网格线一路画到画布右边缘，价格坐在半透明圆角底片上、贴着右缘：既能一眼对上是哪条线，也不至于糊住最右边那几根 K 线，同时把那 74 像素还给了 K 线 —— 主图与 RSI 副图的可绘制宽度一起变宽。数字顺带改成与顶部大报价一致的千分位写法（81,985.22，而不是 81985.22），八位数的价格一眼就能读出量级。</dd><dt>时间轴的首尾标签与刻度线</dt><dd>最左边那个时间原先显示成「-19 22:37」，是被裁掉了一截：标签按刻度位置居中，而第一个刻度正好落在绘图区左边缘，于是有一半落在画布外。现在首尾两个标签改成贴边对齐（左边的左对齐到绘图区起点、右边的右对齐到终点），中间的仍然居中。刻度线本身加长到 6 像素、亮度提了一档，只落在有标签的关键时间点上、不额外加密，起的是刻度尺那种定位作用。</dd><dt>价格数字不再被 K 线压住，右上角提示也让开了位置</dt><dd>价格刻度改成内嵌之后，它是在 K 线之前画的，于是最右侧那几根蜡烛会把数字盖掉；右上角的「超买 / 跌破 VWAP」提示又是右对齐到画布边缘，跟顶部的价格数字叠在一起。现在价格数字与底片挪到全部图形画完之后再落笔、压在最上层，提示则右退 78 像素给价格底片让位，两处都不再打架。</dd><dt>副图（成交量 / RSI）与主图同宽</dt><dd>上一版把主图右侧的价格轴内嵌进来、K 线可用宽度多了 74 像素，但下方成交量与 RSI 的副图仍然写着自己的一份几何（右留白 74），结果只有主图变宽、副图右边空出一截。现在副图直接复用主图的左右几何常量，两边永远同宽；顺带修掉副图点击命中区一直用另一个左边界（52 而不是 18）导致点选位置与看到的柱子差 34 像素的老问题。</dd><dt>时间轴的刻度线加粗提亮</dt><dd>刻度线之前与网格线是同一个色系，扫过去几乎找不到在哪。现在换成偏蓝的亮色、线宽加到 2 像素、长度 7 像素，仍然只落在有标签的关键时间点上，不额外加密。</dd><dt>图表左右留白对称</dt><dd>价格轴改成内嵌之后，右留白一度收到 0，K 线贴着画布右边缘、左边却留着 18 像素间隙，看起来「一头贴边、一头留白」。现在右侧也回到 18 像素，与左侧同宽；价格数字作为浮层压在绘图区右端之上，不再占用独立的轴带。</dd><dt>价格数字默认让位给 K 线，点一下才凸显</dt><dd>价格数字压在 K 线之上，默认会盖住最右侧那几根蜡烛。现在默认状态整块压到半透明（约六成），只在余光里提示价格档位、K 线优先；指针移到数字上会出现手型光标，点一下它单独恢复全不透明度、跳到最前，再点一下空白处就收回去。点空白那一次不会顺带画出选区 —— 用户要的是「把数字收回去」，不该在图上留一段框选。</dd></dl><hr>` + v21146FundingFactorChangelog;
+  // v2.11.64：消融加「波动口径」（并先证明不做这条通道就测不出东西），日线预热按周期放宽、各臂共享近邻投影
+  const v21164VolatilityAblationChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.11.64 更新日志</b><dl><dt>消融实验新增「波动口径」：第二个问题，答案不一样</dt><dd>此前消融只回答「能否改善方向判定」。但前两轮的结论是这类拥挤度因子影响波动、不影响方向 —— 而模块里没有任何口径能验证这句话。现在每个周期多出一行读数：大动占比、基线的波动技巧、预测占比，以及该因子带来的 Δ Brier 技巧与 Δ AUC。两个指标读法不同：Brier 技巧看数值尺度，AUC 只看排序且与阈值无关；二者背离意味着「排序里有信号、但数值标定不对」，这与「没有信号」是两件事。</dd><dt>先说一个结构性发现：不做这条通道，波动永远测不出东西</dt><dd>波动口径写好、第一次运行的结果是每个因子的 Δ 都<b>恰好为 0.00pp</b>。这不是「因子没有波动信息」，而是架构决定的：实时融合的震荡概率完全取自近邻池（1 − P(震荡)），特征列在设计上根本到不了预测的波动那一侧，所以任何因子对波动的影响都无法被观测到。为此给每个臂的训练额外加了一个「波动头」—— 同样的特征列、同样的规则，标签改成「是否离开震荡带」，且用全部行训练而不是方向那少数。它做成显式开关，实时路径与已发布的回放口径保持完全不变。没有这个头，波动口径测的就是一条常数为零的线。</dd><dt>波动口径的第一个结论：水平标定在滚动预测里系统性失败</dt><dd>波动头能在排序上跑赢随机（AUC 0.618 / 0.599 / 0.545 / 0.520），但报不出正确的数值标定：15m / 1h / 4h 的事后大动基率是 22.2% / 24.0% / 24.3%，而它的预测占比是 34.6% / 35.9% / 35.0%，高出四到六成（尺度 1.44–1.56 倍）；日线是反过来的一例 —— 预测占比 22.3% 略低于基率 24.3%，Brier 技巧却是四个周期里最差的 −21.08pp，因为它的概率过度分散、排序又几乎没信息（AUC 0.520）。<b>同一套头在 1d 上的偏向会随样本变化翻转</b>（日线样本从 620 增到 720 之后就翻了一次），这本身就是结论的一部分。原因不是实现错误，而是回放的评估方式：校准用的是训练期切片，被打分的桶在更晚的时段，而波动水平本身随时段漂移。结论是波动的绝对水平在滚动预测里不可靠，<b>Brier 技巧只能当相对量读、排序看 AUC</b>。另需注意 Brier 技巧的基准是评估窗口的真实基率 —— 一个事后才可知的基准，所以负值只说明「打不过事后基率」，跨臂的差值仍然可比。</dd><dt>因子在波动口径上的表现</dt><dd><b>资金费率</b>：四个周期的 Brier 技巧全部小幅改善（+0.90 / +0.96 / +0.16 / +1.05pp），但 AUC 几乎不动（−0.003 / +0.004 / +0.003 / +0.001）—— 改善的是<b>水平</b>而不是<b>排序</b>。这与「拥挤度决定波动水平、而非逐桶的波动择时」吻合，也解释了它为什么在方向口径上同样测不出东西。<b>宏观日程</b>：全局没有正面证据（−0.38 / +0.34 / +1.05 / −0.07pp），且在事件窗口内对排序是负的（15m AUC 0.697 → 0.652、1h 0.683 → 0.615）。唯一像发现的是 4h 事件窗口内（ΔBSS +12.17pp、AUC +0.051 两者都向好），但它的绝对值只是从 −60.55pp 修到 −48.38pp —— 那个子集的大动基率只有 10.6%（事件期间波动带本身被撑宽，反而更少走出带），而模型仍按 32% 上下去报，差了三倍；只看差值会把这个格子读成好消息。</dd><dt>日线预热长度按周期配置，把被浪费的日线历史拿回来</dt><dd>回放的预热长度此前是全局 400 根 —— 占日内历史的五分之一，却占日线历史的五分之二。也就是说日线周期静默丢掉了唯一那份日线历史里的 40%（1022 根里的 401 根），而训练器自己的下限要的远少于这个数。现在日线单独设为 300：1d 的独立样本 620 → <b>720</b>，三段训练全部成功、没有被跳过的段，另外三个周期的数值一字未变。取 300 而不是更低，是因为训练器要求每个切分至少 12 条方向样本、而日线约 23% 是方向样本 —— 再往下就会开始跳段。</dd><dt>消融提速：各臂共享同一份近邻投影</dt><dd>近邻投影只取决于 K 线与桶，与模型、也与它拿到了哪一块特征无关。也就是说每个消融臂在同一个桶上算出的投影完全相同，而此前三臂各算一遍，成本是「桶数 × 历史长度」的重复。现在每个周期一份缓存、各臂共享，<b>数值逐字节相同</b>（两种设置交替跑八次，去掉时间戳后载荷完全一致），耗时约为原来的<b>五分之四</b>（同机交替实测 45.4s → 35.7s，另一次独立复测 53.7s → 42.7s，两次比值 0.79）。这个开关保留在本机环境变量里，所以这次的等价性随时可以复验，而不是只靠推理断言。</dd><dt>被跳过的训练段现在会显式报出</dt><dd>回放里每个周期由若干段构成，某一段样本不足时模型根本拟合不出来、整段被跳过 —— 而此前这在面板上完全看不出来，看着像从来没有过的覆盖。现在只要有跳过就会在周期行上标出「跳过训练段 N/M」。以当前数据，15m / 1h / 4h 各有 2 段被跳过（共 8 段），这也是这批日内结论本就该被读作「基于 6 段」的地方。</dd><dt>波动这一行的判定改成分别说水平与排序</dt><dd>只给一句「有增量」会把「整体水位变了、排序反而更差」读成好消息，而这恰好是真实出现的情形（4h 事件窗口：Brier 技巧 +1.03pp 而 AUC −1.40pp）。现在这行的结论会写成「水平与排序同增 / 仅水平改善 / 仅排序改善 / 仅水平改善·排序变差 / 两项同降 / 仅水平变差 / 仅排序变差」七种之一，Δ AUC 也单独着色，不再被 Brier 技巧的结论盖住。</dd><dt>消融按钮不再每次都重算</dt><dd>按钮此前固定带 <code>refresh=1</code>，于是每次点击都重跑全部回放（一到两分钟），而服务端 30 分钟内的缓存永远不会被用到 —— 30 分钟内重算只能得到同一份配置、同一批 K 线下的同一批数字。现在「运行消融实验」优先复用缓存（秒回），需要重跑时点旁边的「强制重算」，结果里也标明本次是否来自缓存。</dd><dt>价格纵坐标可以换到左侧，也可以整体收起</dt><dd>「图表」菜单新增一组控制：一个「价格坐标」开关，加「贴左 / 贴右」两个位置按钮。它管的是图表里那一列价格数字（纵坐标本身）：贴左之后数字落在绘图区左端、贴右回到默认的右端；关掉则整列数字收起、横向网格线保留，把画面让给 K 线。开关与位置都记在本机，刷新后保持。仓位线（做多 / 做空买入价、爆仓价）的金额维持原样，仍跟在各自线名后面。</dd><dt>RSI 曲线左端不再缺一段</dt><dd>RSI(14) 的前 14 根天然算不出值 —— 它需要 14 个涨跌幅先做预热。而原先曲线是直接拿「当前可见范围」那一段收盘价去算的，于是可见范围的最左边永远缺一截，而且每横向滚动一次就重新缺一次。现在改为用整段 K 线算完之后再切出可见的那一段，只有数据最开头才可能缺。</dd><dt>横向网格线不再顶到图表边缘</dt><dd>上一版把价格轴内嵌进绘图区时，网格线顺手画到了画布最右缘 —— 于是右边跟容器边框贴死、左边却留着 18 像素，看着一头齐一头空。现在网格线停在绘图区右边界（画布宽减去 18），与左端完全对称，两端留出同样的空隙。</dd></dl><hr>` + v21164VolatilityAblationChangelog;
+  const v21170VolatilityCalibrationChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.11.70 更新日志</b><dl><dt>波动口径的结论翻了一半：问题不在校准，是模型自己没收敛</dt><dd>上一版给波动口径做了装置，结论是「排序能赢随机、但数值标定系统性失败」。这一版去查它为什么失败 —— 不是校准的问题，是逻辑回归自己就没收敛：它在<b>自己的训练行</b>上报出 43.0% 的平均概率，而基率只有 22.6%，整整高 20.4pp。一个收敛的逻辑回归在训练集上的平均预测必须等于基率（截距无正则时，梯度为零就意味着这一点），所以那 20pp 全部是截距没走到位，而现有的迭代方案只把它推到了目标的约四分之一。截距是唯一一个「收敛值事先已知」的参数，于是改成直接解出来（它对 bias 单调，二分即可）：训练集偏差当场归零，评估期的尺度从 1.56 / 1.50 / 1.44 变成 <b>1.01 / 1.01 / 0.93</b>，Brier 技巧从 −7.34 / −6.32 / −5.54 / −21.08 变成 <b>+1.23 / +1.10 / −0.27 / −14.36</b>。<b>15m 与 1h 的波动头并不是没有技巧，是那份技巧一直被一个没走到位的截距吃掉。</b></dd><dt>一个因子会替一个坏掉的截距做事，于是它看起来有效</dt><dd>修正前，资金费率在四个周期上<b>一致地</b>把波动水平改善了 0.90 / 0.96 / 0.16 / 1.05pp，那是上一版的主要结论之一。修正后这些数字缩到 −0.07 / −0.02 / +0.17 / +0.52pp，基本消失。原因不神秘：截距严重偏低时，模型需要有人帮它把整体水位压下来，而资金费率的 level 列恰好携带水位信息 —— 它替截距做了这件事。截距一旦被解准，这份「帮助」就无事可做。<b>要记的是方法而不是结论：一个因子在标定坏掉时看起来有效，不等于它对目标有信息。</b></dd><dt>每个差值现在会自己说「这个结论现在能不能下」</dt><dd>样本量只说明有多少个观察，不说明它们是否指向同一件事 —— 而这个模块已经被这一点咬过一次（日线的波动读数在样本从 620 涨到 720 时就翻了向）。现在每个差值都会被沿独立样本对半切开重算一遍：两个半段都越过阈值、方向却相反时，那一行直接标出「前后段反向·还不可判」，而不是继续报一个取决于你碰巧相信哪一半的结论。它在第一次运行就抓到了一个 —— 15m 资金费率的 ΔAUC 前半 −1.40、后半 +0.54。</dd><dt>判定带从两档变三档，AUC 有了自己的那一条</dt><dd>AUC 增量不是百分点 —— 它是 0 到 1 之间的统计量上的裸增量，此前却和 Brier 技巧共用同一个「±0.5pp」。两者恰好都落在可用的数值上，所以一直没暴露，但它们不可能被分别调整：想放松排序的判定，就会连带放松水平。现在分成三个：方向 ±0.5pp、波动水平 ±0.5pp、波动排序 ±0.005。「前后段反向」用的是第三种颜色（琥珀）而不是红或绿 —— 它说的是证据分裂，不是这个因子有害。</dd><dt>面板里直接写了「这个面板怎么读」</dt><dd>把「先看什么、再看什么」放到数字旁边，而不是只留给文档：先看这一行值不值得信（样本数、有没有跳过训练段或前后段反向），再看差值落在带内还是带外，再看波动那行的两个数各自回答哪一个问题，再看「预测/实际」的倍数说明的是尺度问题还是信号问题，最后一条提醒「只在暴露条件里动过」的那些格子意味着什么。</dd></dl><hr>` + v21170VolatilityCalibrationChangelog;
+  const v21171DirectionCalibrationChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.11.71 更新日志</b><dl><dt>方向头（线上信号）的 Platt 同样欠收敛，系统性高估「涨」</dt><dd>波动头那次的「截距没走到位的 20pp」让人怀疑方向头有没有同样的问题 —— 它喂的是线上真实信号，所以先看清楚再动。结论是<b>同一类缺陷、出在不同的一步</b>：方向头的裸逻辑回归因为基率就在 0.5 附近，训练集偏移只有 1–4pp（不像波动头那次 20pp），但<b>Platt 校准步</b>欠收敛，导致在校准切片上把「涨」的均值报成比真实基率高 3.2 / 4.8 / 10.1 / 1.6pp（4h 最严重），并直接流到测试切片（高 2.7 / 8.9 / 11.7 / 2.8pp）和实时信号。换句话说，指标在 4h 上一半时间喊「涨」、实际只有 34% 真的涨。</dd><dt>修法：把 Platt 截距解到「校准边际均值 = 校准基率」</dt><dd>和波动头同一条思路，但作用在 Platt 这一步：校准好的模型应当重现它拟合所在切片的率，而这个值是已知的。于是把截距（slope 保留 SGD 学到的）二分解到让校准切片上的平均预测恰好等于校准基率。单调性不依赖 slope 符号（对截距的导数是 sigmoid·(1−sigmoid)，恒正），所以二分不会跑偏。事后可检验的不变量是：校准切片上的「预测 − 实际」应当为零。</dd><dt>不变量成立，且把有信号的周期救了回来</dt><dd>修正后四个周期的校准偏移（Δcal）全部归零。关键改善出现在有信号的 1h / 4h：测试切片对「涨」的高估从 +8.9 / +11.7pp 降到 <b>+4.1 / +1.5pp</b>；Brier 技巧从 +5.8% / +7.0% 升到 <b>+8.1% / +12.4%</b>；ECE 从 8.9% / 19.3% 降到 <b>4.9% / 10.7%</b>（4h 从「很差」变「中等」）。残余的测试偏移现在来自校准与测试切片之间的真实 regime 差异（例如 1h 测试切片本身偏多、占 53% 而校准只有 45%），已不是标定 bug。1d 的 ECE 反弹是样本噪声（日线只有约 40 个方向样本，分箱 n=1→7），其 Δtest 与 BSS 都在改善，不读它。</dd><dt>方向头现在也报三段式诊断，面板里多了一行</dt><dd>方向头与波动头一样有了「训练 / 校准 / 测试」三段的输出率读数，进了 API（baseline.directionHead）也在每个周期的消融卡里多了一行「方向头」：AUC、BSS、ECE、校准状态（已校准 / 偏差 Npp）、以及「实测 / 预测」—— 后者离得越近，越说明线上信号对自己基率是诚实的。这直接回答了「怎么知道方向信号现在是好还是坏」。</dd></dl><hr>` + v21171DirectionCalibrationChangelog;
+  const v21172TradeMarkersChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.11.72 更新日志</b><dl><dt>主图新增买入/卖出气球标记（B/S）</dt><dd>在 K 线主图上用 TradingView 风格的气球标出你的买入点与卖出点：<b>做多（买入）= 绿色 B 气球挂在 K 线下方</b>，<b>做空（卖出开空）= 红色 S 气球挂在上方</b>，带指向锚定 K 线的小尾巴，亮色主题自动补白描边。时间锚点来自「从欧易同步持仓」扩展记录的开仓时间（指纹「方向@开仓均价」，精确匹配失败时按同方向价差 ≤0.2% 就近匹配）；开仓时间精度为「成交明细秒级 → K 线反查 → 首次同步 → 手动」四级自动升级，越用越准。持仓卡一有改动主图立即重绘，气球跟着走；没同步过或没有时间记录的仓位不显示标记。标记不参与价格缩放，不会把 K 线压扁。</dd></dl><hr>` + v21172TradeMarkersChangelog;
+  // v2.12.0：多币种模式（比特币模式 + 多币种模式）。
+  log.innerHTML = `<b>v2.12.0 更新日志</b><dl><dt>新增：顶部「比特币模式 / 多币种模式」开关</dt><dd>顶栏账号左侧新增一个开关按钮，在两种模式之间切换，选择记在本机、刷新后保持。<b>默认仍是比特币模式</b> —— 该模式下页面与本次升级之前逐字一致，包括标题、交易对显示、数据源与全部文案，习惯旧版的用户不会看到任何变化。</dd><dt>新增：多币种模式与币种切换器</dt><dd>切到多币种模式后，实时价格上方出现币种切换器，可在 <b>BTC / ETH（以太坊）/ ZEC（Zcash）/ BNB</b> 之间选择。选中某个币种后，整页都基于它重新生成：K 线与图表、当前规则信号、指标明细、形态识别与关键位、我的持仓与强平概率、OKX 市场微观结构，全部换成该币种的数据；「BTC 的多因子研究预测」相应变成「ETH 的多因子研究预测」，宏观事件与宏观环境影响里的「利好 BTC / 利空 BTC」也一并跟着当前币种走。</dd><dt>数据层：币种贯穿了服务端整条链路</dt><dd>交易所合约 ID 原先散落在服务端二十多处（BTC-USDT-SWAP / BTCUSDT 等），现在收敛到唯一一份币种注册表；每个请求按 <code>?symbol=</code> 切换缓存键、交易所合约与本地库，四个币种在 OKX、Binance、Gate、Coinbase 四个数据源上都已验证可用。OKX 公共 WebSocket 改为一条连接同时订阅四个币种的盘口、成交、资金费率与持仓量，切换币种无需重连、没有订阅延迟。</dd><dt>为什么比特币模式能完全不变</dt><dd>不是靠分支兼容：BTC 走的就是改造前那一条代码路径 —— 同一个库文件、同一套字段、同一批合约 ID。其余币种各自落在独立的本地库（<code>market-&lt;币种&gt;.sqlite</code>），既不会污染已有的历史样本，也不会让新币种的样本被 BTC 的旧数据带偏。</dd><dt>需要注意的边界</dt><dd>新币种的本地历史样本是空的，多因子研究预测的记分卡与宏观事件因子需要从零积累（可用研究卡上的回填按钮主动拉取）；恐惧贪婪指数与美联储／投资日历属于宏观数据，与币种无关，四个币种共用同一份，不重复请求上游。</dd></dl><hr>` + v21172TradeMarkersChangelog;
+  // v2.12.1：语音「重复播报 · 冷却」真正对每一次触发生效；另拦掉异常报价跳变导致的多规则同拍齐响。
+  const v2121VoiceCooldownChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.1 更新日志</b><dl><dt>「重复播报 · 冷却 N 分钟」现在真的按冷却走</dt><dd>此前冷却只拦得住“状态一直满足”的那种重复，拦不住“价格反复穿越目标位”的情况：以「价格达到 X」为例，它在穿越的那一拍判定为满足、下一拍就回到不满足，于是价格在 X 上下震荡时，<b>每一次穿越都被当成一次全新的触发，冷却被整段跳过</b>。实测设了 5 分钟冷却的「价格达到 81,000」在 18 秒内播报了两次（当时价格在 81,000 上下 ±40 美元来回走，32 分钟里穿越了 15 次），听感就是“一直在播报同一个价位”。现在冷却对每一次触发都生效：重复规则首次触发仍立即出声，之后一律等冷却（「不冷却」档也保留 30 秒下限，防每秒狂响）；「仅播报一次」规则行为不变。想彻底避免同一价位反复播报，可把目标价设在离现价有距离的位置，或把冷却调长。</dd><dt>拦掉一次「多价位同拍齐响」的坏读数</dt><dd>另外给播报引擎加了异常报价保护：单拍价格不可能合法地跳 3% 以上，只有页面刚打开时先拿到本机快照价、或行情源短暂串到别的币种这类坏读数才会如此。这种坏读数会让所有「价格达到／越过」类规则在同一瞬间被同时判成穿越 —— 实测 09:44:39.433 有 6 条规则在同一毫秒全部播报（当时 BTC 实际 81,43x，不可能同时穿越 74,500～80,300 这六个价位）。现在这类那一拍只用于对齐价格基准，不参与任何规则判定。</dd></dl><hr>` + v2121VoiceCooldownChangelog;
+  // v2.12.2：多币种模式下消息推送/语音播报规则按币种隔离。
+  const v2122CoinAlertsChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.2 更新日志</b><dl><dt>多币种模式：推送规则与语音播报按币种独立</dt><dd>此前「消息推送」里的价格预警规则与「同时语音播报」开关写死在 BTC 下，切到 ETH / ZEC / BNB 会穿帮。现在本机规则按币种分别存储：<b>默认是空的</b>，没有任何 BTC 的规则漏进其他币种；在某个币种下添加过规则，切走再切回来依然存在；从未添加过的币种就是没有 —— 四个币种互不串台。</dd><dt>卡片标题与弹窗交易对跟随币种</dt><dd>推送卡片标题小字与「添加预警」弹窗里的交易对，从写死的「₿ BTC/USDT 永续」改为跟随当前币种显示（如 ETH/USDT 永续、ZEC/USDT 永续）；比特币模式下一如既往仍是 ₿ BTC/USDT，与旧版完全一致。</dd><dt>云端规则仍仅 BTC</dt><dd>云端关页推送与多渠道同步目前只服务于比特币（后端 BTC 专属），多币种模式下云端面板会明确提示「该币种仅支持本机规则」，避免误把 BTC 的云规则当成当前币种的。</dd></dl><hr>` + v2122CoinAlertsChangelog;
+  // v2.12.3：顶栏模式开关改为分段控件样式。
+  const v2123SegmentToggleChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.3 更新日志</b><dl><dt>顶部模式开关改为分段切换按钮</dt><dd>原先「比特币 / 多币种」是一个单按钮，点击后文字整体翻转。现在改成左右两个分段选项组成的控件：选中项有凸起的浅色药丸背景，未选项仅显示文字，和系统 Segmented Control 观感一致；同时支持鼠标悬停高亮与亮色 / 深色主题自适应。</dd><dt>修复：研究卡的「运行消融实验」此前点一次失败一次（HTTP 503）</dt><dd>消融实验一直打不开，只显示一个 HTTP 503。根因在波动头的诊断字段：它本该遍历校准切片的每一行去算平均预测概率，却误用了只含 0/1 标签的那个数组，于是取行特征时拿到空值、标准化在那上面抛错，整个请求随即被兜底成 503。<b>影响范围仅限消融实验</b> —— 波动头是消融专用的量具，实时预测与旁边的「运行历史回放」都不启用它，所以实时信号、历史回放、宏观事件研究与回测数值均未受影响；这也正是旁边那块一直正常的原因。</dd><dt>失败原因不再被折叠成一个状态码</dt><dd>研究卡上的几个取数／计算按钮过去只报「HTTP 503」，把服务端写在响应体里的原因丢掉了。现在失败信息会带上服务端自己的说明（例如 HTTP 503 · Cannot read properties of undefined），一眼能看出是超时、依赖缺失还是代码本身出错。</dd></dl><hr>` + v2123SegmentToggleChangelog;
+  // v2.12.4：修复「计算共振」按钮点击后没有反馈、文字也不跟随状态的问题。
+  const v2124ResonanceButtonChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.4 更新日志</b><dl><dt>修复：「计算共振」按钮状态不同步</dt><dd>页面自动计算完成后，按钮文字仍然显示「计算共振」，而不是「重新计算共振」，容易让用户以为还没算过、或者点击没生效。现在渲染共振结果时会同步刷新按钮文案。</dd><dt>修复：点击「计算共振」缺少即时反馈</dt><dd>手动点击按钮时，由于各周期缓存仍在有效期内，界面可能瞬间完成、没有任何变化，看起来像「点了没反应」。现在点击后会立即把按钮文案改成「计算中…」，计算结束后再根据是否有结果切到「重新计算共振」或「计算共振」，给用户明确的点击反馈。</dd></dl><hr>` + v2124ResonanceButtonChangelog;
+  // v2.12.5：多币种隔离补全 —— 语音规则、持仓、记录簿与云端读写全部按币种独立。
+  const v2125CoinScopedStorageChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.5 更新日志</b><dl><dt>多币种：语音播报规则按币种独立</dt><dd>此前「语音播报」里的规则只有一份，切到 ETH / ZEC / BNB 看到的、播出来的仍是 BTC 下设置的内容。现在语音规则按币种分别存储：BTC 沿用原有数据；其余币种<b>默认是空的</b>，没设置过的币种不会再借用 BTC 的规则；在某币种下添加过，切走再切回依然保留。切换币种时播报引擎会重置价格基准与短窗历史 —— 跨币种价格量级差异巨大，沿用旧基准会把切换瞬间当成暴涨暴跌误触发。</dd><dt>多币种：「我的持仓」按币种独立</dt><dd>顶部两张持仓卡与「我的持仓与盈亏估算」表单改为每个币种各存一份：BNB 下看到的就是 BNB 自己的持仓（没填过就是空白），不再是 BTC 的数值；强平概率计算器的「历史持仓价」记录同步按币种分开。切换币种立即生效，各币种互不串台。</dd><dt>多币种：消息推送的本机数据读写按币种取</dt><dd>修复云端同步面板读写的仍是 BTC 本机数据的串台：现在「同步本机规则到云端」「一键同步全部」读写的是当前币种自己的本机规则存储。云端关页推送仍仅 BTC 专属（多币种下云端面板有明确提示）。</dd><dt>持仓云端同步明确为 BTC 专属</dt><dd>其它币种的持仓只存本机：不显示「同步／已同步」徽标，登录后也不会把 BTC 的云端持仓自动回填到其它币种，更不会把其它币种的持仓误写进 BTC 的云端档案；回到 BTC 后一切照旧。</dd></dl><hr>` + v2125CoinScopedStorageChangelog;
+
+
   // 旧版本默认收起，确保用户打开日志时首先看到当前版本的完整变更。
   // Older releases are collapsed by default so opening the log focuses on the current release.
   const collapseLegacyRelease = () => {
@@ -7573,6 +7683,10 @@ function updateTopLegend() {
     boll: saved.boll ?? true,
     vwap: saved.vwap ?? true,
   };
+  /* 价格纵坐标（图表里那一列价格数字）：贴哪一端、要不要显示。
+     刻意用一组新键名，免得读到早期同名字段留下的历史取值。 */
+  state.priceAxis = saved.priceAxis ?? true;
+  state.priceAxisSide = saved.priceAxisSide === "left" ? "left" : "right";
   const patternLegend = document.createElement("div");
   patternLegend.id = "chartPatternLegend";
   patternLegend.className = "chart-pattern-legend";
@@ -7598,9 +7712,24 @@ function updateTopLegend() {
         b.classList.toggle("off", !state.chartLines[b.dataset.line]),
       );
     patternLegend.hidden = !state.chartSeries.candles;
+    panel
+      .querySelector("[data-pricetag]")
+      ?.classList.toggle("off", !state.priceAxis);
+    panel.querySelectorAll("[data-pricetag-side]").forEach((b) => {
+      b.disabled = !state.priceAxis;
+      b.classList.toggle(
+        "active",
+        !!state.priceAxis && b.dataset.pricetagSide === state.priceAxisSide,
+      );
+    });
     localStorage.setItem(
       "btc_chart_display",
-      JSON.stringify({ ...state.chartSeries, ...state.chartLines }),
+      JSON.stringify({
+        ...state.chartSeries,
+        ...state.chartLines,
+        priceAxis: state.priceAxis,
+        priceAxisSide: state.priceAxisSide,
+      }),
     );
     const activeItems = [];
     if (state.chartSeries.candles)
@@ -7612,7 +7741,7 @@ function updateTopLegend() {
     updateTopLegend();
     drawCandlestickChart();
   };
-  panel.innerHTML = `<div class="control-popover chart-picker"><button class="control-trigger" type="button" aria-haspopup="true" aria-expanded="false"><span class="control-label">${tx("图表", "Chart")}</span><b data-current-chart></b><i aria-hidden="true">▾</i></button><div class="control-popover-panel chart-display-options"><div class="chart-series-options"><button type="button" data-series="candles">${tx("K线图", "Candlestick")}</button><button type="button" data-series="close">${tx("价格线", "Price line")}</button></div><div class="chart-line-toggles"><button type="button" data-line="ma20">MA20</button><button type="button" data-line="ma50">MA50</button><button type="button" data-line="ma200">MA200</button><button type="button" data-line="boll">${tx("布林带", "Bollinger")}</button><button type="button" data-line="vwap">VWAP</button></div></div></div>`;
+  panel.innerHTML = `<div class="control-popover chart-picker"><button class="control-trigger" type="button" aria-haspopup="true" aria-expanded="false"><span class="control-label">${tx("图表", "Chart")}</span><b data-current-chart></b><i aria-hidden="true">▾</i></button><div class="control-popover-panel chart-display-options"><div class="chart-series-options"><button type="button" data-series="candles">${tx("K线图", "Candlestick")}</button><button type="button" data-series="close">${tx("价格线", "Price line")}</button></div><div class="chart-line-toggles"><button type="button" data-line="ma20">MA20</button><button type="button" data-line="ma50">MA50</button><button type="button" data-line="ma200">MA200</button><button type="button" data-line="boll">${tx("布林带", "Bollinger")}</button><button type="button" data-line="vwap">VWAP</button></div><div class="chart-line-toggles"><button type="button" data-pricetag>${tx("价格坐标", "Price axis")}</button><button type="button" data-pricetag-side="left">${tx("贴左", "Left")}</button><button type="button" data-pricetag-side="right">${tx("贴右", "Right")}</button></div></div></div>`;
   const popover = panel.querySelector(".control-popover"),
     trigger = panel.querySelector(".control-trigger");
   trigger.addEventListener("click", () => {
@@ -7621,10 +7750,14 @@ function updateTopLegend() {
   });
   panel.addEventListener("click", (event) => {
     const series = event.target.dataset.series,
-      line = event.target.dataset.line;
+      line = event.target.dataset.line,
+      tagToggle = event.target.dataset.pricetag,
+      tagSide = event.target.dataset.pricetagSide;
     if (series) state.chartSeries[series] = !state.chartSeries[series];
     if (line) state.chartLines[line] = !state.chartLines[line];
-    if (series || line) sync();
+    if (tagToggle !== undefined) state.priceAxis = !state.priceAxis;
+    if (tagSide && state.priceAxis) state.priceAxisSide = tagSide;
+    if (series || line || tagToggle !== undefined || tagSide) sync();
   });
   toolbar.append(panel);
   sync();
@@ -7683,14 +7816,40 @@ function updateTopLegend() {
 /* 英文模式质量层：覆盖固定卡片与动态插入内容。
    Final English-mode QA layer: every persistent card and every dynamically
    rendered market-analysis string is rebuilt from the same locale source. */
+/* v2.11.0：联动数据改为集中状态。fedMonitorCard 每 60 秒整卡重渲染，
+   面板 DOM 会被重建；correlationState 保存最近一次结果，
+   renderFedMonitor 渲染完调用 paintCorrelationPanel() 回填，内容不丢。 */
+let correlationState = {
+  status: "",
+  tickers: "",
+  output: "",
+  loaded: false,
+  loading: false,
+};
+function paintCorrelationPanel() {
+  const status = $("correlationStatus"),
+    out = $("correlationOutput"),
+    cards = $("indexTickerCards"),
+    button = $("refreshCorrelation");
+  if (!out) return;
+  if (status && correlationState.status) status.textContent = correlationState.status;
+  if (cards && correlationState.tickers) cards.innerHTML = correlationState.tickers;
+  if (correlationState.output) out.innerHTML = correlationState.output;
+  if (button && !button.dataset.corrBound) {
+    button.dataset.corrBound = "1";
+    button.onclick = () => loadCorrelation();
+  }
+}
 loadCorrelation = async function () {
   const status = $("correlationStatus"),
     out = $("correlationOutput");
-  if (!out) return;
-  status.textContent = tx(
-    "正在对齐 BTC、SPY、QQQ 的共同交易日并训练…",
+  if (!out || correlationState.loading) return;
+  correlationState.loading = true;
+  correlationState.status = tx(
+    "正在对齐 " + coinLabel() + "、SPY、QQQ 的共同交易日并训练…",
     "Aligning BTC, SPY and QQQ trading days and training…",
   );
+  if (status) status.textContent = correlationState.status;
   try {
     const r = await fetch("/api/correlation-history"),
       d = await r.json();
@@ -7700,11 +7859,9 @@ loadCorrelation = async function () {
         up = delta >= 0;
       return `<article class="index-card ${up ? "up" : "down"}"><span>${name} · ${ticker}</span><b>${q.last.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</b><div><em>${up ? "+" : "−"}${Math.abs(delta).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</em><em>${up ? "+" : "−"}${((Math.abs(delta) / q.previous) * 100).toFixed(2)}%</em></div><small>${tx("最近收盘", "Last close")}</small></article>`;
     };
-    const cards = $("indexTickerCards");
-    if (cards)
-      cards.innerHTML =
-        quoteCard(tx("标普 500", "S&P 500"), "SPY", d.indexQuotes.spy) +
-        quoteCard(tx("纳斯达克 100", "Nasdaq 100"), "QQQ", d.indexQuotes.qqq);
+    correlationState.tickers =
+      quoteCard(tx("标普 500", "S&P 500"), "SPY", d.indexQuotes.spy) +
+      quoteCard(tx("纳斯达克 100", "Nasdaq 100"), "QQQ", d.indexQuotes.qqq);
     const byDate = (arr) =>
         new Map(
           arr.map((x) => [
@@ -7749,15 +7906,37 @@ loadCorrelation = async function () {
           : v <= -0.3
             ? tx("负相关较明显", "Clear negative correlation")
             : tx("相关性偏弱", "Weak correlation");
-    out.innerHTML = `<div class="corr-stat"><span>BTC × SPY (${tx("60日", "60d")})</span><b class="${corrSPY >= 0 ? "bull" : "bear"}">${corrSPY >= 0 ? "+" : ""}${corrSPY.toFixed(2)}</b><small>${correlationLabel(corrSPY)}</small></div><div class="corr-stat"><span>BTC × QQQ (${tx("60日", "60d")})</span><b class="${corrQQQ >= 0 ? "bull" : "bear"}">${corrQQQ >= 0 ? "+" : ""}${corrQQQ.toFixed(2)}</b><small>${correlationLabel(corrQQQ)}</small></div><div class="corr-stat wide"><span>${tx("跨市场模型：下一交易日 BTC 看多概率", "Cross-market model: next-session BTC bullish probability")}</span><b class="${p >= 50 ? "bull" : "bear"}">${p === null ? "--" : p.toFixed(2) + "%"}</b><small>${fit ? tx(`SPY、QQQ 与 BTC 当日收益特征 · 样本外准确率 ${(fit.accuracy * 100).toFixed(2)}% · 训练 n=${fit.n}`, `SPY, QQQ and BTC same-day return features · out-of-sample accuracy ${(fit.accuracy * 100).toFixed(2)}% · training n=${fit.n}`) : tx("共同交易日不足", "Not enough shared trading days")}</small></div>`;
-    status.textContent = tx(
+    correlationState.output = `<div class="corr-stat"><span>BTC × SPY (${tx("60日", "60d")})</span><b class="${corrSPY >= 0 ? "bull" : "bear"}">${corrSPY >= 0 ? "+" : ""}${corrSPY.toFixed(2)}</b><small>${correlationLabel(corrSPY)}</small></div><div class="corr-stat"><span>BTC × QQQ (${tx("60日", "60d")})</span><b class="${corrQQQ >= 0 ? "bull" : "bear"}">${corrQQQ >= 0 ? "+" : ""}${corrQQQ.toFixed(2)}</b><small>${correlationLabel(corrQQQ)}</small></div><div class="corr-stat wide"><span>${tx("跨市场模型：下一交易日 BTC 看多概率", "Cross-market model: next-session BTC bullish probability")}</span><b class="${p >= 50 ? "bull" : "bear"}">${p === null ? "--" : p.toFixed(2) + "%"}</b><small>${fit ? tx(`SPY、QQQ 与 BTC 当日收益特征 · 样本外准确率 ${(fit.accuracy * 100).toFixed(2)}% · 训练 n=${fit.n}`, `SPY, QQQ and BTC same-day return features · out-of-sample accuracy ${(fit.accuracy * 100).toFixed(2)}% · training n=${fit.n}`) : tx("共同交易日不足", "Not enough shared trading days")}</small></div>`;
+    correlationState.status = tx(
       `数据已按共同交易日对齐 · ${d.cached ? "缓存数据" : "刚更新"} · 相关性会随窗口变化，不能单独作为开仓信号。`,
       `Data aligned to shared trading days · ${d.cached ? "cached" : "updated"} · correlations vary by window and are not stand-alone entry signals.`,
     );
+    correlationState.loaded = true;
+    paintCorrelationPanel();
   } catch (e) {
-    status.textContent = `${tx("美股联动模块暂不可用", "US equities linkage module unavailable")}：${e.message}`;
+    correlationState.status = `${tx("美股联动模块暂不可用", "US equities linkage module unavailable")}：${e.message}`;
+    paintCorrelationPanel();
+  } finally {
+    correlationState.loading = false;
   }
 };
+
+/* 多周期共振：加权一致性所需的常量（上移到此处，避免在 applyLanguage 早期调用时触发 TDZ）。
+   **数组顺序 = 界面上的展示顺序（时间由小到大）**，也是加权时的遍历顺序，改动时留意。
+   ttl = 该周期缓存的有效期，同时就是它在自动刷新里的目标节奏：15m 约 1 分钟、
+   1h 约 5 分钟、4h 约 15 分钟、1d 约 1 小时、1w 约 6 小时（周线一周才收一根，不必勤刷）。
+   取值略小于整数间隔，是为了不跟 20 秒的检查节拍撞线 —— 正好取 60_000 时，到点那一拍的
+   已过时间往往只有 59.9s，会被判成「还没到期」而白漏一拍，变成每两拍才更新一次。
+   weight 之和为 1，周期越大分量越重。 */
+const RES_INTERVALS = [
+  { key: "15m", weight: 0.05, threshold: 35, ttl: 55_000 },
+  { key: "1h", weight: 0.1, threshold: 45, ttl: 280_000 },
+  { key: "4h", weight: 0.2, threshold: 45, ttl: 870_000 },
+  { key: "1d", weight: 0.3, threshold: 45, ttl: 3_540_000 },
+  { key: "1w", weight: 0.35, threshold: 45, ttl: 21_600_000 },
+];
+const resonanceCache = {};
+let resonanceSource = null;
 
 const applyLanguageFully = applyLanguage;
 applyLanguage = function () {
@@ -7834,9 +8013,11 @@ applyLanguage = function () {
   const resonanceText = $("resonance");
   if (
     resonanceText &&
-    /^(尚未计算|Not calculated yet)$/.test(resonanceText.textContent.trim())
+    /^(尚未计算|Not computed yet)$/.test(resonanceText.textContent.trim())
   )
-    text(resonanceText, "尚未计算", "Not calculated yet");
+    text(resonanceText, "尚未计算", "Not computed yet");
+  if (resonanceText && RES_INTERVALS.some((iv) => resonanceCache[iv.key]))
+    renderResonanceChips();
   const legend = $("chartLegend");
   if (legend) {
     const names = zh
@@ -8481,7 +8662,7 @@ calcLiqProbability = function () {
       gap >= 0
         ? tx("局部极值距强平", "Local extreme above liquidation")
         : tx("局部极值已越过强平", "Local extreme crossed liquidation");
-  out.innerHTML = `<div><small>${tx("理论强平价", "Theoretical liquidation")}</small><b class="bear">${money(liq)}</b></div><div><small>${tx("实际杠杆 / BTC 数量", "Effective leverage / BTC size")}</small><b>${lev.toFixed(2)}× / ${btc.toFixed(6)} BTC</b></div><div><small>${extremeLabel}</small><b class="${side > 0 ? "low" : "high"}">${money(nearby)}</b></div><div><small>${gapLabel}</small><b class="${gap >= 0 ? "bull" : "bear"}">${gap >= 0 ? "+" : "−"}${money(Math.abs(gap))}</b></div><div><small>${tx("历史触及概率", "Historical touch probability")}</small><b class="${level}">${probability.toFixed(2)}%</b></div><div><small>${tx("手续费参考（开+平）", "Fee reference (in + out)")}</small><b>${money(amount * fee * 2)}</b></div><p class="${level}">${tx("以当前价", "Using live price")} ${money(live)} · ${tx("以最近", "Using")} ${total} ${tx("个", "")} ${window}${tx(" 根 K 线窗口，比较每段局部最低/最高价与同一仓位的强平距离；仅作风险研究，不代表真实强平或未来概率。", "-candle windows: compares each local low/high with this position’s liquidation distance. Research only; not actual liquidation or future probability.")}</p>`;
+  out.innerHTML = `<div><small>${tx("理论强平价", "Theoretical liquidation")}</small><b class="bear">${money(liq)}</b></div><div><small>${tx("实际杠杆 / " + coinLabel() + " 数量", "Effective leverage / " + coinLabel() + " size")}</small><b>${lev.toFixed(2)}× / ${btc.toFixed(6)} ${coinLabel()}</b></div><div><small>${extremeLabel}</small><b class="${side > 0 ? "low" : "high"}">${money(nearby)}</b></div><div><small>${gapLabel}</small><b class="${gap >= 0 ? "bull" : "bear"}">${gap >= 0 ? "+" : "−"}${money(Math.abs(gap))}</b></div><div><small>${tx("历史触及概率", "Historical touch probability")}</small><b class="${level}">${probability.toFixed(2)}%</b></div><div><small>${tx("手续费参考（开+平）", "Fee reference (in + out)")}</small><b>${money(amount * fee * 2)}</b></div><p class="${level}">${tx("以当前价", "Using live price")} ${money(live)} · ${tx("以最近", "Using")} ${total} ${tx("个", "")} ${window}${tx(" 根 K 线窗口，比较每段局部最低/最高价与同一仓位的强平距离；仅作风险研究，不代表真实强平或未来概率。", "-candle windows: compares each local low/high with this position’s liquidation distance. Research only; not actual liquidation or future probability.")}</p>`;
 };
 setTimeout(setupLiqProbabilityCalculator, 0);
 
@@ -8778,10 +8959,32 @@ visibleCandles = function () {
     ? d.slice(-Math.max(2, Math.ceil(state.viewPoints / state.zoom)))
     : d;
 };
-let positionState = JSON.parse(
-  localStorage.getItem("btc_position_state") ||
-    '{"side":"long","exchange":"binance","amount":1000,"margin":100,"entry":0,"mark":0}',
-);
+
+/* 多币种（v2.12.5）：持仓表单状态按币种独立存储（BTC 沿用旧键 btc_position_state），
+   其余币种用 btc_position_state_<COIN>；从未填过的币种用默认模板，不再共用 BTC 的数值。 */
+const POSITION_STATE_DEFAULT =
+  '{"side":"long","exchange":"binance","amount":1000,"margin":100,"entry":0,"mark":0}';
+const positionStateStorageKey = () =>
+  "btc_position_state" + coinStorageSuffix();
+function loadPositionStateFromStorage() {
+  try {
+    return JSON.parse(
+      localStorage.getItem(positionStateStorageKey()) || POSITION_STATE_DEFAULT,
+    );
+  } catch {
+    return JSON.parse(POSITION_STATE_DEFAULT);
+  }
+}
+let positionState = loadPositionStateFromStorage();
+const persistPositionState = () => {
+  try {
+    localStorage.setItem(positionStateStorageKey(), JSON.stringify(positionState));
+  } catch {}
+};
+window.addEventListener("btc:coin-changed", () => {
+  positionState = loadPositionStateFromStorage();
+  syncPositionForm();
+});
 function positionCalc() {
   const p = positionState,
     amount = Math.max(0, +p.amount || 0),
@@ -8853,13 +9056,13 @@ function syncPositionForm() {
   form.oninput = () => {
     for (const el of form.elements)
       if (el.name) positionState[el.name] = el.value;
-    localStorage.setItem("btc_position_state", JSON.stringify(positionState));
+    persistPositionState();
     renderPosition();
   };
   $("syncMark").onclick = () => {
     positionState.mark = state.ticker?.last || 0;
     if (!positionState.entry) positionState.entry = positionState.mark;
-    localStorage.setItem("btc_position_state", JSON.stringify(positionState));
+    persistPositionState();
     syncPositionForm();
   };
   setTimeout(syncPositionForm, 0);
@@ -8886,7 +9089,7 @@ loadExchangeStrip = async function () {
     }
   });
 };
-loadExchangeStrip();
+whenIdle(() => loadExchangeStrip());
 
 (() => {
   const chartBox = $("chart")?.closest(".chart-box");
@@ -8989,12 +9192,12 @@ if (typeof positionState.confirmed !== "boolean")
       const marker = $("entryMarker");
       if (marker) marker.hidden = true;
     }
-    localStorage.setItem("btc_position_state", JSON.stringify(positionState));
+    persistPositionState();
     renderPosition();
   };
   form.addEventListener("input", () => {
     positionState.confirmed = false;
-    localStorage.setItem("btc_position_state", JSON.stringify(positionState));
+    persistPositionState();
     const marker = $("entryMarker");
     if (marker) marker.hidden = true;
     paintConfirm();
@@ -9319,12 +9522,15 @@ function renderSignalValidity() {
     );
   const redeemSide = redeem === low ? "left" : "right",
     invalidSide = invalid === low ? "left" : "right";
-  const labelHtml = (value, side, kind, label) =>
-      `<div class="signal-validity-label ${side} ${kind}"><small>${money(value)}</small><em>${label}</em></div>`,
-    redeemLabel = labelHtml(redeem, redeemSide, "redeem", tx("兑现", "Redeem")),
-    invalidLabel = labelHtml(invalid, invalidSide, "invalid", tx("作废", "Invalid")),
-    leftLabel = redeemSide === "left" ? redeemLabel : invalidLabel,
-    rightLabel = redeemSide === "right" ? redeemLabel : invalidLabel;
+  const sideLabel = (side, kind, label) =>
+      `<div class="signal-validity-label ${side} ${kind}"><em>${label}</em></div>`,
+    sidePrice = (side, kind, value) =>
+      `<div class="signal-validity-label ${side} ${kind}"><small>${money(value)}</small></div>`,
+    // 文字标签在进度条上方一行，价格数字在进度条下方一行（两侧对称）
+    topLeftLabel = invalidSide === "left" ? sideLabel("left", "invalid", tx("作废", "Invalid")) : sideLabel("left", "redeem", tx("兑现", "Redeem")),
+    topRightLabel = invalidSide === "right" ? sideLabel("right", "invalid", tx("作废", "Invalid")) : sideLabel("right", "redeem", tx("兑现", "Redeem")),
+    bottomLeftPrice = invalidSide === "left" ? sidePrice("left", "invalid", invalid) : sidePrice("left", "redeem", redeem),
+    bottomRightPrice = invalidSide === "right" ? sidePrice("right", "invalid", invalid) : sidePrice("right", "redeem", redeem);
   const rangeKey = [
     long,
     reference.toFixed(2),
@@ -9366,7 +9572,7 @@ function renderSignalValidity() {
     if (foot) foot.textContent = note;
   } else {
     box.dataset.rangeKey = rangeKey;
-    box.innerHTML = `<div class="signal-validity-head"><b>${tx("信号有效区间", "Signal validity range")}</b><span>${valid ? tx("信号有效", "Signal active") : tx("信号已作废", "Signal invalid")}</span></div><div class="signal-validity-scale">${leftLabel}<div class="signal-validity-track"><i class="signal-validity-now" style="left:${position}%" aria-label="${tx("现价", "Current price")} ${money(current)}"><span class="signal-validity-now-price">${money(current)}</span></i></div>${rightLabel}</div><div class="signal-validity-foot"><small>${note}</small></div>`;
+    box.innerHTML = `<div class="signal-validity-head"><b>${tx("信号有效区间", "Signal validity range")}</b><span>${valid ? tx("信号有效", "Signal active") : tx("信号已作废", "Signal invalid")}</span></div><div class="signal-validity-scale"><div class="signal-validity-ends">${topLeftLabel}${topRightLabel}</div><div class="signal-validity-track"><i class="signal-validity-now" style="left:${position}%" aria-label="${tx("现价", "Current price")} ${money(current)}"><span class="signal-validity-now-price">${money(current)}</span></i></div><div class="signal-validity-ends">${bottomLeftPrice}${bottomRightPrice}</div></div><div class="signal-validity-foot"><small>${note}</small></div>`;
   }
   const signal = $("signal"),
     reason = $("signalReason"),
@@ -9567,54 +9773,20 @@ function renderSelectionOverlay() {
   overlay.hidden = false;
   overlay.innerHTML = `<b>${tx("框选时间段", "Selected range")}</b> ${pointTime(s[0].time)} — ${pointTime(s.at(-1).time)}<span>${tx("最高", "High")} <em class="high">${money(hi)}</em> <i class="${diff(hi) >= 0 ? "bull" : "bear"}">${tx("较实时", "vs live")} ${diff(hi) >= 0 ? "+" : "−"}${money(Math.abs(diff(hi)))}</i></span><span>${tx("最低", "Low")} <em class="low">${money(lo)}</em> <i class="${diff(lo) >= 0 ? "bull" : "bear"}">${tx("较实时", "vs live")} ${diff(lo) >= 0 ? "+" : "−"}${money(Math.abs(diff(lo)))}</i></span><span class="${ret >= 0 ? "bull" : "bear"}">${tx("区间涨跌", "Range return")} ${pct(ret)}</span>`;
 }
+/* 多周期共振的自动计算节奏。
+   首屏：等核心 K 线渲染完之后再算一次，避免与首屏请求抢带宽。
+   之后：每 RESONANCE_AUTO_MS 走一次「到期检查」—— 不强制全拉，只重算缓存已过期的周期，
+   于是常态下一拍只真正拉 15m（约每分钟一次），1h / 4h / 1d 分别在 5 / 15 / 60 分钟才发请求，
+   四个周期共 800 根 K 线不会被每分钟重拉一遍。检查本身不发请求，节拍取小一点没有代价。 */
+const RESONANCE_AUTO_MS = 20_000,
+  RESONANCE_FIRST_MS = 2_500;
 function resetResonanceTimer() {
   clearTimeout(resonanceTimer);
   resonanceTimer = setTimeout(async () => {
-    if (!document.hidden) await resonance(true);
+    if (!document.hidden) await refreshResonance(false);
     resetResonanceTimer();
-  }, 10_000);
+  }, RESONANCE_AUTO_MS);
 }
-resonance = async function (auto = false) {
-  const btn = $("loadResonance"),
-    out = $("resonance");
-  if (!out) return;
-  if (!auto) {
-    btn.disabled = true;
-    btn.textContent = tx("计算中…", "Calculating…");
-  }
-  out.textContent = tx(
-    "正在计算 15m、1h、4h、1d 共振…",
-    "Calculating 15m, 1h, 4h and 1d resonance…",
-  );
-  try {
-    const rows = await Promise.all(
-      ["15m", "1h", "4h", "1d"].map(async (interval) => {
-        const r = await fetch(
-            "/api/market?" +
-              new URLSearchParams({
-                interval,
-                limit: 200,
-                source: state.source,
-              }),
-          ),
-          x = await r.json();
-        if (!r.ok) throw new Error(`${interval}: ${x.error}`);
-        const m = metrics(x.candles),
-          [label, cls] = classification(m.score);
-        return `<span class="res-chip ${cls}"><b>${interval}</b><em>${uiLang === "zh" ? label : cls === "bull" ? "Bullish" : cls === "bear" ? "Bearish" : "Neutral"} ${m.score > 0 ? "+" : ""}${m.score.toFixed(2)}</em><small>${x.source}</small></span>`;
-      }),
-    );
-    out.innerHTML = rows.join("");
-  } catch (e) {
-    out.textContent = `${tx("共振计算失败", "Resonance calculation failed")}：${e.message}`;
-  } finally {
-    if (!auto) {
-      btn.disabled = false;
-      btn.textContent = tx("重新计算共振", "Recalculate resonance");
-    }
-    resetResonanceTimer();
-  }
-};
 function renderHorizonForecasts() {
   const host = $("microForecast");
   if (!host) return;
@@ -9730,8 +9902,12 @@ $("chart")?.addEventListener("mousemove", (event) => {
     tip.style.top = Math.max(pad, Math.min(top, boxRect.height - tipH - pad)) + "px";
   }
 });
-$("loadResonance").onclick = () => resonance(false);
+$("loadResonance").onclick = () => refreshResonance(true);
 resetResonanceTimer();
+/* 打开页面自动计算一次：不点按钮也能直接看到共振结论。 */
+setTimeout(() => {
+  if (!document.hidden) refreshResonance(true);
+}, RESONANCE_FIRST_MS);
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) clearTimeout(resonanceTimer);
   else resetResonanceTimer();
@@ -9745,51 +9921,188 @@ classification = function (score) {
       ? [tx("做空", "Short"), "bear"]
       : [tx("观望", "Neutral"), "flat"];
 };
-const resonanceQuiet = resonance;
-resonance = async function (auto = false) {
-  const btn = $("loadResonance"),
-    out = $("resonance");
-  if (!out) return;
-  if (!auto) {
-    btn.disabled = true;
-    btn.textContent = tx("计算中…", "Calculating…");
-    out.textContent = tx(
-      "正在计算 15m、1h、4h、1d 共振…",
-      "Calculating 15m, 1h, 4h and 1d resonance…",
-    );
-  }
-  try {
-    const rows = await Promise.all(
-      ["15m", "1h", "4h", "1d"].map(async (interval) => {
-        const r = await fetch(
-            "/api/market?" +
-              new URLSearchParams({
-                interval,
-                limit: 200,
-                source: state.source,
-              }),
-          ),
-          x = await r.json();
-        if (!r.ok) throw new Error(`${interval}: ${x.error}`);
-        const m = metrics(x.candles),
-          [label, cls] = classification(m.score);
-        return `<span class="res-chip ${cls}"><b>${interval}</b><em>${label} ${m.score > 0 ? "+" : ""}${m.score.toFixed(2)}</em><small>${x.source}</small></span>`;
+function classifyTf(score, threshold) {
+  if (score >= threshold) return [tx("做多", "Long"), "bull", 1];
+  if (score <= -threshold) return [tx("做空", "Short"), "bear", -1];
+  return [tx("观望", "Neutral"), "flat", 0];
+}
+async function fetchResonanceInterval(iv, force) {
+  const now = Date.now(),
+    c = resonanceCache[iv.key];
+  if (!force && resonanceSource === state.source && c && now - c.ts < iv.ttl)
+    return false;
+  const r = await fetch(
+    "/api/market?" +
+      new URLSearchParams({
+        interval: iv.key,
+        limit: 200,
+        source: state.source,
       }),
-    );
-    const html = rows.join("");
-    if (out.innerHTML !== html) out.innerHTML = html;
-  } catch (e) {
-    if (!auto)
-      out.textContent = `${tx("共振计算失败", "Resonance calculation failed")}：${e.message}`;
-  } finally {
-    if (!auto) {
-      btn.disabled = false;
-      btn.textContent = tx("重新计算共振", "Recalculate resonance");
+  );
+  const x = await r.json();
+  if (!r.ok) throw new Error(`${iv.key}: ${x.error}`);
+  const m = metrics(x.candles),
+    [, cls, dir] = classifyTf(m.score, iv.threshold);
+  resonanceCache[iv.key] = {
+    score: m.score,
+    cls,
+    dir,
+    source: x.source,
+    ts: now,
+  };
+  resonanceSource = state.source;
+  return true;
+}
+/* 结论的唯一真源：徽标文案（同向周期数 + 强度）与标题行右侧那句四字短语都在这里算。
+   `majority` 用比例而非写死 3，是为了周期数变动时门槛自动跟着走
+   （4 个周期 → 3 个算多数；5 个周期 → 4 个算多数）。 */
+function resonanceVerdict() {
+  if (!RES_INTERVALS.some((iv) => resonanceCache[iv.key])) return null;
+  let longs = 0,
+    shorts = 0,
+    weighted = 0;
+  for (const iv of RES_INTERVALS) {
+    const c = resonanceCache[iv.key];
+    if (!c) continue;
+    const [, , dir] = classifyTf(c.score, iv.threshold);
+    if (dir > 0) {
+      longs++;
+      weighted += iv.weight * (c.score / 100);
+    } else if (dir < 0) {
+      shorts++;
+      weighted -= iv.weight * (c.score / 100);
     }
-    resetResonanceTimer();
   }
-};
-$("loadResonance").onclick = () => resonance(false);
+  const total = RES_INTERVALS.length,
+    mag = Math.round(Math.min(1, Math.abs(weighted)) * 100),
+    majority = Math.ceil(total * 0.7);
+  let cls, label, short;
+  if (longs === total) {
+    cls = "bull";
+    label = `${tx("强共振·多", "Strong long")} (${total}/${total})`;
+    short = tx("全线偏多", "All bullish");
+  } else if (shorts === total) {
+    cls = "bear";
+    label = `${tx("强共振·空", "Strong short")} (${total}/${total})`;
+    short = tx("全线偏空", "All bearish");
+  } else if (longs >= majority) {
+    cls = "bull";
+    label = `${tx("多数·多", "Majority long")} (${longs}/${total})`;
+    short = tx("多头占优", "Bulls lead");
+  } else if (shorts >= majority) {
+    cls = "bear";
+    label = `${tx("多数·空", "Majority short")} (${shorts}/${total})`;
+    short = tx("空头占优", "Bears lead");
+  } else if (longs === 0 && shorts === 0) {
+    cls = "flat";
+    label = `${tx("无方向", "No direction")} (0/${total})`;
+    short = tx("方向不明", "No direction");
+  } else if (shorts === 0 || longs === 0) {
+    /* 只有一侧有方向、但没到「多数」门槛：这是「偏多/偏空、还没共振」，
+       不能叫分歧 —— 分歧的前提是多空两边都有人。 */
+    const n = longs > 0 ? longs : shorts;
+    cls = longs > 0 ? "bull" : "bear";
+    label = `${longs > 0 ? tx("偏多", "Lean long") : tx("偏空", "Lean short")} · ${tx("待确认", "pending")} ${n}/${total}`;
+    short = longs > 0 ? tx("偏多待确认", "Lean long") : tx("偏空待确认", "Lean short");
+  } else {
+    cls = "conflict";
+    const lean =
+      longs > shorts
+        ? tx("偏多", "lean long")
+        : longs < shorts
+          ? tx("偏空", "lean short")
+          : tx("均衡", "balanced");
+    label = `${lean} · ${tx("分歧", "diverged")} ${longs}/${total}`;
+    short = tx("多空分歧", "Diverged");
+  }
+  return { cls, label, mag, short };
+}
+function renderResonanceSummary() {
+  const v = resonanceVerdict();
+  return v
+    ? `<div class="res-summary ${v.cls}"><b>${v.label}</b><small>${tx("强度", "str")} ${v.mag}</small></div>`
+    : "";
+}
+function renderResonanceChips() {
+  const out = $("resonance");
+  if (!out) return;
+  const chips = RES_INTERVALS.map(({ key }) => {
+    const c = resonanceCache[key];
+    if (!c || c.error)
+      return `<span class="res-chip flat" data-iv="${key}"><b>${key}</b><em>${tx("…", "…")}</em></span>`;
+    const dirLabel =
+      c.cls === "bull"
+        ? tx("做多", "Long")
+        : c.cls === "bear"
+          ? tx("做空", "Short")
+          : tx("观望", "Neutral");
+    return `<span class="res-chip ${c.cls}" data-iv="${key}"><b>${key}</b><em>${dirLabel} ${c.score > 0 ? "+" : ""}${c.score}</em></span>`;
+  }).join("");
+  /* 结论分两处：徽标进标题右侧的槽位，一句话短语进它更右侧的短语位
+     （用户要求：中间那块空位放「几个字」的简要结论）。右侧一栏只留逐周期标签。 */
+  const v = resonanceVerdict(),
+    summary = renderResonanceSummary(),
+    slot = $("resonanceSummary"),
+    verdict = $("resonanceVerdict");
+  if (verdict) {
+    verdict.textContent = v ? v.short : "";
+    verdict.className = `res-verdict ${v ? v.cls : "flat"}`;
+    verdict.hidden = !v;
+  }
+  if (slot) {
+    slot.innerHTML = summary;
+    out.innerHTML = `<div class="res-chips">${chips}</div>`;
+  } else out.innerHTML = summary + `<div class="res-chips">${chips}</div>`;
+  highlightResonanceConflict();
+  /* 按钮文字跟随计算状态：已算出 chips 就显示「重新计算共振」，
+     避免自动计算后按钮仍是「计算共振」，让用户误以为还没算过 / 点击无效。 */
+  const loadBtn = $("loadResonance");
+  if (loadBtn) {
+    loadBtn.textContent = out.querySelector(".res-chip")
+      ? tx("重新计算共振", "Recalculate resonance")
+      : tx("计算共振", "Calculate resonance");
+  }
+}
+function highlightResonanceConflict() {
+  const out = $("resonance");
+  if (!out) return;
+  const dirs = RES_INTERVALS.map((iv) => {
+    const c = resonanceCache[iv.key];
+    return c ? classifyTf(c.score, iv.threshold)[2] : 0;
+  });
+  const longs = dirs.filter((d) => d > 0).length,
+    shorts = dirs.filter((d) => d < 0).length;
+  if (longs === 0 || shorts === 0) return;
+  const dom = longs >= shorts ? 1 : -1;
+  RES_INTERVALS.forEach((iv, i) => {
+    const chip = out.querySelector(`.res-chip[data-iv="${iv.key}"]`);
+    if (!chip) return;
+    if (dirs[i] !== 0 && dirs[i] !== dom) chip.classList.add("conflict");
+    else chip.classList.remove("conflict");
+  });
+}
+async function refreshResonance(forceAll) {
+  const loadBtn = $("loadResonance");
+  if (loadBtn && forceAll) loadBtn.textContent = tx("计算中…", "Computing…");
+  let changed = false;
+  await Promise.all(
+    RES_INTERVALS.map(async (iv) => {
+      try {
+        if (await fetchResonanceInterval(iv, forceAll)) changed = true;
+      } catch (e) {
+        resonanceCache[iv.key] = {
+          ...(resonanceCache[iv.key] || {}),
+          error: e.message,
+          ts: Date.now(),
+        };
+        changed = true;
+      }
+    }),
+  );
+  if (changed || forceAll) renderResonanceChips();
+  return changed;
+}
+$("loadResonance").onclick = () => refreshResonance(true);
 const loadCurrentWithHeader = loadCurrent;
 loadCurrent = async function () {
   const refreshed = await loadCurrentWithHeader();
@@ -10226,6 +10539,117 @@ if (state.candles.length) renderAnalysis();
 
 /* Coalesce input and live updates into one final chart render per frame. */
 let chartRenderFrame = null;
+
+/* ===== v2.11.86：本地行情快照秒回填（消除刷新时的多次闪烁） ==================
+   刷新后浏览器要重新解析并执行整个 app.js（本地实测 ~0.9s），期间页面依次经历
+   「静态骨架 → app.js 注入的空界面 → 数据灌入」三个视觉状态，观感就是连闪几下。
+   做法：把最后一次成功的行情数据写入 localStorage，下次开页时在模块加载完毕的
+   第一时间同步回填并渲染 —— 用户看到的首帧就是带数据的完整界面，后台再静默刷新。
+   首次访问（无快照）仍然走骨架屏路径。 */
+(() => {
+  const SNAP_KEY = "btc_market_snapshot_v1",
+    SNAP_MAX_CANDLES = 400,
+    SNAP_MAX_AGE_MS = 6 * 60 * 60 * 1000; // 超过 6 小时的行情不再回填，避免显示陈旧图表
+  const usableCandle = (candle) =>
+    !!candle &&
+    Number.isFinite(candle.close) &&
+    Number.isFinite(candle.high) &&
+    Number.isFinite(candle.low) &&
+    Number.isFinite(candle.time);
+
+  /* 写入放在空闲片段执行（localStorage 是同步 IO，别打断绘制与交互）。 */
+  function saveMarketSnapshot(data) {
+    try {
+      if (!data || !data.ticker || !Array.isArray(data.candles)) return;
+      const candles = data.candles.slice(-SNAP_MAX_CANDLES);
+      if (candles.length < 2) return;
+      const payload = JSON.stringify({
+        at: Date.now(),
+        interval: state.interval,
+        limit: state.limit,
+        range: state.range,
+        viewPoints: state.viewPoints,
+        source: state.source,
+        candles,
+        ticker: data.ticker,
+        marketMeta: state.marketMeta,
+        fetchedAt: data.fetchedAt,
+      });
+      whenIdle(() => {
+        try {
+          localStorage.setItem(SNAP_KEY, payload);
+        } catch {
+          /* 配额/隐私模式：快照不可用时静默降级为普通加载 */
+        }
+      });
+    } catch {
+      /* 同上 */
+    }
+  }
+  window.saveMarketSnapshot = saveMarketSnapshot;
+
+  const fail = (reason) => {
+    try {
+      window.__hydrateFailReason = reason;
+    } catch {}
+    return false;
+  };
+  function hydrateMarketSnapshot() {
+    let snap = null;
+    try {
+      snap = JSON.parse(localStorage.getItem(SNAP_KEY) || "null");
+    } catch {
+      return false;
+    }
+    if (!snap || !snap.ticker || !Array.isArray(snap.candles)) return fail('no-snapshot');
+    // 周期 / 数据源不一致时不复用，否则会把旧视图的数据套到新视图上。
+    if (snap.source !== state.source || snap.interval !== state.interval) return fail(`mismatch:${snap.source}/${snap.interval} vs ${state.source}/${state.interval}`);
+    if (!Number.isFinite(snap.at) || Date.now() - snap.at > SNAP_MAX_AGE_MS) return fail('stale');
+    const candles = snap.candles.filter(usableCandle);
+    if (candles.length < 2) return fail('no-valid-candles');
+
+    state.candles = candles;
+    state.ticker = snap.ticker;
+    state.marketMeta = snap.marketMeta || null;
+    state.range = snap.range === undefined ? state.range : snap.range;
+    state.viewPoints = snap.viewPoints || state.viewPoints;
+    if (Number.isFinite(snap.limit)) state.limit = snap.limit;
+    state.lastGood = {
+      candles,
+      ticker: snap.ticker,
+      source: snap.source || state.source,
+      synthetic: Boolean(snap.marketMeta && snap.marketMeta.synthetic),
+    };
+    try {
+      renderTicker();
+      renderAnalysis();
+      if (typeof diagnostics === "function")
+        diagnostics({ candles, ticker: snap.ticker, marketMeta: state.marketMeta });
+    } catch (err) {
+      // 回填渲染失败就让位给正常的网络加载，不干扰用户
+      return fail('render:' + (err && err.message));
+    }
+    const conn = $("connection");
+    if (conn)
+      conn.textContent = tx("本机快照 · 正在刷新行情…", "Local snapshot · refreshing…");
+    const cov = $("coverage");
+    if (cov)
+      cov.textContent =
+        `${tx("图表覆盖", "Chart coverage")}：${time(candles[0].time)} ${tx("至", "to")} ${time(candles.at(-1).time)}` +
+        ` · ${candles.length} ${tx("根", "candles")}`;
+    document.documentElement.classList.remove("pre-boot");
+    try {
+      window.__dataReadyAt = performance.now(); // 诊断用：数据首次可见的时刻
+    } catch {}
+    return true;
+  }
+
+  try {
+    if (hydrateMarketSnapshot()) window.__hydratedFromSnapshot = true;
+  } catch {
+    /* 快照异常不影响主流程 */
+  }
+})();
 function scheduleChartRender() {
   if (chartRenderFrame !== null) return;
   chartRenderFrame = requestAnimationFrame(() => {
@@ -10489,27 +10913,30 @@ if (fixedRuleSignal.candles.length) renderFixedRuleSignal();
 /* 两张完全相同的本地买入价卡片：各自保存价格与多空方向，允许同时记录两种仓位。
    Two identical local price cards. Each card keeps its own price and direction
    so the user can choose long or short independently. */
-const entryPriceStorageKey = "btc_personal_entry_price",
-  entryPricesStorageKey = "btc_personal_entry_prices_v3";
+const entryPriceStorageKey = "btc_personal_entry_price"; // BTC 旧单值键，仅 BTC 迁移用
+/* 多币种（v2.12.5）：持仓按币种独立存储 —— BTC 继续用旧键保留历史数据，
+   其余币种各用 btc_personal_entry_prices_v3_<COIN> / btc_personal_entry_side_v1_<COIN>_<index>。
+   从未设置过的币种就是空白，不再借用 BTC 的持仓。 */
+const entryPricesStorageKey = () =>
+  "btc_personal_entry_prices_v3" + coinStorageSuffix();
+const entrySideStorageKey = (index) =>
+  "btc_personal_entry_side_v1" + coinStorageSuffix() + "_" + index;
 // 方向按卡片单独保存；行情每秒刷新时只读取此固定选择，不推断或覆盖用户的多空选择。
 // Persist direction per card. Live quote refreshes only read this explicit choice; they never infer or overwrite it.
-const entrySideStorageKey = (index) => `btc_personal_entry_side_v1_${index}`;
 const validEntry = (value) =>
   Number.isFinite(value) && value > 0 ? value : null;
-let personalEntries = [
-  { price: null, amount: null, margin: null, leverage: null, side: "long" },
-  { price: null, amount: null, margin: null, leverage: null, side: "short" },
-];
-let personalEntriesAccountLoggedIn = false;
-let personalEntrySyncState = [false, false];
-let personalEntryCloudSnapshot = null;
-const personalEntrySyncing = new Set();
-const hasPersonalEntriesV3 =
-  localStorage.getItem(entryPricesStorageKey) !== null;
-try {
-  const saved = JSON.parse(localStorage.getItem(entryPricesStorageKey) || "[]");
-  if (Array.isArray(saved) && saved.length === 2)
-    personalEntries = saved.map((entry, index) => ({
+/* 读取当前币种自己的持仓组（含 BTC 的旧版本迁移，迁移仅限 BTC）。 */
+function loadPersonalEntriesFromStorage() {
+  const storageKey = entryPricesStorageKey(),
+    hasV3 = localStorage.getItem(storageKey) !== null;
+  let entries = [
+    { price: null, amount: null, margin: null, leverage: null, side: "long" },
+    { price: null, amount: null, margin: null, leverage: null, side: "short" },
+  ];
+  try {
+    const saved = JSON.parse(localStorage.getItem(storageKey) || "[]");
+    if (Array.isArray(saved) && saved.length === 2)
+      entries = saved.map((entry, index) => ({
       price: validEntry(Number(entry?.price)),
       amount: validEntry(Number(entry?.amount)),
       // Migrate the previous leverage-only input into the new margin field.
@@ -10524,61 +10951,95 @@ try {
               ? "short"
               : "long",
     }));
-} catch {}
-// Only migrate old single-price storage once. An intentionally blank v3 value
-// must remain blank after reload instead of being repopulated from v2/legacy.
-if (!hasPersonalEntriesV3) {
-  try {
-    const prior = JSON.parse(
-      localStorage.getItem("btc_personal_entry_prices_v2") || "{}",
-    );
-    personalEntries = [
-      { price: validEntry(Number(prior.long)), amount: null, margin: null, leverage: null, side: "long" },
-      { price: validEntry(Number(prior.short)), amount: null, margin: null, leverage: null, side: "short" },
-    ];
   } catch {}
-  const legacy = validEntry(Number(localStorage.getItem(entryPriceStorageKey)));
-  if (legacy)
-    personalEntries[0] = {
-      price: legacy,
-      amount: null,
-      margin: null,
-      leverage: null,
+  // Only migrate old single-price storage once (BTC only). An intentionally
+  // blank v3 value must remain blank after reload instead of being repopulated
+  // from v2/legacy — and other coins never inherit BTC's legacy entries.
+  if (!hasV3 && activeCoin() === BASE_COIN) {
+    try {
+      const prior = JSON.parse(
+        localStorage.getItem("btc_personal_entry_prices_v2") || "{}",
+      );
+      entries = [
+        { price: validEntry(Number(prior.long)), amount: null, margin: null, leverage: null, side: "long" },
+        { price: validEntry(Number(prior.short)), amount: null, margin: null, leverage: null, side: "short" },
+      ];
+    } catch {}
+    const legacy = validEntry(Number(localStorage.getItem(entryPriceStorageKey)));
+    if (legacy)
+      entries[0] = {
+        price: legacy,
+        amount: null,
+        margin: null,
+        leverage: null,
+        side:
+          localStorage.getItem("btc_personal_entry_side") === "short"
+            ? "short"
+            : "long",
+      };
+  }
+  // 独立方向键优先级最高，兼容旧版整组存储并避免任一旧数据迁移覆盖新选择。
+  // Per-card side keys take precedence over legacy grouped storage, preventing migrations from overwriting a new choice.
+  return entries.map((entry, index) => {
+    const savedSide = localStorage.getItem(entrySideStorageKey(index));
+    return {
+      ...entry,
       side:
-        localStorage.getItem("btc_personal_entry_side") === "short"
+        savedSide === "short"
           ? "short"
-          : "long",
+          : savedSide === "long"
+            ? "long"
+            : entry.side,
     };
+  });
 }
-// 独立方向键优先级最高，兼容旧版整组存储并避免任一旧数据迁移覆盖新选择。
-// Per-card side keys take precedence over legacy grouped storage, preventing migrations from overwriting a new choice.
-personalEntries = personalEntries.map((entry, index) => {
-  const savedSide = localStorage.getItem(entrySideStorageKey(index));
-  return {
-    ...entry,
-    side:
-      savedSide === "short"
-        ? "short"
-        : savedSide === "long"
-          ? "long"
-          : entry.side,
-  };
-});
+let personalEntries = loadPersonalEntriesFromStorage();
+let personalEntriesAccountLoggedIn = false;
+let personalEntrySyncState = [false, false];
+let personalEntryCloudSnapshot = null;
+const personalEntrySyncing = new Set();
 let personalEntryEditingIndex = null;
 window.btcPersonalEntries = personalEntries;
 function savePersonalEntries(changedIndex = null) {
   window.btcPersonalEntries = personalEntries;
-  localStorage.setItem(entryPricesStorageKey, JSON.stringify(personalEntries));
+  localStorage.setItem(entryPricesStorageKey(), JSON.stringify(personalEntries));
   personalEntries.forEach((entry, index) =>
     localStorage.setItem(entrySideStorageKey(index), entry.side),
   );
-  localStorage.removeItem("btc_personal_entry_prices_v2");
-  localStorage.removeItem(entryPriceStorageKey);
-  localStorage.removeItem("btc_personal_entry_side");
+  if (activeCoin() === BASE_COIN) {
+    localStorage.removeItem("btc_personal_entry_prices_v2");
+    localStorage.removeItem(entryPriceStorageKey);
+    localStorage.removeItem("btc_personal_entry_side");
+  }
   if (changedIndex === 0 || changedIndex === 1)
     personalEntrySyncState[changedIndex] = false;
   window.dispatchEvent(new Event("btc:personal-entries-changed"));
 }
+/* 切换币种：读取该币种自己的持仓（没设置过就是空白，不借 BTC 的），并重算账户同步状态。
+   云端持仓档案目前仅 BTC；回到 BTC 时若本地为空且云端有值，沿用登录时的云端回填逻辑。 */
+window.addEventListener("btc:coin-changed", () => {
+  personalEntryEditingIndex = null;
+  personalEntries = loadPersonalEntriesFromStorage();
+  if (
+    activeCoin() === BASE_COIN &&
+    personalEntriesAccountLoggedIn &&
+    personalEntryCloudSnapshot
+  )
+    personalEntries = personalEntries.map((localEntry, index) => {
+      const local = normalizePersonalEntry(localEntry, index),
+        cloud = personalEntryCloudSnapshot[index];
+      return !local.price && cloud.price ? cloud : local;
+    });
+  personalEntrySyncState = personalEntries.map((entry, index) =>
+    Boolean(personalEntriesAccountLoggedIn) &&
+    Boolean(personalEntryCloudSnapshot) &&
+    Boolean(entry.price) &&
+    samePersonalEntry(entry, personalEntryCloudSnapshot[index]),
+  );
+  window.btcPersonalEntries = personalEntries;
+  savePersonalEntries();
+  renderPersonalEntryCard(true);
+});
 function ensurePersonalEntryCard() {
   let card = $("personalEntryCard");
   if (card) return card;
@@ -10848,9 +11309,11 @@ function renderPersonalEntryCard(force = false) {
   card.innerHTML =
     personalEntrySlot(0, live) + personalEntrySlot(1, live);
   applyHeroUnitOrder();
-  /* 每笔持仓独立显示账户同步状态；空仓不显示状态。 */
+  /* 每笔持仓独立显示账户同步状态；空仓不显示状态。
+     云端持仓档案目前仅 BTC —— 其它币种一律不显示同步徽标，避免误把持仓写进 BTC 的云端档案。 */
   personalEntries.forEach((entry, index) => {
     if (!validEntry(Number(entry.price))) return;
+    if (activeCoin() !== BASE_COIN) return;
     const syncing = personalEntrySyncing.has(index),
       synced = personalEntrySyncState[index] && !syncing,
       label = syncing
@@ -10924,6 +11387,17 @@ const samePersonalEntry = (left, right) =>
     (key) => left?.[key] === right?.[key],
   );
 async function syncPersonalEntry(index) {
+  /* 云端持仓档案目前仅 BTC：其它币种的持仓只存本机，不允许覆盖 BTC 的云端档案。 */
+  if (activeCoin() !== BASE_COIN) {
+    showAppDialog({
+      title: tx("持仓同步", "Position sync"),
+      message: tx(
+        "云端持仓同步目前仅支持比特币（BTC）；该币种的持仓仅保存在本机。",
+        "Cloud position sync currently supports Bitcoin (BTC) only; this coin's positions stay on this device.",
+      ),
+    });
+    return;
+  }
   if (
     (index !== 0 && index !== 1) ||
     !validEntry(Number(personalEntries[index]?.price))
@@ -10977,7 +11451,7 @@ async function syncPersonalEntry(index) {
 }
 bindHeroUnitDrag();
 heroUnitDesktop.addEventListener?.("change", applyHeroUnitOrder);
-renderPersonalEntryCard();
+whenIdle(() => renderPersonalEntryCard());
 applyHeroUnitOrder();
 window.addEventListener("btc:account-state", async (event) => {
   personalEntriesAccountLoggedIn = Boolean(event.detail?.loggedIn);
@@ -10996,7 +11470,8 @@ window.addEventListener("btc:account-state", async (event) => {
       Array.isArray(cloudEntries) && cloudEntries.length === 2
         ? cloudEntries.map((entry, index) => normalizePersonalEntry(entry, index))
         : blankPersonalEntries();
-    if (Array.isArray(cloudEntries) && cloudEntries.length === 2) {
+    /* 云端回填仅 BTC：其它币种本地为空就是空，不把 BTC 的云端持仓灌进来。 */
+    if (Array.isArray(cloudEntries) && cloudEntries.length === 2 && activeCoin() === BASE_COIN) {
       personalEntries = personalEntries.map((localEntry, index) => {
         const local = normalizePersonalEntry(localEntry, index),
           cloud = personalEntryCloudSnapshot[index];
@@ -11066,16 +11541,20 @@ function renderFedMonitor(data) {
   macroCalendarData = data || null;
   macroCalendarError = data ? null : macroCalendarError;
   renderFearGreedGauge();
-  let card = $("fedMonitorCard"),
-    correlation = document.querySelector(".correlation-card");
+  let card = $("fedMonitorCard");
   if (!card) {
     card = document.createElement("section");
     card.id = "fedMonitorCard";
     card.className = "card fed-monitor-card";
-    if (correlation) correlation.before(card);
+    // v2.11.0：联动卡并入本卡后，阅读顺序固定为 …投资日历 → 宏观环境与联动。
+    const calendarCard = $("investmentCalendarCard");
+    if (calendarCard) calendarCard.after(card);
     else document.querySelector("main")?.append(card);
   }
   if (!card) return;
+  /* v2.11.6：每次渲染都校正相邻关系。本卡每隔几分钟整卡重渲，而其他布局
+     逻辑可能在两次渲染之间移动过日历卡，留到下次渲染才修会有一段错位窗口。 */
+  syncMacroPanels();
   const events = (data?.events || []).slice(0, 3),
     nearest = events[0],
     near = nearest && nearest.at - Date.now() < 48 * 3_600_000;
@@ -11137,12 +11616,16 @@ function renderFedMonitor(data) {
   const marketPanel = signalCards
     ? `<section class="fed-market-panel"><div><h3>${tx("综合指标", "Market context")}</h3><span>${tx("公开数据 · 每 10 分钟检查", "Public data · checked every 10 min")}</span></div><div class="fed-market-grid">${signalCards}</div></section>`
     : "";
-  card.innerHTML = `<div class="fed-monitor-head"><div><h2>${tx("BTC × 美联储监控", "BTC × Federal Reserve monitor")}</h2><p>${tx("公开日历与跨市场环境数据；事件前后行情波动可能放大，不构成方向预测。", "Public event-calendar and cross-market context. Volatility can rise around releases; this is not a directional forecast.")}</p></div><span>${tx("每 10 分钟检查", "Checked every 10 min")}</span></div>${marketPanel}<div class="fed-event-grid">${eventCards || `<article class="fed-event unavailable"><span>${tx("公开日历暂不可用", "Public calendar unavailable")}</span><small>${tx("下次 10 分钟检查会自动重试。", "The next ten-minute check will retry automatically.")}</small></article>`}</div><footer>${nearest ? tx(`最近事件：${tname(MACRO_EVENT_NAMES, nearest.key)}，请在发布前后降低杠杆和仓位集中度。`, `Nearest event: ${tname(MACRO_EVENT_NAMES, nearest.key)}. Consider reducing leverage and concentration around the release.`) : tx("使用 Federal Reserve 与 BLS 的公开发布日历。", "Uses public Federal Reserve and BLS release calendars.")} <em>${data?.cached ? tx("缓存", "Cached") : tx("刚更新", "Updated")}</em></footer>`;
+  const correlationPanel = `<section class="fed-corr-panel"><div class="fed-corr-head"><div><h3>${tx(coinLabel() + " × 美股联动", coinLabel() + " × US equities linkage")}</h3><p id="correlationStatus">${tx("等待市场数据…", "Waiting for market data…")}</p></div><button id="refreshCorrelation" type="button">${tx("更新分析", "Refresh analysis")}</button></div><div id="indexTickerCards" class="index-ticker-cards"></div><div id="correlationOutput" class="correlation-output"></div></section>`;
+  card.innerHTML = `<div class="fed-monitor-head"><div><h2>${tx("宏观环境与跨市场联动", "Macro environment & cross-market linkage")}</h2><p>${tx("综合指标、美联储公开日历与 BTC × 美股联动同处一卡；事件前后行情波动可能放大，不构成方向预测。", "Market context, the Fed's public calendar and BTC × US equities linkage in one card. Volatility can rise around releases; this is not a directional forecast.")}</p></div><span>${tx("每 10 分钟检查", "Checked every 10 min")}</span></div>${marketPanel}<div class="fed-event-grid">${eventCards || `<article class="fed-event unavailable"><span>${tx("公开日历暂不可用", "Public calendar unavailable")}</span><small>${tx("下次 10 分钟检查会自动重试。", "The next ten-minute check will retry automatically.")}</small></article>`}</div>${correlationPanel}<footer>${nearest ? tx(`最近事件：${tname(MACRO_EVENT_NAMES, nearest.key)}，请在发布前后降低杠杆和仓位集中度。`, `Nearest event: ${tname(MACRO_EVENT_NAMES, nearest.key)}. Consider reducing leverage and concentration around the release.`) : tx("使用 Federal Reserve 与 BLS 的公开发布日历。", "Uses public Federal Reserve and BLS release calendars.")} <em>${data?.cached ? tx("缓存", "Cached") : tx("刚更新", "Updated")}</em></footer>`;
   refreshMacroUpdateAges();
+  // v2.11.0：回填联动面板（含首次触发加载）。
+  paintCorrelationPanel();
+  if (!correlationState.loaded && !correlationState.loading) loadCorrelation();
   addHelp(
     card.querySelector(".fed-monitor-head h2"),
-    "显示下一次 FOMC、CPI 与非农等公开日历事件及倒计时。它提示可能放大的波动窗口，不预测事件结果或价格方向。",
-    "Shows the next FOMC, CPI and payroll calendar events and countdowns. It flags potentially volatile windows, not event outcomes or price direction.",
+    "整合宏观环境与跨市场联动：综合指标观察美元、避险与加密市场环境；美联储公开日历提示 FOMC、CPI 与非农波动窗口；底部联动面板给出 BTC 与标普/纳指的 60 日相关性与跨市场看多概率。均为环境观察，不预测事件结果或价格方向。",
+    "Combines macro context and cross-market linkage: market snapshots track the dollar, safe havens and crypto; the Fed calendar flags FOMC, CPI and payroll volatility windows; the bottom panel shows 60-day BTC correlations with S&P/Nasdaq and a cross-market bullish probability. Context only, never a directional forecast.",
   );
   addHelp(
     card.querySelector(".fed-market-panel h3"),
@@ -11202,7 +11685,7 @@ async function loadFedMonitor() {
     fedCalendarLoading = false;
   }
 }
-loadFedMonitor();
+whenIdle(() => loadFedMonitor());
 // The server keeps ordinary calendar reads cached. A one-minute client check lets
 // a release-window update (such as payrolls) appear as soon as its public source does.
 setInterval(loadFedMonitor, 60_000);
@@ -11215,7 +11698,9 @@ let investmentCalendarData = null;
 // The lower timeline is the complete calendar by default. Date shortcuts are
 // opt-in views; starting on "today" made future events appear to be missing
 // even though the API and the Major events strip already contained them.
-let investmentCalendarRange = "all";          // yesterday|today|tomorrow|week|nextweek|custom|all
+let investmentCalendarRange = "today";        // yesterday|today|tomorrow|week|nextweek|custom|all（v2.11.0 起默认「今天」时间流）
+/* v2.11.0：事件行「影响预测」展开状态（key = at|title），重渲染后保持。 */
+const calendarExpandedRows = new Set();
 let investmentCalendarFrom = "";              // yyyy-mm-dd (Beijing day)
 let investmentCalendarTo = "";                // yyyy-mm-dd (Beijing day)
 let investmentCalendarImportance = new Set(); // empty = all (low|medium|high)
@@ -11223,7 +11708,14 @@ let investmentCalendarRegions = new Set();    // empty = all countries
 let investmentCalendarCategories = new Set(); // empty = all categories
 let investmentCalendarTimeZone = "local";     // reference zone for the secondary line
 let investmentCalendarShowFilters = true;
-let investmentCalendarVisibleLimit = 6;        // collapsed=6, first expansion=10, then +10
+/* v2.11.16 列表展开模型：折叠态固定 6 条，之后每步 +10，可一键全展开。
+   SCROLL_AFTER 是「改为列表内滚动」的阈值——超过它就不再让 116 行把整页撑长，
+   而是在列表容器里滚（TradingView / ServiceNow 日历都这么做）。 */
+const INVESTMENT_CALENDAR_BASE_LIMIT = 6;
+const INVESTMENT_CALENDAR_STEP = 10;
+const INVESTMENT_CALENDAR_SCROLL_AFTER = 30;
+let investmentCalendarVisibleLimit = INVESTMENT_CALENDAR_BASE_LIMIT;
+let investmentCalendarListReturnY = null;     // 「收起」后要滚回的锚点（卡顶文档坐标）
 let calendarOpenMenu = null;                  // region|category|importance|null
 const calendarMenuSearch = { region: "", category: "", importance: "" };
 
@@ -11371,7 +11863,7 @@ function calendarRangeWindow(range) {
   }
 }
 const CALENDAR_RANGES = [
-  ["yesterday", "昨天", "Yesterday"], ["today", "今天", "Today"], ["tomorrow", "明天", "Tomorrow"],
+  ["today", "今天", "Today"], ["tomorrow", "明天", "Tomorrow"], ["yesterday", "昨天", "Yesterday"],
   ["week", "本周", "This week"], ["nextweek", "下周", "Next week"], ["custom", "自定义日期", "Custom"], ["all", "全部", "All"],
 ];
 const CALENDAR_IMPORTANCE = [["high", "高", "High"], ["medium", "中", "Medium"], ["low", "低", "Low"]];
@@ -11434,7 +11926,7 @@ const CALENDAR_CATEGORIES = [
   ["energy", "能源", "Energy", "cat-energy"],
   ["risk", "避险", "Risk", "cat-risk"],
   ["crypto", "加密期权", "Crypto", "cat-crypto"],
-  ["chain", "BTC 链上", "BTC chain", "cat-chain"],
+  ["chain", coinLabel() + " 链上", coinLabel() + " chain", "cat-chain"],
 ];
 function calendarCategoryMeta(key) {
   const row = CALENDAR_CATEGORIES.find((entry) => entry[0] === key);
@@ -11546,12 +12038,18 @@ function renderImpactCard(event, compact = false) {
   </article>`;
 }
 
+/* v2.11.0：事件行的稳定 key，用于「影响预测」展开状态在重渲染间保持。 */
+function calendarEventRowKey(event) {
+  return `${Number(event.at)}|${String(event.title || event.name || "")}`;
+}
+
 function renderCalendarEventRow(event) {
   const pickKey = macroCalendarPickKey(event);
   const isPicked = macroCalendarPicks.has(pickKey);
   const country = calendarCountry(event.country);
   const category = calendarCategoryMeta(event.category);
   const [label, read, hot] = calendarWindow(event);
+  const bias = macroEventBias(event);
   // Primary line: Beijing wall-clock date + time. Secondary line: event local time / ET / UTC.
   const beijingDate = event.timePrecision === "date" ? tx("日期待定","Date TBD") : calendarFormatBeijing(event.at,{month:"numeric",day:"numeric"});
   const beijingTime = event.timePrecision === "date" ? tx("--","--") : calendarFormatBeijing(event.at,{hour:"2-digit",minute:"2-digit",hour12:false});
@@ -11570,7 +12068,11 @@ function renderCalendarEventRow(event) {
       ? `<span class="ic-met-val empty">${calendarEscape(placeholder)}</span>`
       : `<span class="ic-met-val">${calendarEscape(String(value))}</span>`;
   };
-  return `<li class="cal-event${hot?" is-hot":""}${isPicked?" is-picked":""}" data-category="${calendarEscape(event.category||"")}">
+  const expandable = Boolean(calendarImpactModel(event));
+  const rowKey = calendarEventRowKey(event);
+  const expanded = expandable && calendarExpandedRows.has(rowKey);
+  const releasedRow = event.at <= Date.now();
+  return `<li class="cal-event${hot?" is-hot":""}${isPicked?" is-picked":""}${releasedRow && macroHasActual(event)?" is-released":""}${expandable?" is-expandable":""}${expanded?" is-expanded":""}"${expandable?` data-cal-expand="${calendarEscape(rowKey)}"`:""} data-category="${calendarEscape(event.category||"")}">
     <label class="cal-pick" data-pin-label="${calendarEscape(tx("关注","Pin"))}" data-pinned-label="${calendarEscape(tx("已关注","Pinned"))}" title="${calendarEscape(tx("显示在未来的宏观日历","Pin to upcoming macro calendar"))}">
       <input type="checkbox" data-cal-pick="${calendarEscape(pickKey)}"${isPicked?" checked":""}>
       <i class="cal-pick-ui"></i>
@@ -11582,14 +12084,14 @@ function renderCalendarEventRow(event) {
     </div>
     ${calendarFlagHtml(event.country)}
     <div class="cal-main">
-      <div class="cal-name"><span class="cal-cat ${category.cls}">${calendarEscape(category.label)}</span>${calendarEscape(calendarEventTitle(event.title))}${event.fallback?"<em class=\"cal-fallback\">节奏回退</em>":""}</div>
+      <div class="cal-name"><span class="cal-cat ${category.cls}">${calendarEscape(category.label)}</span>${calendarEscape(calendarEventTitle(event.title))}${event.fallback?"<em class=\"cal-fallback\">节奏回退</em>":""}${bias && bias.kind !== "muted" ? `<span class="macro-cmp-tag ${bias.kind}" title="${calendarEscape(bias.tip)}">${calendarEscape(bias.label)}</span>` : ""}</div>
       <div class="cal-sub">${calendarEscape(event.source||"--")}</div>
     </div>
     <div class="cal-impact imp-${event.importance}" title="${event.importance==="high"?tx("高重要","High"):event.importance==="medium"?tx("中重要","Medium"):tx("低重要","Low")}">${calendarImportanceDots(event)}</div>
     <span class="ic-met is-actual"><b>${tx("今值","Act")}</b>${met(event.actual,"actual")}</span>
     <span class="ic-met is-est"><b>${tx("预期","Est")}</b>${met(event.estimate,"estimate")}</span>
     <span class="ic-met is-prev"><b>${tx("前值","Prev")}</b>${met(event.previous,"previous")}</span>
-    <div class="cal-read ${hot?"is-hot":""}"><b>${label}</b><span title="${calendarEscape(read)}">${calendarEscape(read)}</span></div>
+    <div class="cal-read ${hot?"is-hot":""}"><b>${label}</b><span title="${calendarEscape(read)}">${calendarEscape(read)}</span>${expandable?`<i class="cal-expand-caret" title="${calendarEscape(tx("展开影响预测矩阵","Expand impact matrix"))}"></i>`:""}</div>
   </li>`;
 }
 
@@ -11668,6 +12170,22 @@ function renderReleasedDataField(kind, label, options, selected) {
     </div>
   </div>`;
 }
+/* v2.11.6 / v2.11.9：研究类面板必须按固定次序连排 ——
+   研究预测 → A/B 实验中心 → 宏观事件中枢 → 宏观环境与跨市场联动。
+   这几张卡由不同异步流程创建/重渲（研究卡约 1s、日历约 3.6s、宏观卡每 10 分钟整卡重渲），
+   任一被其他布局逻辑移动后这里负责拉回。链式校正对尚未创建的卡片自动跳过，
+   幂等，可安全重复调用。 */
+function syncMacroPanels() {
+  const chain = [
+    $("researchOutlookCard"),
+    $("abEvaluationCard"),
+    $("investmentCalendarCard"),
+    $("fedMonitorCard"),
+  ].filter(Boolean);
+  for (let i = 0; i < chain.length - 1; i += 1) {
+    if (chain[i].nextElementSibling !== chain[i + 1]) chain[i].after(chain[i + 1]);
+  }
+}
 function renderInvestmentCalendar(data) {
   investmentCalendarData = data || investmentCalendarData;
   let card = $("investmentCalendarCard");
@@ -11675,18 +12193,19 @@ function renderInvestmentCalendar(data) {
     card = document.createElement("section");
     card.id = "investmentCalendarCard";
     card.className = "card investment-calendar-card";
-    // 阅读顺序：BTC 多因子研究 → 宏观经济数据 → 投资日历 → 宏观与情绪。
-    const released = $("releasedDataCard"),
-      research = $("researchOutlookCard"),
+    // 阅读顺序（v2.11.0）：BTC 多因子研究 → 宏观事件中枢 → 宏观环境与联动。
+    const research = $("researchOutlookCard"),
       fed = $("fedMonitorCard"),
       anchor = $("fearGreedGauge");
-    if (released) released.after(card);
-    else if (research) research.after(card);
+    if (research) research.after(card);
     else if (fed) fed.before(card);
     else if (anchor) anchor.after(card);
     else document.querySelector("main")?.append(card);
   }
   if (!card) return;
+  /* v2.11.6：数据到位后校正两张宏观卡的相邻顺序（fed 卡首次挂载时日历卡
+     可能尚未加载完，会走 main 末尾兜底）。 */
+  syncMacroPanels();
 
   const allEvents = investmentCalendarTimelineEvents();
   const [rangeStart, rangeEnd] = calendarRangeWindow(investmentCalendarRange);
@@ -11724,6 +12243,10 @@ function renderInvestmentCalendar(data) {
       <span>${tx("今值","Actual")}</span><span>${tx("预期","Forecast")}</span><span>${tx("前值","Previous")}</span><span>${tx("影响","Note")}</span>
     </li>`;
   }
+  /* v2.11.0：时间流。「现在」线把今天一分为二：上方已公布、下方即将发布。 */
+  const nowMs = Date.now();
+  const rangeHasNow = events.some((event) => event.at <= nowMs) && events.some((event) => event.at > nowMs);
+  let nowLineDrawn = false;
   for (const event of visibleEvents) {
     const day = dayKey(event.at);
     if (day !== previousDay) {
@@ -11731,7 +12254,16 @@ function renderInvestmentCalendar(data) {
       const isToday = calendarBeijingDayKey(event.at) === todayKey;
       listHtml += `<li class="cal-day"><span class="cal-day-name">${calendarEscape(day)}</span>${isToday ? '<em class="cal-day-today">今天</em>' : ""}</li>`;
     }
+    if (rangeHasNow && !nowLineDrawn && event.at > nowMs) {
+      nowLineDrawn = true;
+      listHtml += `<li class="cal-now"><span>${tx("现在", "Now")} ${calendarFormatBeijing(nowMs, { hour:"2-digit", minute:"2-digit", hour12:false })}</span></li>`;
+    }
     listHtml += renderCalendarEventRow(event);
+    const rowKey = calendarEventRowKey(event);
+    if (calendarExpandedRows.has(rowKey)) {
+      const impact = renderImpactCard(event);
+      if (impact) listHtml += `<li class="cal-detail">${impact}</li>`;
+    }
   }
 
   const tzButtons = [
@@ -11757,14 +12289,37 @@ function renderInvestmentCalendar(data) {
     ? tx("自定义区间","Custom range")
     : tx(`本区间 ${timeFiltered.length} 项 / 全量 ${allEvents.length} 项`, `${timeFiltered.length} in range / ${allEvents.length} total`);
   const rankText = `${rangeSummary} · ${tx(`筛选后 ${events.length} 项，已显示 ${visibleEvents.length} 项`, `${events.length} filtered, ${visibleEvents.length} shown`)}`;
+  /* v2.11.16 展开/收起控制条。旧版只在「还有更多」时渲染整块，一旦全部展开
+     就连同「已显示 N/N」统计一起消失、无路可退。现在改成：只要列表长于折叠态
+     就常驻，并按当前状态动态切换按钮与文案（Show more ⇄ Show less，PatternFly
+     的标准做法）。 */
   const hasMoreEvents = visibleEvents.length < events.length;
-  const nextVisibleCount = investmentCalendarVisibleLimit <= 6 ? Math.min(10, events.length) : Math.min(investmentCalendarVisibleLimit + 10, events.length);
+  const isExpanded = investmentCalendarVisibleLimit > INVESTMENT_CALENDAR_BASE_LIMIT;
+  const isAllShown = !hasMoreEvents;
+  const listScrolls = visibleEvents.length > INVESTMENT_CALENDAR_SCROLL_AFTER;
+  const nextVisibleCount = hasMoreEvents
+    ? Math.min(visibleEvents.length + INVESTMENT_CALENDAR_STEP, events.length)
+    : visibleEvents.length;
+  const progressPct = events.length ? Math.round((visibleEvents.length / events.length) * 100) : 100;
+  const moreBar = events.length > INVESTMENT_CALENDAR_BASE_LIMIT ? `
+    <div class="ic-list-more${isExpanded ? " is-expanded" : ""}">
+      <div class="ic-more-actions">
+        ${hasMoreEvents ? `<button type="button" class="ic-more-btn" data-calendar-more>${tx(`继续展开 ${INVESTMENT_CALENDAR_STEP} 条`, `Show ${INVESTMENT_CALENDAR_STEP} more`)}<i class="ic-caret"></i></button>` : ""}
+        ${hasMoreEvents && events.length > nextVisibleCount ? `<button type="button" class="ic-more-btn is-ghost" data-calendar-all>${tx(`全部展开（${events.length} 条）`, `Show all ${events.length}`)}</button>` : ""}
+        ${isExpanded ? `<button type="button" class="ic-more-btn is-less" data-calendar-less><i class="ic-caret up"></i>${isAllShown ? tx("收起全部", "Collapse all") : tx("收起", "Collapse")}</button>` : ""}
+      </div>
+      <div class="ic-more-progress" title="${calendarEscape(tx(`已显示 ${visibleEvents.length} / ${events.length} 条`, `${visibleEvents.length} / ${events.length} shown`))}">
+        <span><b>${tx("已显示", "Showing")} ${visibleEvents.length} / ${events.length}</b>${isAllShown ? `<em>· ${tx("全部", "all")}</em>` : ""}</span>
+        <i class="ic-more-track"><i class="ic-more-fill" style="width:${progressPct}%"></i></i>
+      </div>
+    </div>` : "";
+
   card.innerHTML = `
     <header class="ic-header">
       <div class="ic-title">
-        <div class="ic-kicker"><i></i>ECONOMIC CALENDAR · 投资日历</div>
-        <h2>${tx("投资日历", "Investment calendar")}</h2>
-        <p>${tx("美元流动性、全球宏观、能源与避险、BTC 原生事件同处一条时间轴。默认按北京时间排序，下方小字为事件当地时间。", "One timeline for dollar liquidity, global macro, energy/risk and BTC-native events. Sorted by Beijing time; the small line shows the event's local time.")}</p>
+        <div class="ic-kicker"><i></i>${tx("MACRO EVENT HUB · 宏观事件中枢", "MACRO EVENT HUB · Macro event hub")}</div>
+        <h2>${tx("宏观事件中枢", "Macro event hub")}</h2>
+        <p>${tx("投资日历、已公布实际值与影响预测合一：今天按时间流排列，「现在」线上方是已公布（实际值已回填并给出偏差结论），下方是即将发布（倒计时 + 预期）。点任意事件行可展开「情景 × 资产」影响预测矩阵。", "Calendar, released actuals and impact playbooks in one place. Today is a time stream: above the “Now” line events are released (actual filled, surprise verdict included), below they are upcoming (countdown + estimate). Click any event row to expand the scenario-by-asset impact matrix.")}</p>
       </div>
       <div class="ic-meta">
         <span class="ic-source">${calendarEscape(sourceText)}</span>
@@ -11801,8 +12356,9 @@ function renderInvestmentCalendar(data) {
       <span class="ic-risk-text">${calendarEscape(riskText)}</span>
     </div>
 
-    <ul class="ic-list">${listHtml}</ul>
-    ${hasMoreEvents ? `<div class="ic-list-more"><button type="button" data-calendar-more>${investmentCalendarVisibleLimit <= 6 ? tx(`展开至 ${nextVisibleCount} 条`, `Show ${nextVisibleCount}`) : tx("继续展开 10 条", "Show 10 more")}</button><span>${tx(`已显示 ${visibleEvents.length} / ${events.length} 条`, `${visibleEvents.length} / ${events.length} shown`)}</span></div>` : ""}
+    <ul class="ic-list${listScrolls ? " is-scrollable" : ""}">${listHtml}</ul>
+    ${listScrolls ? `<div class="ic-scroll-bar"><span>${tx(`列表中已展开 ${visibleEvents.length} 条，框内滚动查看，避免撑长页面`, `${visibleEvents.length} rows expanded — scroll inside the list to keep the page compact`)}</span><button type="button" data-calendar-top>${tx("回到顶部","Back to top")}</button></div>` : ""}
+    ${moreBar}
 
     <footer class="ic-foot">
       <span class="ic-treasury-note">${tx("国债说明：Note 通常为 2–10 年中期国债；Bond 通常为 20–30 年长期国债。已过滤高频短票 Bill。影响预测为宏观常识映射，不构成投资建议。","Treasury note: 2–10y; bond: 20–30y. High-frequency bills filtered out. Impact playbook is general macro mapping, not investment advice.")}</span>
@@ -11826,9 +12382,27 @@ function renderInvestmentCalendar(data) {
   }));
   card.querySelector("[data-calendar-from]")?.addEventListener("change", (e) => { investmentCalendarFrom = e.target.value; resetInvestmentCalendarVisibleLimit(); renderInvestmentCalendar(investmentCalendarData); });
   card.querySelector("[data-calendar-to]")?.addEventListener("change", (e) => { investmentCalendarTo = e.target.value; resetInvestmentCalendarVisibleLimit(); renderInvestmentCalendar(investmentCalendarData); });
+  /* v2.11.16 展开 / 全部展开 / 收起。收起后若列表已不在视口内，把它带回视野中央，
+     否则用户在长列表深处点「收起」会"掉"在半空、丢失上下文。 */
   card.querySelector("[data-calendar-more]")?.addEventListener("click", () => {
-    investmentCalendarVisibleLimit = investmentCalendarVisibleLimit <= 6 ? 10 : investmentCalendarVisibleLimit + 10;
+    investmentCalendarVisibleLimit += INVESTMENT_CALENDAR_STEP;
     renderInvestmentCalendar(investmentCalendarData);
+  });
+  card.querySelector("[data-calendar-all]")?.addEventListener("click", () => {
+    investmentCalendarVisibleLimit = Number.MAX_SAFE_INTEGER;
+    renderInvestmentCalendar(investmentCalendarData);
+  });
+  card.querySelector("[data-calendar-less]")?.addEventListener("click", () => {
+    resetInvestmentCalendarVisibleLimit();
+    renderInvestmentCalendar(investmentCalendarData);
+    const list = $("investmentCalendarCard")?.querySelector(".ic-list");
+    const rect = list?.getBoundingClientRect();
+    if (rect && (rect.top < 0 || rect.bottom > window.innerHeight)) {
+      list.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+  });
+  card.querySelector("[data-calendar-top]")?.addEventListener("click", () => {
+    card.querySelector(".ic-list")?.scrollTo({ top: 0, behavior: "smooth" });
   });
   // —— Filter menus ——
   card.querySelectorAll("[data-menu-toggle]").forEach((button) => button.addEventListener("click", () => {
@@ -11894,6 +12468,14 @@ function renderInvestmentCalendar(data) {
     renderFearGreedGauge();
     renderReleasedDataCard();
   }));
+  // —— v2.11.0：点事件行展开 / 收起「情景 × 资产」影响预测矩阵 ——
+  card.querySelectorAll("li.cal-event[data-cal-expand]").forEach((li) => li.addEventListener("click", (event) => {
+    if (event.target.closest("label.cal-pick")) return;
+    const key = li.dataset.calExpand;
+    if (calendarExpandedRows.has(key)) calendarExpandedRows.delete(key);
+    else calendarExpandedRows.add(key);
+    renderInvestmentCalendar(investmentCalendarData);
+  }));
   if (!window.__btcCalendarOutsideClickBound) {
     window.__btcCalendarOutsideClickBound = true;
     document.addEventListener("click", (event) => {
@@ -11927,15 +12509,13 @@ function refreshInvestmentCalendarCountdowns() {
 async function loadInvestmentCalendar(force = false) {
   try { const response = await apiFetch(`/api/investment-calendar${force ? "?refresh=1" : ""}`, 12_000), data = await response.json(); if (!response.ok) throw new Error(data.detail || data.error); renderInvestmentCalendar(data); }
   catch { renderInvestmentCalendar(investmentCalendarData); }
-  // 数据到位后同步刷新「宏观与情绪」与「宏观经济数据」。卡片尚未挂载时跳过，
-  // 交给布局稳定后的补渲染逻辑，避免过早插入被重排丢弃。
+  // 数据到位后同步刷新「关注宏观事件实时数据」，并清理已下线卡的残留 DOM（v2.11.0）。
   const fgCard = $("fearGreedGauge");
   if (fgCard && fgCard.isConnected) renderFearGreedGauge();
-  const releasedCard = $("releasedDataCard");
-  if (releasedCard && releasedCard.isConnected) renderReleasedDataCard();
+  renderReleasedDataCard();
 }
-loadMacroCalendarPicks();
-loadInvestmentCalendar();
+whenIdle(() => loadMacroCalendarPicks());
+whenIdle(() => loadInvestmentCalendar());
 // Several legacy cards mount asynchronously; run one settled-layout pass so
 // this independent panel is not displaced while those sections are arranging.
 window.addEventListener("load", () => setTimeout(loadInvestmentCalendar, 1_500), { once: true });
@@ -12092,8 +12672,8 @@ function macroEventBias(event) {
     if (cls === "unemployment") bearish = diff < 0;
     else bearish = diff > 0;
     return bearish
-      ? { kind: "bear", label: tx("利空 BTC", "Bearish BTC"), tip: tx(`${detail}，超预期偏紧缩，通常利空风险资产。`, `${detail}; hotter than expected is typically hawkish and bearish for risk assets.`) + " " + caveat }
-      : { kind: "bull", label: tx("利好 BTC", "Bullish BTC"), tip: tx(`${detail}，不及预期偏宽松，通常利好风险资产。`, `${detail}; cooler than expected is typically dovish and bullish for risk assets.`) + " " + caveat };
+      ? { kind: "bear", label: tx("利空 " + coinLabel(), "Bearish " + coinLabel()), tip: tx(`${detail}，超预期偏紧缩，通常利空风险资产。`, `${detail}; hotter than expected is typically hawkish and bearish for risk assets.`) + " " + caveat }
+      : { kind: "bull", label: tx("利好 " + coinLabel(), "Bullish " + coinLabel()), tip: tx(`${detail}，不及预期偏宽松，通常利好风险资产。`, `${detail}; cooler than expected is typically dovish and bullish for risk assets.`) + " " + caveat };
   }
   if (estimate != null && previous != null) {
     const diff = estimate - previous;
@@ -12199,8 +12779,8 @@ function macroCountdownClock(at) {
 }
 /* 影响方向 → BTC 文案。0 视为中性（能源类数据对 BTC 通常无直接方向）。 */
 function macroBtcDirText(dir) {
-  if (dir > 0) return { kind: "bull", text: tx("利好 BTC", "Bullish BTC") };
-  if (dir < 0) return { kind: "bear", text: tx("利空 BTC", "Bearish BTC") };
+  if (dir > 0) return { kind: "bull", text: tx("利好 " + coinLabel(), "Bullish " + coinLabel()) };
+  if (dir < 0) return { kind: "bear", text: tx("利空 " + coinLabel(), "Bearish " + coinLabel()) };
   return { kind: "flat", text: tx("中性（无直接方向）", "Neutral (no direct read)") };
 }
 /* 「关注事件 · 实时数据」：突出倒计时与北京时间，附预期/前值/实际，
@@ -12225,8 +12805,8 @@ function renderPinnedRelease(event) {
   const title = calendarEventTitle(event.title || event.name || "");
   const source = isCurated ? tx("重大事件", "Major event") : (event.source || "--");
   const kindMap = {
-    bull: { cls: "bull", label: tx("利好 BTC", "Bullish BTC") },
-    bear: { cls: "bear", label: tx("利空 BTC", "Bearish BTC") },
+    bull: { cls: "bull", label: tx("利好 " + coinLabel(), "Bullish " + coinLabel()) },
+    bear: { cls: "bear", label: tx("利空 " + coinLabel(), "Bearish " + coinLabel()) },
   };
   const kind = kindMap[event.kind] || { cls: "flat", label: tx("中性", "Neutral") };
 
@@ -12348,145 +12928,12 @@ function refreshMacroCompareCountdowns() {
   }
 }
 function renderReleasedDataCard() {
-  let card = $("releasedDataCard");
-  if (!card) {
-    card = document.createElement("section");
-    card.id = "releasedDataCard";
-    card.className = "card released-data-card";
-    // 放在「BTC 多因子研究」下方；investmentCalendarCard 会再跟在它后面。
-    // 研究卡异步加载，若尚未就绪则先放入主流程安全位置，避免落入右侧 side-stack。
-    const research = $("researchOutlookCard");
-    if (research) research.after(card);
-    else {
-      const pattern = $("patternAnalysis"),
-        terminal = document.querySelector(".terminal-layout"),
-        main = document.querySelector("main");
-      if (pattern) pattern.after(card);
-      else if (terminal) terminal.after(card);
-      else main?.append(card);
-    }
-  }
-  if (!card) return;
-
-  const filters = {
-    regions: releasedDataRegions,
-    categories: releasedDataCategories,
-    importance: releasedDataImportance,
-  };
-
-  // 筛选器候选池：过去 14 天到未来 14 天的宏观事件，计数不受当前筛选影响。
-  const now = Date.now();
-  const pool = (investmentCalendarData?.events || [])
-    .filter((event) => event.category === "macro")
-    .filter((event) => event.at >= now - 14 * CALENDAR_DAY && event.at <= now + 14 * CALENDAR_DAY);
-  const countBy = (list, pick) => list.reduce((acc, event) => { const key = pick(event); acc.set(key, (acc.get(key) || 0) + 1); return acc; }, new Map());
-  const countryCounts = countBy(pool, (event) => event.country || "GLOBAL");
-  const categoryCounts = countBy(pool, (event) => event.category || "macro");
-  const importanceCounts = countBy(pool, (event) => event.importance || "low");
-
-  const countryOrder = ["US","CN","EU","JP","UK","DE","FR","BR","AU","CA","KR","IN","RU","CH","IT","ES","MX","TR","ZA","NZ","SG","HK","TW","OPEC","GLOBAL","BTC","OIL"];
-  const countryOptions = [...countryCounts.entries()].sort((a, b) => {
-    const ia = countryOrder.indexOf(a[0]), ib = countryOrder.indexOf(b[0]);
-    const ra = ia < 0 ? 1e9 : ia, rb = ib < 0 ? 1e9 : ib;
-    return ra !== rb ? ra - rb : String(a[0]).localeCompare(String(b[0]));
-  }).map(([code, count]) => {
-    const info = calendarCountry(code);
-    return { key:code, label:info.label, count, html:`${info.emoji?`<i class="ic-opt-flag">${info.emoji}</i>`:""}<span>${calendarEscape(info.label)}</span>` };
-  });
-  const categoryOptions = CALENDAR_CATEGORIES.filter(([key]) => categoryCounts.get(key)).map(([key, zh, en, cls]) => ({
-    key, label:tx(zh,en), count:categoryCounts.get(key), html:`<i class="ic-opt-dot ${cls}"></i><span>${tx(zh,en)}</span>`,
-  }));
-  const importanceOptions = CALENDAR_IMPORTANCE.filter(([key]) => importanceCounts.get(key)).map(([key, zh, en]) => ({
-    key, label:tx(zh,en), count:importanceCounts.get(key),
-    html:`<i class="ic-opt-stars imp-${key}">${[1,2,3].map((n) => `<i class="ic-dot${n<=(key==="high"?3:key==="medium"?2:1)?" on":""}"></i>`).join("")}</i><span>${tx(zh,en)}</span>`,
-  }));
-
-  const actualsEvents = releasedMacroEvents(12, filters);
-  const impactEvents = calendarImpactEvents(6, filters);
-
-  const actualsBody = actualsEvents.length
-    ? `<section class="released-actuals-section"><h3 class="released-actuals-head">${tx("已公布实际值","Released actuals")}</h3><div class="released-data-grid">${actualsEvents.map(renderReleasedRow).join("")}</div></section>`
-    : "";
-  const impactBody = impactEvents.length
-    ? `<section class="released-impact-section"><div class="ic-impact-head"><h3>${tx("数据公布影响预测","Data-reaction playbook")}</h3><p>${tx("按“公布值 vs 预期”的预期差推断方向：通胀 / 利率 / 就业高于预期多为紧缩（利空风险资产），增长与库存另有映射。属经验规律，非确定性结论。","Directions are inferred from the surprise vs consensus: inflation, rates and jobs above expectation are typically hawkish (bearish risk assets). Heuristic, not a certainty.")}</p></div><div class="ic-impact-grid released-impact-grid">${impactEvents.map((event) => renderImpactCard(event)).join("")}</div></section>`
-    : "";
-  const bodyHtml = actualsBody || impactBody ? `${actualsBody}${impactBody}` : "";
-  const emptyHtml = !bodyHtml
-    ? `<div class="released-data-body"><p class="macro-cmp-empty">${investmentCalendarData ? tx("当前筛选条件下暂无宏观事件，可调整筛选器或等待新数据公布。", "No macro events match the current filters.") : tx("日历加载中…", "Loading calendar…")}</p></div>`
-    : "";
-  const filtersHtml = `
-    <div class="released-data-toolbar">
-      <button type="button" class="ic-filter-toggle" data-released-toggle-filters>${releasedDataShowFilters ? tx("隐藏筛选器","Hide filters") : tx("显示筛选器","Show filters")}<i class="ic-caret${releasedDataShowFilters?" up":""}"></i></button>
-    </div>
-    ${releasedDataShowFilters ? `<div class="ic-fields released-data-fields">
-      ${renderReleasedDataField("region", tx("国家及地区","Country / region"), countryOptions, releasedDataRegions)}
-      ${renderReleasedDataField("category", tx("类别领域","Category"), categoryOptions, releasedDataCategories)}
-      ${renderReleasedDataField("importance", tx("重要性","Importance"), importanceOptions, releasedDataImportance)}
-    </div>` : ""}`;
-
-  card.innerHTML = `<div class="released-data-head"><h2>${tx("宏观经济数据", "Macroeconomic data")}</h2><span>${tx("实际值实时回填", "Actuals filled live")}</span></div>${filtersHtml}${bodyHtml ? `<div class="released-data-body">${bodyHtml}</div>` : emptyHtml}`;
-
-  // —— Toolbar wiring ——
-  card.querySelector("[data-released-toggle-filters]")?.addEventListener("click", () => {
-    releasedDataShowFilters = !releasedDataShowFilters;
-    releasedDataOpenMenu = null;
-    renderReleasedDataCard();
-  });
-  // —— Filter menus ——
-  card.querySelectorAll("[data-released-menu-toggle]").forEach((button) => button.addEventListener("click", () => {
-    const kind = button.dataset.releasedMenuToggle;
-    releasedDataOpenMenu = releasedDataOpenMenu === kind ? null : kind;
-    renderReleasedDataCard();
-  }));
-  card.querySelectorAll("[data-released-menu-search]").forEach((input) => input.addEventListener("input", () => {
-    const kind = input.dataset.releasedMenuSearch, query = input.value.trim().toLowerCase();
-    releasedDataMenuSearch[kind] = input.value;
-    input.closest(".ic-menu")?.querySelectorAll("li[data-search-text]").forEach((row) => {
-      row.hidden = Boolean(query) && !row.dataset.searchText.includes(query);
-    });
-  }));
-  card.querySelectorAll("[data-released-opt-field]").forEach((box) => box.addEventListener("change", () => {
-    const kind = box.dataset.releasedOptField, key = box.dataset.releasedOptKey;
-    const target = kind === "region" ? releasedDataRegions : kind === "category" ? releasedDataCategories : releasedDataImportance;
-    if (box.checked) target.add(key); else target.delete(key);
-    renderReleasedDataCard();
-  }));
-  card.querySelectorAll("[data-released-menu-all]").forEach((button) => button.addEventListener("click", () => {
-    const kind = button.dataset.releasedMenuAll;
-    const target = kind === "region" ? releasedDataRegions : kind === "category" ? releasedDataCategories : releasedDataImportance;
-    const query = String(releasedDataMenuSearch[kind] || "").trim().toLowerCase();
-    button.closest(".ic-menu")?.querySelectorAll("[data-released-opt-key]").forEach((box) => {
-      const row = box.closest("li[data-search-text]");
-      if (query && row?.hidden) return;
-      target.add(box.dataset.releasedOptKey);
-    });
-    renderReleasedDataCard();
-  }));
-  card.querySelectorAll("[data-released-menu-clear]").forEach((button) => button.addEventListener("click", () => {
-    const kind = button.dataset.releasedMenuClear;
-    const target = kind === "region" ? releasedDataRegions : kind === "category" ? releasedDataCategories : releasedDataImportance;
-    const query = String(releasedDataMenuSearch[kind] || "").trim().toLowerCase();
-    if (!query) { target.clear(); renderReleasedDataCard(); return; }
-    button.closest(".ic-menu")?.querySelectorAll("[data-released-opt-key]").forEach((box) => {
-      const row = box.closest("li[data-search-text]");
-      if (row?.hidden) return;
-      target.delete(box.dataset.releasedOptKey);
-    });
-    renderReleasedDataCard();
-  }));
-
-  if (!window.__btcReleasedDataOutsideClickBound) {
-    window.__btcReleasedDataOutsideClickBound = true;
-    document.addEventListener("click", (event) => {
-      if (!releasedDataOpenMenu) return;
-      const path = typeof event.composedPath === "function" ? event.composedPath() : [];
-      const insideField = path.some((node) => node && node.classList && node.classList.contains("rd-field"));
-      if (insideField) return;
-      releasedDataOpenMenu = null;
-      renderReleasedDataCard();
-    });
-  }
+  // v2.11.0：「宏观经济数据」独立卡已并入「宏观事件中枢」——
+  // 已公布实际值直接回填在时间流里，影响预测改为事件行展开矩阵。
+  // 保留函数名以兼容历史调用点（强刷回填、关注勾选等），仅清理残留 DOM。
+  $("releasedDataCard")?.remove();
 }
+
 function renderFearGreedGauge() {
   const card = ensureFearGreedCard();
   if (!card) return;
@@ -12582,8 +13029,10 @@ addIndicatorDetailEnhancer("fear-greed-sentiment", () => {
     host.querySelectorAll(".compact-indicator").length > 12 ? ".78" : ".84",
   );
 });
-loadFearGreedSentiment().then((data) => {
-  if (data?.storageCached) setTimeout(() => loadFearGreedSentiment(true), 0);
+whenIdle(() => {
+  loadFearGreedSentiment().then((data) => {
+    if (data?.storageCached) setTimeout(() => loadFearGreedSentiment(true), 0);
+  });
 });
 setInterval(() => loadFearGreedSentiment(true), fearGreedRefreshMs);
 if (fixedRuleSignal.candles.length) renderFixedRuleSignal();
@@ -12600,11 +13049,17 @@ function renderOkxMicrostructure(context) {
     card.id = "okxMicrostructureCard";
     card.className = "card okx-microstructure-card";
   }
-  // Nest the evidence directly in the K-line card. A separate grid row would
-  // inherit the height of the much taller right column and leave a blank gap.
+  // v2.10.56：作为左列的独立第二张卡，紧跟 K 线卡之后（.chart-column 平级排列）。
+  // A separate grid row would inherit the height of the much taller right
+  // column and leave a blank gap; the chart column stack avoids that.
   const chartCard = $("mainChartCard");
-  if (layout && chartCard && card.parentElement !== chartCard)
-    chartCard.append(card);
+  const chartColumn = chartCard?.parentElement;
+  if (
+    chartCard &&
+    chartColumn?.classList.contains("chart-column") &&
+    card.parentElement !== chartColumn
+  )
+    chartCard.after(card);
   else if (!card.isConnected) document.querySelector("main")?.append(card);
   if (!card) return;
   if (context?.source !== "okx") {
@@ -12799,8 +13254,8 @@ function renderOkxMicrostructure(context) {
       note: tx("公开数据暂不可用", "Public feed unavailable"),
       kind: "flat",
       tip: tx(
-        "当前 OKX V5 公共数据源没有返回可验证的 BTC-USDT-SWAP 清算流，因此本卡不会用推测值替代。",
-        "The current OKX V5 public feed is not returning a verifiable BTC-USDT-SWAP liquidation stream.",
+        "当前 OKX V5 公共数据源没有返回可验证的 " + coinMetaOf().okx.swap + " 清算流，因此本卡不会用推测值替代。",
+        "The current OKX V5 public feed is not returning a verifiable " + coinMetaOf().okx.swap + " liquidation stream.",
       ),
     },
     {
@@ -12936,7 +13391,7 @@ function renderOkxMicrostructure(context) {
   const neutralSection = neutralRows.length
     ? `<section class="microstructure-neutral-group ${microstructureNeutralExpanded ? "is-expanded" : ""}"><button type="button" class="microstructure-neutral-toggle" aria-expanded="${microstructureNeutralExpanded}"><span>${tx("中性指标", "Neutral indicators")} · ${neutralRows.length} ${tx("项", "items")}</span><b>${microstructureNeutralExpanded ? tx("收起", "Hide") : tx("展开", "Show")}</b></button><div class="microstructure-grid microstructure-neutral-grid ${gridClass(neutralRows)} ${microstructureNeutralExpanded ? "" : "is-collapsed"}" ${microstructureNeutralExpanded ? "" : "hidden"}>${neutralRows.map(rowHtml).join("")}</div></section>`
     : "";
-  card.innerHTML = `<div class="microstructure-head"><div><h2>${tx("OKX 市场微观结构", "OKX market microstructure")} <button class="help-dot" type="button" data-tip="${tx("来自 OKX BTC-USDT 永续的公开 WebSocket：盘口、最新成交、持仓量、资金费率与现货/永续价格。用于 5 分钟到 1 小时的短线确认，不保证预测正确。", "Public OKX WebSocket data for BTC-USDT perpetual: order book, recent trades, OI, funding and spot/perpetual prices. It supports 5m–1h confirmation, not guaranteed prediction.")}">!</button></h2><p>${tx("盘口与成交实时 · OI、费率持续更新", "Live order book and trades · continuously updated OI and funding")}</p></div><span>${context.transport === "websocket" ? tx("OKX WebSocket", "OKX WebSocket") : tx("REST 备用", "REST fallback")}</span></div><div class="microstructure-conclusion ${conclusionKind}"><b>${conclusion}</b><p>${reason}</p></div><div class="microstructure-grid ${gridClass(directionalRows)}">${directionalRows.map(rowHtml).join("")}</div>${neutralSection}`;
+  card.innerHTML = `<div class="microstructure-head"><div><h2>${tx("OKX 市场微观结构", "OKX market microstructure")} <button class="help-dot" type="button" data-tip="${tx("来自 OKX " + coinMetaOf().okx.swap + " 永续的公开 WebSocket：盘口、最新成交、持仓量、资金费率与现货/永续价格。用于 5 分钟到 1 小时的短线确认，不保证预测正确。", "Public OKX WebSocket data for BTC-USDT perpetual: order book, recent trades, OI, funding and spot/perpetual prices. It supports 5m–1h confirmation, not guaranteed prediction.")}">!</button></h2><p>${tx("盘口与成交实时 · OI、费率持续更新", "Live order book and trades · continuously updated OI and funding")}</p></div><span>${context.transport === "websocket" ? tx("OKX WebSocket", "OKX WebSocket") : tx("REST 备用", "REST fallback")}</span></div><div class="microstructure-conclusion ${conclusionKind}"><b>${conclusion}</b><p>${reason}</p></div><div class="microstructure-grid ${gridClass(directionalRows)}">${directionalRows.map(rowHtml).join("")}</div>${neutralSection}`;
   card.querySelector(".microstructure-neutral-toggle")?.addEventListener("click", () => {
     microstructureNeutralExpanded = !microstructureNeutralExpanded;
     renderOkxMicrostructure(context);
@@ -12956,7 +13411,6 @@ addIndicatorDetailEnhancer("market-microstructure", () => {
 if (fixedRuleSignal.candles.length) renderFixedRuleSignal();
 
 /* Make the difference between chart granularity and REST polling explicit. */
-const refreshIntervalMs = 1_000;
 const loadCurrentWithDataDensity = loadCurrent;
 let initialResonanceCalculated = false;
 loadCurrent = async function () {
@@ -13030,7 +13484,7 @@ loadCurrent = async function () {
   }
   if (!initialResonanceCalculated) {
     initialResonanceCalculated = true;
-    void resonance(false);
+    void refreshResonance(true);
   }
 };
 
@@ -13157,7 +13611,7 @@ addFixedRuleSignalEnhancer("signal-gauge", () => {
   reason.querySelector(".signal-summary")?.after(gauge);
 });
 if (fixedRuleSignal.candles.length) renderFixedRuleSignal();
-loadDerivativeMarketContext(true);
+whenIdle(() => loadDerivativeMarketContext(true));
 
 /* Keep projection output synchronized with each fixed-basis signal refresh. */
 addFixedRuleSignalEnhancer("signal-projection", () => {
@@ -13168,7 +13622,7 @@ addFixedRuleSignalEnhancer("signal-projection", () => {
 if (fixedRuleSignal.candles.length) renderFixedRuleSignal();
 
 /* Keep the personal reference quote attached after all late ticker wrappers. */
-renderPersonalEntryCard();
+whenIdle(() => renderPersonalEntryCard());
 
 /* 周期涨幅使用与周期匹配的 K 线历史，不能把不同粒度的间隔当成相同时间长度。
    Period returns use appropriately sized candle histories instead of treating
@@ -13311,25 +13765,9 @@ function ensureFearGreedCard() {
   return card;
 }
 function ensureReleasedDataCard() {
-  let card = $("releasedDataCard");
-  if (card) return card;
-  card = document.createElement("section");
-  card.id = "releasedDataCard";
-  card.className = "card released-data-card";
-  card.innerHTML = `<div class="released-data-head"><h2>${tx("宏观经济数据", "Macroeconomic data")}</h2><span>${tx("实际值实时回填", "Actuals filled live")}</span></div><div class="released-data-body"><p class="macro-cmp-empty">${tx("日历加载中…", "Loading calendar…")}</p></div>`;
-  // 放在「BTC 多因子研究」下方；investmentCalendarCard 会再跟在它后面。
-  // 研究卡异步加载，若尚未就绪则先放入主流程安全位置，避免落入右侧 side-stack。
-  const research = $("researchOutlookCard");
-  if (research) research.after(card);
-  else {
-    const pattern = $("patternAnalysis"),
-      terminal = document.querySelector(".terminal-layout"),
-      main = document.querySelector("main");
-    if (pattern) pattern.after(card);
-    else if (terminal) terminal.after(card);
-    else main?.append(card);
-  }
-  return card;
+  // v2.11.0：「宏观经济数据」独立卡下线，见 renderReleasedDataCard 注释。
+  $("releasedDataCard")?.remove();
+  return null;
 }
 let sentimentContentFill = false;
 function placePeriodAndSentimentCards() {
@@ -13341,10 +13779,11 @@ function placePeriodAndSentimentCards() {
   // 周期涨幅保持独立卡片外观，但紧贴在 OKX 微观结构之后，不能被右列高度推到下一行。
   // Keep period returns visually independent, directly after microstructure,
   // so the right column never creates an empty area in the chart column.
-  // 周期涨幅始终放在 OKX 微观结构卡片之后（两者都在 #mainChartCard 内），
+  // 周期涨幅始终是左列独立卡片、放在 OKX 微观结构卡之后（v2.10.56 起三卡平级），
   // 避免被右侧 side-stack 高度推到下一行产生左列空白。
-  if (micro) micro.after(period);
-  else if (!chart.contains(period)) chart?.append(period);
+  if (micro && micro.isConnected) micro.after(period);
+  else if (chart?.isConnected && period.parentElement !== chart.parentElement)
+    chart.after(period);
   // 宏观与情绪的位置统一交给 responsive arrange()：桌面端在右侧 side-stack，
   // 移动端在 terminal-layout 之后。避免多处代码反复移动导致闪烁。
   window.arrangeTerminalLayout?.();
@@ -13433,9 +13872,10 @@ function ensureResearchOutlookCard() {
   if (pattern) pattern.after(card);
   else if (resonance) resonance.after(card);
   else document.querySelector("main")?.append(card);
-  // 若宏观经济数据卡已提前创建，确保它紧跟在研究卡后面。
-  const released = $("releasedDataCard");
-  if (released && card.nextElementSibling !== released) card.after(released);
+  // v2.11.9：研究卡之后的整条链（A/B 实验中心 → 宏观事件中枢 → 宏观环境与联动）
+  // 统一交给 syncMacroPanels 校正。这里不再单独把日历卡搬到研究卡后面，
+  // 否则会把夹在中间的 A/B 实验中心顶开。
+  syncMacroPanels();
   return card;
 }
 function researchDirectionText(direction) {
@@ -13505,7 +13945,34 @@ function researchProbabilityLabel(probability) {
     ),
   };
 }
+// Three-class wording: the largest of up / flat / down leads, and all three probabilities
+// are printed so a 12% "up" can never be read as a conviction call.
+// 三分类文案：偏多 / 震荡 / 偏空中概率最高者领先，并同时打印三个概率，避免 12% 的「偏多」被读成强烈信号。
+function researchClassLabel(window) {
+  const up = Number(window.upProbability) * 100,
+    flat = Number(window.flatProbability) * 100,
+    down = Number(window.downProbability) * 100,
+    ranked = [
+      { key: "up", value: up, side: "bull", title: tx("偏多占优", "Bullish lead") },
+      { key: "flat", value: flat, side: "flat", title: tx("中性震荡", "Neutral range") },
+      { key: "down", value: down, side: "bear", title: tx("偏空占优", "Bearish lead") },
+    ].sort((a, b) => b.value - a.value),
+    lead = ranked[0];
+  return {
+    kind: lead.key === "flat" ? "flat" : lead.side,
+    side: lead.side,
+    title: lead.title,
+    up,
+    flat,
+    down,
+    detail: `${tx("偏多", "Up")} ${up.toFixed(1)}% · ${tx("震荡", "Flat")} ${flat.toFixed(1)}% · ${tx("偏空", "Down")} ${down.toFixed(1)}%`,
+  };
+}
+/* v2.11.9：缓存最近一次渲染入参。研究卡与 A/B 卡都是整卡渲染（不像多数卡片那样
+   逐节点替换文案），语言切换时必须用同一份数据就地重渲，标题与文案才会跟着走。 */
+let researchOutlookData = null;
 function renderResearchOutlook(data) {
+  researchOutlookData = data || researchOutlookData;
   const card = ensureResearchOutlookCard();
   if (!card) return;
   const newsItems = (data.news?.items || []).slice(0, 6),
@@ -13518,13 +13985,13 @@ function renderResearchOutlook(data) {
           return `<li class="${item.sentiment > 0 ? "bull" : item.sentiment < 0 ? "bear" : "flat"}"><i>${item.sentiment > 0 ? tx("利好", "Positive") : item.sentiment < 0 ? tx("利空", "Negative") : tx("中性", "Neutral")}</i>${href === "#" ? `<span title="${title}">${title}</span>` : `<a href="${href}" target="_blank" rel="noopener noreferrer" title="${title}">${title}</a>`}<small>${safeText(item.source || "")} · ${category}</small></li>`;
         })
         .join("") ||
-      `<li class="flat"><span>${tx("该时间窗暂无可用 BTC 新闻。", "No BTC headline is available in this window.")}</span></li>`,
+      `<li class="flat"><span>${tx("该时间窗暂无可用 " + coinLabel() + " 新闻。", "No " + coinLabel() + " headline is available in this window.")}</span></li>`,
     twoHourItems = newsItems.filter(
       (item) =>
         Number.isFinite(item.publishedAt) &&
         Date.now() - item.publishedAt <= 2 * 3_600_000,
     ),
-    newsPanel = `<div class="research-news"><h3>${tx("BTC 重点新闻（可点击查看原文）", "BTC priority headlines (click to open)")}</h3><div class="research-news-windows"><section><h4>${tx("近 2 小时", "Last 2 hours")}</h4><ul>${newsRows(twoHourItems)}</ul></section><section><h4>${tx("近 24 小时", "Last 24 hours")}</h4><ul>${newsRows(newsItems)}</ul></section></div></div>`,
+    newsPanel = `<div class="research-news"><h3>${tx(coinLabel() + " 重点新闻（可点击查看原文）", coinLabel() + " priority headlines (click to open)")}</h3><div class="research-news-windows"><section><h4>${tx("近 2 小时", "Last 2 hours")}</h4><ul>${newsRows(twoHourItems)}</ul></section><section><h4>${tx("近 24 小时", "Last 24 hours")}</h4><ul>${newsRows(newsItems)}</ul></section></div></div>`,
     headlineRows = newsRows(newsItems);
   const windows = (data.windows || [])
     .map((window) => {
@@ -13533,8 +14000,9 @@ function renderResearchOutlook(data) {
         prob = Number(window.upProbability) * 100,
         quality = Math.round(Number(window.matchQuality || 0) * 100),
         range = window.priceRange || {},
-        label = researchProbabilityLabel(prob);
-      return `<article class="research-window ${label.kind}"><span>${safeText(txWinLabel(window.label))} · ${tx({ bull: "牛市", bear: "熊市", range: "震荡" }[window.regime] || "未知", { bull: "Bull", bear: "Bear", range: "Range" }[window.regime] || "Unknown")}</span><b>${label.title}</b><strong class="${label.side}">${label.detail}</strong><em>${tx("预期变动", "Expected move")} ${move >= 0 ? "+" : "−"}${money(Math.abs(move))} (${ret >= 0 ? "+" : "−"}${Math.abs(ret).toFixed(2)}%)</em><small>${tx("价格区间 P10/P50/P90", "Price range P10/P50/P90")}：${money(range.p10)} / ${money(range.p50)} / ${money(range.p90)}</small><small>${tx("匹配质量", "Match quality")} ${quality}% · n=${window.samples}/${window.candidateCount}</small></article>`;
+        label = researchClassLabel(window),
+        band = Number(window.theta);
+      return `<article class="research-window ${label.kind}"><span>${safeText(txWinLabel(window.label))} · ${tx({ bull: "牛市", bear: "熊市", range: "震荡" }[window.regime] || "未知", { bull: "Bull", bear: "Bear", range: "Range" }[window.regime] || "Unknown")}</span><b>${label.title}</b><strong class="${label.side}">${label.detail}</strong><em>${tx("预期变动", "Expected move")} ${move >= 0 ? "+" : "−"}${money(Math.abs(move))} (${ret >= 0 ? "+" : "−"}${Math.abs(ret).toFixed(2)}%)</em><small>${tx("价格区间 P10/P50/P90", "Price range P10/P50/P90")}：${money(range.p10)} / ${money(range.p50)} / ${money(range.p90)}</small><small>${tx("中性阈带", "Neutral band")} ±${Number.isFinite(band) ? (band * 100).toFixed(2) : "--"}%${Number.isFinite(band) ? `（${tx("涨跌幅超过该幅度才算有方向", "a move must exceed this to count as directional")}）` : ""}</small><small>${tx("匹配质量", "Match quality")} ${quality}% · n=${window.samples}/${window.candidateCount}</small></article>`;
     })
     .join("");
   const news = data.news || {},
@@ -13565,15 +14033,34 @@ function renderResearchOutlook(data) {
           pending = scorecard.pending?.[window.key] || 0,
           validation = window.validation,
           quality = validation
-            ? `${tx("验证", "Validation")} ${validation.split || ""} · ${tx("命中", "Hit")} ${(validation.accuracy * 100).toFixed(1)}% · Brier ${validation.brier.toFixed(3)} · BSS ${Number.isFinite(validation.brierSkill) ? `${(validation.brierSkill * 100).toFixed(1)}%` : "--"} · ECE ${Number.isFinite(validation.ece) ? `${(validation.ece * 100).toFixed(1)}%` : "--"} · AUC ${Number.isFinite(validation.auc) ? validation.auc.toFixed(3) : "--"} · n=${validation.samples}`
-            : tx("样本不足", "Insufficient samples"),
-          economic = live?.economic
-            ? `${tx("成本后", "After cost")} ${live.economic.trades} ${tx("笔", "trades")} · ${tx("净收益", "Net")} ${pct(live.economic.netReturn * 100)} · ${tx("最大回撤", "Max DD")} ${pct(live.economic.maxDrawdown * 100)}`
+            ? `${tx("验证（仅方向样本）", "Validation (directional rows only)")} ${validation.directionalSamples || validation.samples}/${validation.totalSamples || validation.samples} · ${tx("震荡占比", "chop rate")} ${Number.isFinite(validation.flatRate) ? `${(validation.flatRate * 100).toFixed(0)}%` : "--"} · ${tx("命中", "Hit")} ${(validation.accuracy * 100).toFixed(1)}% · Brier ${validation.brier.toFixed(3)} · BSS ${Number.isFinite(validation.brierSkill) ? `${(validation.brierSkill * 100).toFixed(1)}%` : "--"} · ECE ${Number.isFinite(validation.ece) ? `${(validation.ece * 100).toFixed(1)}%` : "--"} · AUC ${Number.isFinite(validation.auc) ? validation.auc.toFixed(3) : "--"}`
+            : tx("方向样本不足，本周期未训练方向模型", "Too few directional rows; no directional model for this horizon"),
+          three = live?.threeClass,
+          className = (key) => tx({ up: "偏多", flat: "震荡", down: "偏空" }[key] || key, { up: "Up", flat: "Flat", down: "Down" }[key] || key),
+          threeClass = three
+            ? `${tx("三分类准确率", "Three-class accuracy")} <b>${(three.accuracy * 100).toFixed(1)}%</b> · ${tx("基线：永远猜", "baseline: always guess")} ${className(three.majorityLabel)} <b>${(three.majorityAccuracy * 100).toFixed(1)}%</b> · ${tx("基线：按频率随机", "baseline: random by frequency")} <b>${(three.frequencyAccuracy * 100).toFixed(1)}%</b> · ${tx("差值", "delta")} <b class="${three.deltaVsMajority >= 0 ? "bull" : "bear"}">${three.deltaVsMajority >= 0 ? "+" : "−"}${Math.abs(three.deltaVsMajority * 100).toFixed(1)}pp</b> · n=${three.samples}`
+            : tx("三分类样本待积累（早于阈带机制的旧数据不计入）", "Three-class sample pending (rows predating the band are excluded)"),
+          confusion = three
+            ? `<span>${tx("混淆矩阵（行=预测 / 列=实际，顺序 偏多·震荡·偏空）", "Confusion (rows = predicted / columns = actual; order up·flat·down)")}：${["up", "flat", "down"].map((key) => `${className(key)} [${three.confusion[key].up}/${three.confusion[key].flat}/${three.confusion[key].down}]`).join(" · ")}</span>`
+            : "",
+          missed = three && Number.isFinite(three.missedBreakout)
+            ? `<span>${tx("判为震荡但实际走出趋势", "Called chop but a trend appeared")} <b>${(three.missedBreakout * 100).toFixed(1)}%</b></span>`
+            : "",
+          economic = live?.economic && live.scored
+            ? `<span class="muted">${tx("参考：成本后", "Reference: after cost")} ${live.economic.trades} ${tx("笔", "trades")} · ${tx("净收益", "Net")} ${pct(live.economic.netReturn * 100)} · ${tx("最大回撤", "Max DD")} ${pct(live.economic.maxDrawdown * 100)}</span>`
+            : null,
+          // 权威样本与旧窗口样本必须分开说：旧样本的实际持有窗口随访问时机变化，混在一起
+          // 会让准确率无法解释。这里显式报出被排除的条数，而不是让它悄悄消失。
+          liveText = live?.scored
+            ? `${tx("实时", "Live")} ${tx("命中", "Hit")} ${(live.hitRate * 100).toFixed(1)}% · Brier ${Number(live.brier).toFixed(3)} · BSS ${Number.isFinite(live.brierSkill) ? `${(live.brierSkill * 100).toFixed(1)}%` : "--"} · ECE ${Number.isFinite(live.ece) ? `${(live.ece * 100).toFixed(1)}%` : "--"} · n=${live.scored}`
+            : `${tx("实时命中待积累", "Live outcomes pending")} · ${tx("待结算", "Pending")} ${pending}`,
+          legacyNote = live?.legacy
+            ? `<span class="muted">${tx(`另有 ${live.legacy} 条旧窗口定义样本已排除：旧逻辑不检查目标 K 线是否已收盘，实测仅约三成旧样本的结算价等于该根最终收盘，持有窗口无法复原`, `${live.legacy} older samples excluded: the old rule settled without checking that the target bar had closed — only about 30% matched that bar close exactly, so their window cannot be reconstructed`)}</span>`
             : null;
-        return `<article><b>${safeText(txWinLabel(window.label))}</b><span>${quality}</span><span>${live ? `${tx("实时", "Live")} ${tx("命中", "Hit")} ${(live.hitRate * 100).toFixed(1)}% · Brier ${live.brier.toFixed(3)} · BSS ${Number.isFinite(live.brierSkill) ? `${(live.brierSkill * 100).toFixed(1)}%` : "--"} · ECE ${Number.isFinite(live.ece) ? `${(live.ece * 100).toFixed(1)}%` : "--"} · n=${live.settled}` : `${tx("实时命中待积累", "Live outcomes pending")} · ${tx("待结算", "Pending")} ${pending}`}</span>${economic ? `<span>${economic}</span>` : ""}</article>`;
+        return `<article><b>${safeText(txWinLabel(window.label))}</b><span>${threeClass}</span>${confusion}${missed}<span>${quality}</span><span>${liveText}</span>${legacyNote ? legacyNote : ""}${economic ? economic : ""}</article>`;
       })
       .join("");
-  const scorecardPanel = `<section class="research-scorecard"><h3>${tx("模型记分卡", "Model scorecard")}</h3><p>${tx("三重屏障标签 · 时间顺序 60/20/20 切分并 embargo · 逻辑回归与本地树模型基线动态加权 · Platt 仅在独立校准窗拟合。BSS 相对朴素上涨率基准；成本化指标只使用已结算预测。", "Triple-barrier labels · chronological 60/20/20 split with embargo · dynamically blended logistic and local tree baseline · Platt fits only on the independent calibration window. BSS is relative to a naive base-rate forecast; cost metrics use settled predictions only.")}</p><div>${scoreRows}</div></section>`;
+  const scorecardPanel = `<section class="research-scorecard"><h3>${tx("模型记分卡", "Model scorecard")}</h3><p>${tx("终点三分类标签（偏多 / 震荡 / 偏空，阈带 = 1.15σ·√周期）· 时间顺序 60/20/20 切分并 embargo · 震荡概率来自软加权历史近邻，方向条件概率来自逻辑回归与本地树模型基线动态加权 · Platt 仅在独立校准窗拟合。三分类必须与「永远猜震荡」「按频率随机」两条基线并列阅读，差值才是模型贡献；成本化指标仅作参考，不作为升级门槛。", "Terminal three-class labels (up / flat / down; band = 1.15 sigma · sqrt(horizon)) · chronological 60/20/20 split with embargo · chop probability comes from soft-weighted historical neighbours, directional probability from a dynamically blended logistic and local tree baseline · Platt fits only on the independent calibration window. Read three-class accuracy next to the always-chop and random baselines: only the delta is the model's contribution. Cost metrics are reference only and never a promotion gate.")}</p><div>${scoreRows}</div></section>`;
   const featureStatus = data.features || {},
     macro = data.macro?.dxy,
     training = data.training || {},
@@ -13582,8 +14069,25 @@ function renderResearchOutlook(data) {
     comparison = training.comparison,
     candidateLocked = latestRun?.status === "shadow" && !shadow.readyForNext,
     runSummary = latestRun
-      ? `${tx("候选版本", "Candidate")} #${latestRun.id} · ${latestRun.status === "shadow" ? tx("影子记分中", "shadow scoring") : latestRun.status === "failed" ? tx("训练失败", "training failed") : tx("训练中", "training")} · ${shadow.totalSettled || 0}/${(shadow.requiredPerHorizon || 30) * 4} ${tx("已结算", "settled")}`
+      ? `${tx("候选版本", "Candidate")} #${latestRun.id} · ${latestRun.status === "shadow" ? tx("影子记分中", "shadow scoring") : latestRun.status === "failed" ? tx("训练失败", "training failed") : tx("训练中", "training")} · ${tx("已配对结算", "Paired outcomes")} ${shadow.totalSettled || 0} ${tx("条", "rows")}`
       : tx("尚未创建候选模型", "No candidate model yet"),
+    // 门槛卡在哪个周期必须写出来：只显示「样本不足」会让等待期看起来像功能坏了。
+    // Name the horizon that is short of the gate; a bare "insufficient" reads as a broken feature.
+    // 门槛逐周期从服务端取：四个周期不再共用同一个数字（1d 一天只产一个独立样本，于是同样的
+    // 条数意味着长得多得多的等待）。折算天数放在提示里，否则「20 条」会让人以为四个周期的
+    // 等待时间相同。The gate and the wall-clock wait it implies are both per horizon.
+    horizonProgress = comparison?.byHorizon
+      ? `<span class="research-horizon-progress">${tx("各周期独立样本", "Independent per horizon")}：${["15m", "1h", "4h", "1d"]
+          .map((key) => {
+            const row = comparison.byHorizon[key] || {},
+              got = Number(row.independent || 0),
+              need = Number(row.required || shadow.requiredIndependentPerHorizon || 20),
+              days = Number(row.gateDays || 0),
+              wait = days < 1 ? `${(days * 24).toFixed(1)} ${tx("小时", "h")}` : `${days.toFixed(1)} ${tx("天", "d")}`;
+            return `<b class="${got >= need ? "bull" : "muted"}" title="${tx("门槛", "gate")} ${need} · ${tx("折算等待", "≈")} ${wait}">${key} ${got}/${need}</b>`;
+          })
+          .join(" · ")}</span>`
+      : "",
     trainLabel = training.inProgress
       ? tx("训练中…", "Training…")
       : candidateLocked
@@ -13606,28 +14110,43 @@ function renderResearchOutlook(data) {
     overallCandidate = comparison?.overall?.candidate || {},
     verdict = comparison?.verdict,
     abPanel = comparison
-      ? `<section class="research-ab-evaluation ${safeText(verdict?.tone || "yellow")}"><h3>${tx("A/B 自动评估 · 当前对象：BTC 多因子研究预测模型", "A/B automatic evaluation · current scope: BTC multi-factor research model")}</h3><div class="research-ab-verdict"><b>${safeText(txVerdictLabel(verdict?.label) || tx("继续影子评估", "Continue shadow scoring"))}</b><span>${safeText(txVerdictReason(verdict?.reason) || "")}</span></div><div class="research-ab-summary"><span>${tx("已配对结算", "Paired outcomes")} <b>${comparison.paired || 0}</b></span><span>${tx("总体 Brier", "Overall Brier")} <b>${metric(overallBase.brier)} → ${metric(overallCandidate.brier)}</b></span><span>${tx("总体 Log Loss", "Overall Log Loss")} <b>${metric(overallBase.logLoss)} → ${metric(overallCandidate.logLoss)}</b></span><span>${tx("成本后净收益", "Net after cost")} <b>${pct((overallBase.economic?.netReturn || 0) * 100)} → ${pct((overallCandidate.economic?.netReturn || 0) * 100)}</b></span></div><div class="research-ab-grid">${comparisonRows}</div><small>${tx("门槛：每周期 30 个配对样本；Brier 与 Log Loss 均至少优于 3%，BSS≥0，ECE 不恶化超过 5%，成本后净收益不低于现役，且已验证市场状态不显著退化。绿色仅表示建议人工复核，绝不自动切换。", "Gate: 30 paired outcomes per horizon; Brier and Log Loss each improve by 3%, BSS≥0, ECE no worse by over 5%, net after cost no lower, and no material degradation in validated regimes. Green means manual review only; it never auto-switches.")}</small></section>`
-      : `<section class="research-ab-evaluation yellow"><h3>${tx("A/B 自动评估 · 当前对象：BTC 多因子研究预测模型", "A/B automatic evaluation · current scope: BTC multi-factor research model")}</h3><div class="research-ab-verdict"><b>${tx("等待候选版本", "Waiting for a candidate")}</b><span>${tx("先在 BTC 多因子研究预测卡片创建候选模型，系统才会开始同桶影子结算与自动对照。", "Create a candidate in the BTC multi-factor research card to begin paired shadow settlement and automatic comparison.")}</span></div></section>`,
-    governance = `<section class="research-governance"><h3>${tx("特征与训练治理", "Feature & training governance")}</h3><div><span>${tx("OFI 快照", "OFI snapshots")} <b>${featureStatus.ofiSnapshots || 0}</b><small>${featureStatus.readyForTraining ? tx("达到最低历史门槛", "history threshold met") : tx("采集中，未进入训练", "collecting; excluded from training")}</small></span><span>DXY <b>${macro ? macro.value.toFixed(3) : "--"}</b><small>${tx("仅作环境展示，待时序对齐验证", "context only; awaiting aligned validation")}</small></span><span>${tx("新闻", "News")} <b>${tx("事件分类 + 时间衰减", "event + decay")}</b><small>${tx("无预期数据时不计算“意外度”", "no surprise factor without consensus data")}</small></span></div><div class="research-training-status"><b>${runSummary}</b><small>${safeText(shadow.reason || tx("训练候选模型后会并行记录结果，达到门槛后仍需人工决定是否切换。", "Candidate outcomes are recorded in parallel; reaching the threshold still requires a manual switch decision."))}</small></div></section>`;
+      ? `<section class="research-ab-evaluation ${safeText(verdict?.tone || "yellow")}"><h3>${tx("A/B 自动评估 · 当前对象：" + coinLabel() + " 多因子研究预测模型", "A/B automatic evaluation · current scope: " + coinLabel() + " multi-factor research model")}</h3><div class="research-ab-verdict"><b>${safeText(txVerdictLabel(verdict?.label) || tx("继续影子评估", "Continue shadow scoring"))}</b><span>${safeText(txVerdictReason(verdict?.reason) || "")}</span></div><div class="research-ab-summary"><span>${tx("已配对结算", "Paired outcomes")} <b>${comparison.paired || 0}</b></span><span>${tx("总体 Brier", "Overall Brier")} <b>${metric(overallBase.brier)} → ${metric(overallCandidate.brier)}</b></span><span>${tx("总体 Log Loss", "Overall Log Loss")} <b>${metric(overallBase.logLoss)} → ${metric(overallCandidate.logLoss)}</b></span><span>${tx("成本后净收益", "Net after cost")} <b>${pct((overallBase.economic?.netReturn || 0) * 100)} → ${pct((overallCandidate.economic?.netReturn || 0) * 100)}</b></span></div><div class="research-ab-grid">${comparisonRows}</div><small>${tx("门槛：每周期 30 个配对样本；Brier 与 Log Loss 均至少优于 3%，BSS≥0，ECE 不恶化超过 5%，成本后净收益不低于现役，且已验证市场状态不显著退化。绿色仅表示建议人工复核，绝不自动切换。", "Gate: 30 paired outcomes per horizon; Brier and Log Loss each improve by 3%, BSS≥0, ECE no worse by over 5%, net after cost no lower, and no material degradation in validated regimes. Green means manual review only; it never auto-switches.")}</small></section>`
+      : `<section class="research-ab-evaluation yellow"><h3>${tx("A/B 自动评估 · 当前对象：" + coinLabel() + " 多因子研究预测模型", "A/B automatic evaluation · current scope: " + coinLabel() + " multi-factor research model")}</h3><div class="research-ab-verdict"><b>${tx("等待候选版本", "Waiting for a candidate")}</b><span>${tx("先在 BTC 多因子研究预测卡片创建候选模型，系统才会开始同桶影子结算与自动对照。", "Create a candidate in the BTC multi-factor research card to begin paired shadow settlement and automatic comparison.")}</span></div></section>`,
+    governance = `<section class="research-governance"><h3>${tx("特征与训练治理", "Feature & training governance")}</h3><div><span>${tx("OFI 快照", "OFI snapshots")} <b>${featureStatus.ofiSnapshots || 0}</b><small>${featureStatus.readyForTraining ? tx("达到最低历史门槛", "history threshold met") : tx("采集中，未进入训练", "collecting; excluded from training")}</small></span><span>DXY <b>${macro ? macro.value.toFixed(3) : "--"}</b><small>${tx("仅作环境展示，待时序对齐验证", "context only; awaiting aligned validation")}</small></span><span>${tx("新闻", "News")} <b>${tx("事件分类 + 时间衰减", "event + decay")}</b><small>${tx("无预期数据时不计算“意外度”", "no surprise factor without consensus data")}</small></span></div><div class="research-training-status"><b>${runSummary}</b>${horizonProgress}<small>${safeText(shadow.reason || tx("训练候选模型后会并行记录结果，达到门槛后仍需人工决定是否切换。", "Candidate outcomes are recorded in parallel; reaching the threshold still requires a manual switch decision."))}</small></div></section>`;
+  /* v2.11.10：实时样本的攒够速度由市场决定 —— 日线一天只产生一个独立结果，等 30 条就是 30 天。
+     回放把已存 K 线按同样的窗口口径重放成已评分样本，因此不自动运行（要重训十几个分段模型，
+     约 20 秒），改由用户按需触发，服务端缓存 30 分钟。 */
+  const replayPanel = `<section class="research-replay" id="researchReplayPanel"><h3>${tx("历史回放 · walk-forward 三分类验证", "Historical replay · walk-forward three-class validation")}</h3><div class="research-replay-head"><button type="button" id="runResearchReplay">${tx("运行历史回放", "Run historical replay")}</button><small>${tx("用本地已存 K 线重放：每一段只用该段起点之前的数据训练，再逐桶预测其后的桶，因此不含前瞻偏差。不含新闻/情绪/微观结构（它们没有历史），震荡概率来自近邻池、与实时同源。", "Replays stored candles: each segment trains only on data before its own cut, then predicts the buckets after it, so there is no look-ahead. News, sentiment, and microstructure have no history and are excluded; the chop probability comes from the analogue pool, as it does live.")}</small></div><div id="researchReplayResult" class="research-replay-result"><small>${tx("尚未运行。", "Not run yet.")}</small></div></section>`;
+  /* v2.11.14：宏观事件因子。CPI / 非农 / FOMC 的发布时刻与 BTC 事件窗口收益对齐。数据来自
+     FRED 观测序列 + Fed 官方决议日，点按钮才去取数（首次约 5 秒），否则只读库。 */
+  const macroPanel = `<section class="research-macro" id="researchMacroPanel"><h3>${tx("宏观事件因子 · CPI / 非农 / FOMC", "Macro event factors · CPI / NFP / FOMC")}</h3><div class="research-macro-head"><button type="button" id="runMacroStudy">${tx("重新回填事件样本", "Refetch event samples")}</button><small>${tx("面板打开时自动读取已入库的事件样本；点左侧按钮才会去 FRED 与 Fed 取数并重算（约 5 秒）。回填覆盖至少 24 个月，1d 窗口用日线、1h/4h 用 15m；基准只取事件时刻前已收盘的 K 线，避免前视偏差。", "The panel loads stored events on open; the button re-fetches from FRED and the Fed and recomputes (about 5 seconds). Coverage spans 24+ months. The 1d window uses daily candles and 1h/4h use 15m; baselines only ever use candles already closed at the event instant, so there is no look-ahead.")}</small></div><div id="researchMacroResult" class="research-macro-result"><small>${tx("正在读取事件样本…", "Loading event samples…")}</small></div></section>`;
+  /* v2.11.27：因子消融。加一个新因子最容易自欺的一步是「只看 accuracy 有没有涨」——在大部分时间
+     震荡的行情里，永不预测方向就能拿到很高的准确率。两臂跑完全相同的回放与 K 线，唯一差别是待验证
+     的那三列日历特征，头条指标是相对「永远猜多数类」的增量 ΔM。 */
+  const ablationPanel = `<section class="research-ablation" id="researchAblationPanel"><h3>${tx("因子消融 · 逐因子对比", "Factor ablation · one factor at a time")}</h3><div class="research-ablation-head"><button type="button" id="runResearchAblation">${tx("运行消融实验", "Run ablation")}</button><button type="button" id="refreshResearchAblation">${tx("强制重算", "Force recompute")}</button><button type="button" id="backfillFunding">${tx("回填资金费率历史", "Backfill funding history")}</button><small>${tx("每个因子臂跑完全相同的回放流程与同一批 K 线，唯一差别是它自己那一块特征列 —— 这样任何「无差异」结论都只能归因于那一块。判定看的是 deltaVsMajority（相对「永远猜多数类」的增量），不是 accuracy：震荡占多数时永远猜震荡就能拿到 75% 以上。各因子还要看它的「暴露」条件分组，因为全局均值会掩盖一个只在窄区间起作用的因子。因子数与周期数相乘。「运行消融实验」优先复用服务端 30 分钟内的结果，旁边的「强制重算」才会真的重跑（一到两分钟）；结果里会标明本次是否来自缓存。", "Every factor arm runs the identical replay over the same candles; the only difference is its own block of columns, so a verdict of \"no difference\" can only be attributed to that block. Both arms are judged twice: once on direction (deltaVsMajority - the gain over always guessing the majority class, never accuracy, since chop dominates the tape and always guessing chop already scores above 75%), and once on volatility - whether anything here knows that a move is coming at all, measured by a dedicated head trained on the same columns with a band-exit label. The two verdicts are reported apart because they answer different questions, and the volatility verdict names the level and the ranking separately: a level that moved while the ranking got worse is not a gain. Each factor is also split by the condition it is supposed to act on, because a global average can hide a factor that works only in a narrow regime. Run reuses the server's 30-minute cache; the neighbouring button forces a recompute of one to two minutes, and the result states whether it was cached.")}</small></div><div id="researchAblationResult" class="research-ablation-result"><small>${tx("尚未运行。", "Not run yet.")}</small></div></section>`;
+  /* v2.11.29：参数与门槛。研究模块的全部阈值与权重此前散在十几个函数里，没人能同时审查它们。
+     现在只有一个来源，这个面板把它摊开，并给出当前生效配置的指纹 —— 两份结果只有指纹相同才允许
+     互相比较。 */
+  const tuningPanel = `<section class="research-tuning" id="researchTuningPanel"><h3>${tx("参数与门槛 · 单一配置源", "Tuning · single source of truth")}</h3><div class="research-tuning-head"><button type="button" id="loadResearchTuning">${tx("读取当前配置", "Load configuration")}</button><small>${tx("研究模块的全部门槛与权重（震荡带倍数、独立样本门槛、成本模型、融合权重）集中在服务端一个配置块里，可由环境变量 BTC_RESEARCH_TUNING 覆盖。指纹标识一套配置；两份结果只有指纹相同才可互相比较。", "Every research threshold and weight lives in one server-side block and may be overridden with the BTC_RESEARCH_TUNING environment variable. The fingerprint identifies a configuration; two results may only be compared when their fingerprints match.")}</small></div><div class="research-tuning-result" id="researchTuningResult"></div></section>`;
   const abCenterHeader = `<div class="ab-center-head"><h2>${tx("A/B 实验中心", "A/B experiment center")}</h2><p>${tx("A 版为网页上方冻结的现役版本；B 版仅在后台同桶记录、到期后用同一真实价格结算。绿色只表示建议人工复核，系统绝不自动替换现役版本。描述/公式型模块改验算一致性、偏差或覆盖率，不输出“准确率”。", "A is the frozen live version shown above. B is recorded only in the background from the same bucket and settled against the same realised price. Green only means manual review; the system never replaces A automatically. Descriptive/formula modules validate consistency, bias, or coverage rather than accuracy.")}</p><div id="abExperimentRegistry" class="ab-experiment-registry"><span><b>${tx("正在读取各板块影子实验…", "Loading module shadow experiments…")}</b></span></div></div>`;
-  card.innerHTML = `<div class="research-outlook-head"><div><h2>${tx("BTC 多因子研究预测", "BTC multi-factor research outlook")}</h2><p>${tx("软加权历史近邻数据模型融合历史状态、近 24 小时公开 BTC 新闻情绪与 OKX 市场结构；结果为条件概率与价格区间，不是买卖建议。", "A soft-weighted historical-neighbor data model combines historical states, recent public BTC news sentiment, and OKX market structure. Results are conditional probabilities and price ranges, not buy/sell advice.")}</p></div><div class="research-actions"><button type="button" id="refreshResearchOutlook">${tx("更新研究", "Refresh research")}</button><button type="button" id="trainResearchCandidate" ${training.inProgress || candidateLocked ? "disabled" : ""}>${trainLabel}</button></div></div>${eventBanner}<div class="research-outlook-summary"><span>${tx("新闻情绪", "News sentiment")}：<b class="bull">${news.bullish || 0} ${tx("利好", "positive")}</b> · <b class="bear">${news.bearish || 0} ${tx("利空", "negative")}</b> · <b class="flat">${news.neutral || 0} ${tx("中性", "neutral")}</b> · ${tx("半衰期", "half-life")} ${news.halfLifeHours || 4}h</span><span>${tx("情绪指数", "Fear & Greed")}：<b>${Number.isFinite(sentiment?.value) ? `${sentiment.value}/100` : "--"}</b></span><span>${tx("中性阈值", "Neutral band")}：44–56%</span><span>${tx("样本", "Samples")}：15m ${history.intradaySamples || 0} · 1d ${history.dailySamples || 0}</span></div><div class="research-window-grid">${windows}</div>${derivativeSummary}<div class="research-news"><h3>${tx("近期 BTC 重点新闻（可点击查看原文）", "Priority BTC headlines (click to open)")}</h3><ul>${headlineRows}</ul></div><footer>${tx("更新时间", "Updated")} ${researchAge(data.fetchedAt)} · ${safeText(news.source || "")} · ${tx("新闻优先按利好/利空影响排序，并采用标题相似度去重、信源与事件权重、4 小时时间衰减；仍需自行核验其真实性与影响。", "Headlines prioritize positive/negative impact, with similarity dedupe, source/event weights, and a 4-hour time decay; verify accuracy and impact independently.")}</footer>`;
+  card.innerHTML = `<div class="research-outlook-head"><div><h2>${tx(coinLabel() + " 多因子研究预测", coinLabel() + " multi-factor research outlook")}</h2><p>${tx("软加权历史近邻数据模型融合历史状态、近 24 小时公开 BTC 新闻情绪与 OKX 市场结构；结果为条件概率与价格区间，不是买卖建议。", "A soft-weighted historical-neighbor data model combines historical states, recent public BTC news sentiment, and OKX market structure. Results are conditional probabilities and price ranges, not buy/sell advice.")}</p></div><div class="research-actions"><button type="button" id="refreshResearchOutlook">${tx("更新研究", "Refresh research")}</button><button type="button" id="trainResearchCandidate" ${training.inProgress || candidateLocked ? "disabled" : ""}>${trainLabel}</button></div></div>${eventBanner}<div class="research-outlook-summary"><span>${tx("新闻情绪", "News sentiment")}：<b class="bull">${news.bullish || 0} ${tx("利好", "positive")}</b> · <b class="bear">${news.bearish || 0} ${tx("利空", "negative")}</b> · <b class="flat">${news.neutral || 0} ${tx("中性", "neutral")}</b> · ${tx("半衰期", "half-life")} ${news.halfLifeHours || 4}h</span><span>${tx("情绪指数", "Fear & Greed")}：<b>${Number.isFinite(sentiment?.value) ? `${sentiment.value}/100` : "--"}</b></span><span>${tx("中性阈带 15m", "Neutral band 15m")}：±${Number.isFinite(Number(data.windows?.[0]?.theta)) ? (Number(data.windows[0].theta) * 100).toFixed(2) : "--"}%</span><span>${tx("样本", "Samples")}：15m ${history.intradaySamples || 0} · 1d ${history.dailySamples || 0}</span></div><div class="research-window-grid">${windows}</div>${derivativeSummary}<div class="research-news"><h3>${tx("近期 BTC 重点新闻（可点击查看原文）", "Priority BTC headlines (click to open)")}</h3><ul>${headlineRows}</ul></div><footer>${tx("更新时间", "Updated")} ${researchAge(data.fetchedAt)} · ${safeText(news.source || "")} · ${tx("新闻优先按利好/利空影响排序，并采用标题相似度去重、信源与事件权重、4 小时时间衰减；仍需自行核验其真实性与影响。", "Headlines prioritize positive/negative impact, with similarity dedupe, source/event weights, and a 4-hour time decay; verify accuracy and impact independently.")}</footer>`;
   const legacyNews = card.querySelector(".research-news");
   if (legacyNews) legacyNews.outerHTML = newsPanel;
   card
     .querySelector(".research-derivatives")
-    ?.insertAdjacentHTML("afterend", scorecardPanel + governance);
+    ?.insertAdjacentHTML("afterend", scorecardPanel + governance + replayPanel + macroPanel + ablationPanel + tuningPanel);
   let abCard = $("abEvaluationCard");
   if (!abCard) {
     abCard = document.createElement("section");
     abCard.id = "abEvaluationCard";
     abCard.className = "card research-ab-evaluation-card";
   }
-  const main = document.querySelector("main"),
-    footer = main?.querySelector(":scope>footer");
-  if (main) {
-    if (footer) main.insertBefore(abCard, footer);
-    else main.append(abCard);
-  }
+  /* v2.11.9：A/B 实验中心与研究预测同属「研究」类，紧贴研究卡之后。原先挂在 main 末尾
+     （footer 之前），会被整组决策工具卡隔开。最终次序由 syncMacroPanels 统一校正。 */
+  const main = document.querySelector("main");
+  if (main && !main.contains(abCard)) main.append(abCard);
+  if (card.nextElementSibling !== abCard) card.after(abCard);
+  syncMacroPanels();
   abCard.innerHTML = abCenterHeader + abPanel;
   card
     .querySelector("#refreshResearchOutlook")
@@ -13635,6 +14154,28 @@ function renderResearchOutlook(data) {
   card
     .querySelector("#trainResearchCandidate")
     ?.addEventListener("click", trainResearchCandidate);
+  card.querySelector("#runMacroStudy")?.addEventListener("click", () => loadMacroEventStudy(true));
+  // 读库是毫秒级的，所以面板自动填一次；取数 + 重算仍然只在点按钮时发生。
+  loadMacroEventStudy(false);
+  card
+    .querySelector("#runResearchReplay")
+    ?.addEventListener("click", runResearchReplay);
+  card
+    .querySelector("#runResearchAblation")
+    // 必须包一层：addEventListener 会把事件对象当第一个实参传进去，直接挂 runResearchAblation
+    // 等于每次都传了个真值，于是「复用缓存」永远走不到。
+    // Wrap it: addEventListener passes the event object as the first argument, so hooking the
+    // function directly would hand it a truthy value every time and the cache path would never run.
+    ?.addEventListener("click", () => runResearchAblation(false));
+  card
+    .querySelector("#refreshResearchAblation")
+    ?.addEventListener("click", () => runResearchAblation(true));
+  card
+    .querySelector("#backfillFunding")
+    ?.addEventListener("click", backfillFundingHistory);
+  card
+    .querySelector("#loadResearchTuning")
+    ?.addEventListener("click", loadResearchTuning);
   loadAbExperimentRegistry();
   addHelp(
     card.querySelector("h2"),
@@ -13648,12 +14189,318 @@ function renderResearchOutlook(data) {
     ),
   );
 }
+// The HTTP status alone throws the server's reason away. A 503 out of the research endpoints is
+// almost never "the server is down": it is a timeout, a missing dependency or a broken invariant,
+// and the body already names which one. Reporting only "HTTP 503" leaves a panel that says the run
+// failed and gives nothing to look at, which is exactly what happened when the ablation kept
+// answering 503 while the replay beside it worked fine.
+// 只报 HTTP 状态码会把服务端的理由丢掉。研究接口的 503 几乎从来不是「服务挂了」：它是超时、依赖缺失
+// 或某条不变量被破坏，而响应体早就写清了是哪一种。只显示「HTTP 503」会留下一个「失败了、但没有线索」
+// 的面板 —— 消融一直回 503、旁边的回放却正常时，看到的正是这个样子。
+async function describeHttpFailure(response) {
+  let detail = "";
+  try { const body = await response.json(); detail = body?.detail || body?.error || ""; } catch { detail = ""; }
+  return `HTTP ${response.status}${detail ? ` · ${detail}` : ""}`;
+}
+// 面板默认自动读库（毫秒级），只有点按钮才去 FRED / Fed 取数重算。
+async function loadMacroEventStudy(refresh = false) {
+  const panel = document.getElementById("researchMacroResult");
+  if (!panel) return;
+  panel.innerHTML = `<small>${refresh ? tx("正在从 FRED 与 Fed 取数并重算事件窗口…", "Fetching from FRED and the Fed, then recomputing event windows…") : tx("正在读取宏观事件样本…", "Loading macro event samples…")}</small>`;
+  try {
+    const response = await apiFetch(`/api/macro-outcomes${refresh ? "?refresh=1" : ""}`, refresh ? 90_000 : 15_000);
+    if (!response.ok) throw new Error(await describeHttpFailure(response));
+    renderMacroEventStudy(await response.json());
+  } catch (error) {
+    panel.innerHTML = `<small class="bear">${tx("宏观事件回填失败", "Macro event backfill failed")}：${safeText(error.message)}</small>`;
+  }
+}
+function renderMacroEventStudy(data) {
+  const panel = document.getElementById("researchMacroResult");
+  if (!panel) return;
+  const rate = (value) => (Number.isFinite(Number(value)) ? `${(Number(value) * 100).toFixed(2)}%` : "--");
+  const cards = ["cpi", "core-cpi", "nfp", "fomc"]
+    .map((key) => {
+      const row = data.byKind?.[key];
+      if (!row?.samples) return "";
+      const vol = Number(row.volatility?.medianRatio),
+        split = row.surpriseSplit;
+      return `<article><b>${safeText(row.name)}</b><span>${tx("样本", "Samples")} ${row.samples} · ${tx("含实际值", "with actual")} ${row.withActual}</span><span>${tx("1d 中位幅度", "median 1d move")} ${rate(row.medianAbsReturn?.d1)}</span><span>${tx("波动倍数", "vol ratio")} ${Number.isFinite(vol) ? `${vol.toFixed(2)}×` : "--"}</span><span>${tx("放大占比", "amplified")} ${Number.isFinite(Number(row.volatility?.amplifiedShare)) ? `${(Number(row.volatility.amplifiedShare) * 100).toFixed(0)}%` : "--"}</span>${split ? `<span>${tx("正意外 1d", "+surprise 1d")} ${rate(split.positive.meanAfter1d)} <small>n=${split.positive.samples}</small></span><span>${tx("负意外 1d", "−surprise 1d")} ${rate(split.negative.meanAfter1d)} <small>n=${split.negative.samples}</small></span>` : ""}${row.unchanged ? `<span>${tx("无变动日 1d", "unchanged 1d")} ${rate(row.unchanged.meanAfter1d)} <small>n=${row.unchanged.samples}</small></span>` : ""}<small>${safeText(row.precision)} · ${safeText(row.note)}</small></article>`;
+    })
+    .join("");
+  const span = data.coverage ? `${new Date(data.coverage.from).toISOString().slice(0, 10)} → ${new Date(data.coverage.to).toISOString().slice(0, 10)}` : "--",
+    notes = (data.methodology || []).map((line) => `<li>${safeText(line)}</li>`).join("");
+  panel.innerHTML = `<div class="research-macro-grid">${cards}</div><small>${tx("覆盖", "Coverage")} ${span} · ${data.total} ${tx("条事件", "events")} · ${tx("CPI 与核心 CPI 同日发布，窗口收益完全相同，不是两组独立证据。", "CPI and core CPI ship on the same day, so their window returns are identical — not two independent samples.")}</small><details><summary>${tx("方法学边界", "Methodology limits")}</summary><ul>${notes}</ul></details>`;
+}
+// 回放按需触发：它要重训十几个历史分段模型，不该拖慢每一次面板渲染。
+// Replay is user-triggered: it retrains a dozen historical segment models and must not slow down
+// every panel render.
+async function runResearchReplay() {
+  const panel = document.getElementById("researchReplayResult");
+  if (!panel) return;
+  panel.innerHTML = `<small>${tx("正在重训历史分段并逐桶预测，约需 20 秒…", "Retraining historical segments bucket by bucket; about 20 seconds…")}</small>`;
+  try {
+    const response = await fetch("/api/research-backfill?refresh=1", { cache: "no-store" });
+    if (!response.ok) throw new Error(await describeHttpFailure(response));
+    renderResearchReplay(await response.json());
+  } catch (error) {
+    panel.innerHTML = `<small class="bear">${tx("回放失败", "Replay failed")}：${safeText(error.message)}</small>`;
+  }
+}
+function renderResearchReplay(data) {
+  const panel = document.getElementById("researchReplayResult");
+  if (!panel) return;
+  const rate = (value) => (Number.isFinite(Number(value)) ? `${(Number(value) * 100).toFixed(1)}%` : "--");
+  const rows = ["15m", "1h", "4h", "1d"]
+    .map((key) => {
+      const row = data.rows?.[key] || {},
+        three = row.threeClass || {},
+        delta = Number(three.deltaVsMajority),
+        tone = Number.isFinite(delta) ? (delta > 0 ? "bull" : "bear") : "muted";
+      return `<article><b>${key}</b><span>${tx("回放样本", "Replayed")} ${row.samples || 0}</span><span>${tx("独立", "independent")} ${row.independent || 0}</span><span>${tx("准确率", "Accuracy")} ${rate(three.accuracy)}</span><span>${tx("猜震荡基线", "Always-flat")} ${rate(three.majorityAccuracy)}</span><span class="${tone}">${tx("差值", "Delta")} ${Number.isFinite(delta) ? (delta > 0 ? "+" : "") + (delta * 100).toFixed(1) + "%" : "--"}</span></article>`;
+    })
+    .join("");
+  const daily = data.rows?.["1d"] || {},
+    span = daily.from ? `${new Date(daily.from).toISOString().slice(0, 10)} → ${daily.to ? new Date(daily.to).toISOString().slice(0, 10) : "--"}` : "--";
+  panel.innerHTML = `<div class="research-replay-grid">${rows}</div><small>${tx("1d 回放覆盖", "1d replay coverage")} ${span} · ${tx("与实时样本同口径（同一 theta 与窗口定义）", "same threshold and window definition as live samples")}</small>`;
+}
+// 消融按需触发：两臂各跑一遍完整回放，比回放本身慢一倍（约 25 秒），因此不自动运行。
+// 资金费率历史要先去交易所取一次才能参与消融。这一步是显式按钮，而不是在「运行消融」里悄悄联网：
+// 取数依赖外部服务，它的失败必须看得见，而不是伪装成「这个因子没有增量」。
+// The funding history must be fetched from the exchange once before it can take part in an ablation.
+// That is an explicit button rather than a silent network call inside "run ablation": the fetch
+// depends on an external service, and its failure has to be visible instead of masquerading as
+// "this factor adds nothing".
+async function backfillFundingHistory() {
+  const panel = document.getElementById("researchAblationResult");
+  if (!panel) return;
+  panel.innerHTML = `<small>${tx("正在从交易所分页回填资金费率历史…", "Paging the funding-rate history from the exchange…")}</small>`;
+  try {
+    const response = await fetch("/api/funding-rates?refresh=1", { cache: "no-store" });
+    if (!response.ok) throw new Error(await describeHttpFailure(response));
+    const data = await response.json();
+    const days = Number(data.coverageDays),
+      span = Number.isFinite(days) ? ` · ${tx("覆盖", "covering")} ${days.toFixed(1)} ${tx("天", "days")}` : "",
+      fetched = data.backfill ? ` · ${tx("本次取数", "this fetch")} ${data.backfill.requests} ${tx("次请求", "requests")}` : "";
+    panel.innerHTML = `<small>${tx("已存", "Stored")} <b>${data.stored || 0}</b> ${tx("条结算", "settlements")}${span}${fetched}。${tx("现在运行消融，资金费率会作为一个因子臂出现；两臂的列数不同是它真的进了模型的前提。", "Run the ablation now and funding will appear as a factor arm; the two arms differing in column count is the precondition for it having reached the model at all.")}</small>`;
+  } catch (error) {
+    panel.innerHTML = `<small class="bear">${tx("回填失败", "Backfill failed")}：${safeText(error.message)}</small>`;
+  }
+}
+// 按钮默认**复用**服务端 30 分钟的缓存：一次重算要重训十几个分段模型、耗时一到两分钟，而 30 分钟内
+// 重算得到的是同一份配置、同一批 K 线下的同一批数字 —— 让人为同一份结果等两次没有意义。需要强制时
+// 用旁边的「强制重算」。结果里会标明本次是否来自缓存。
+// The button **reuses** the server's 30-minute cache by default: a recompute retrains a dozen segment
+// models and takes one to two minutes, while inside 30 minutes it can only reproduce the same numbers
+// from the same configuration and the same candles. Waiting twice for one result is not a feature;
+// the neighbouring button forces a recompute, and the result says whether it came from the cache.
+async function runResearchAblation(force = false) {
+  const panel = document.getElementById("researchAblationResult");
+  if (!panel) return;
+  panel.innerHTML = `<small>${force
+    ? tx("正在强制重算：每个因子臂各重训一遍历史分段并逐桶预测，约需一到两分钟…", "Forcing a recompute: retraining every factor arm over historical segments bucket by bucket; one to two minutes…")
+    : tx("正在读取消融结果…", "Loading ablation results…")}</small>`;
+  try {
+    const response = await fetch(`/api/research-ablation${force ? "?refresh=1" : ""}`, { cache: "no-store" });
+    if (!response.ok) throw new Error(await describeHttpFailure(response));
+    renderResearchAblation(await response.json());
+  } catch (error) {
+    panel.innerHTML = `<small class="bear">${tx("消融实验失败", "Ablation failed")}：${safeText(error.message)}</small>`;
+  }
+}
+function renderResearchAblation(data) {
+  const panel = document.getElementById("researchAblationResult");
+  if (!panel) return;
+  const pp = (value) => (Number.isFinite(Number(value)) ? `${Number(value) > 0 ? "+" : ""}${(Number(value) * 100).toFixed(2)}pp` : "--");
+  const rate = (value) => (Number.isFinite(Number(value)) ? `${(Number(value) * 100).toFixed(1)}%` : "--");
+  // The threshold arrives in percentage points (0.5 means 0.5pp) while deltaVsMajority is a ratio.
+  // Comparing 0.5 against a 0.005-sized difference would pin every verdict to "no difference" and
+  // print the threshold as ±50.0pp in the footnote.
+  const threshold = (Number.isFinite(Number(data.deltaThresholdPp)) ? Number(data.deltaThresholdPp) : 0.5) / 100;
+  // 波动口径的阈值同样是**百分点**，也同样必须换算成比例再比较。两个阈值分开传递，是因为它们判定的是
+  // 两个不同的问题；共用一个数字会让其中一边的判定失去意义。
+  // The volatility threshold is in percentage points as well, and needs the same conversion. It is a
+  // separate field because the two judge different questions; sharing one number would make one of
+  // the two verdicts meaningless.
+  const volThreshold = (Number.isFinite(Number(data.volatilityThresholdPp)) ? Number(data.volatilityThresholdPp) : 0.5) / 100;
+  // The AUC gain is not a percentage of anything - it is a bare increment on a 0-to-1 statistic - so it
+  // gets its own band instead of borrowing the one expressed in percentage points. The two happened to
+  // coincide at 0.005, which is exactly why they had to be separated before anyone could retune one of
+  // them without silently moving the other.
+  // AUC 增量不是任何东西的百分比 —— 它是 0 到 1 之间的统计量上的裸增量 —— 所以它有自己的一条带，
+  // 而不是借用那条以百分点表达的。两者恰好都等于 0.005，这正是必须在有人想单独调整其中一个而不悄悄
+  // 带动另一个之前、把它们分开的原因。
+  const volAucThreshold = Number.isFinite(Number(data.volatilityAucThreshold)) ? Number(data.volatilityAucThreshold) : 0.005;
+  const horizons = ["15m", "1h", "4h", "1d"];
+  // 三档判定：阈值带以内一律读作「无差异」，包括那些小幅为负的 —— 把 ±0.1pp 的波动读成「有损害」
+  // 会让面板每次刷新都在叫狼来了，真正有信号的因子反而被淹没。
+  // Three-way verdict: anything inside the band reads as "no difference", including small negatives.
+  // Reading a 0.1pp wobble as harm would make the panel cry wolf on every refresh.
+  const verdictOf = (value, band = threshold) => {
+    const shift = Number(value);
+    if (!Number.isFinite(shift)) return { tone: "muted", label: tx("样本不足", "insufficient") };
+    if (shift > band) return { tone: "bull", label: tx("有增量", "adds value") };
+    if (shift < -band) return { tone: "bear", label: tx("有损害", "hurts") };
+    return { tone: "muted", label: tx("无差异", "no difference") };
+  };
+  const meta = Array.isArray(data.factorMeta) ? data.factorMeta : [];
+  if (!meta.length) {
+    panel.innerHTML = `<small class="muted">${tx("没有任何因子带数据，无法对比。先回填因子历史再运行。", "No factor carries data yet; backfill the factor history first.")}</small>`;
+    return;
+  }
+  // 按因子分卡而不是按周期分卡：因子是这次对比的主角，周期是它的四行读数。
+  // One card per factor rather than per horizon: the factor is what is being judged, and the four
+  // horizons are its four readings.
+  const cards = meta.map((factor) => {
+    const rows = horizons.map((key) => {
+      const row = data.rows?.[key] || {}, base = row.baseline || {}, arm = row.factors?.[factor.key] || {},
+        delta = row.deltas?.[factor.key] || {}, condition = row.conditions?.[factor.key] || {},
+        inside = condition.inside || {}, outside = condition.outside || {},
+        // Same rule as the volatility line: a verdict that inverts between the two halves of the evidence
+        // is not a verdict yet, so it is reported as such instead of being averaged into a number that
+        // would depend on which half you happened to believe.
+        // 与波动行同一条规则：一个在证据的前后两半之间反转的判定，还不是一个判定；它照原样报出，而不是被
+        // 平摊成一个取决于你碰巧相信哪一半的数字。
+        verdict = delta.stability?.direction?.flipped ? { tone: "warn", label: tx("前后段反向·还不可判", "halves disagree · not yet") } : verdictOf(delta.deltaVsMajority);
+      // 波动口径单独一行：它与方向口径回答的是两个问题，混在一行里会让人把「方向没有增量」读成
+      // 「这个因子什么也没买到」。基线技巧是模型自己（不加该因子）对「要动」的预测能力，先看它才能
+      // 判断因子那点增量是加在一个本来就有技巧的模型上，还是一个本来就为零的模型上。
+      // The volatility reading gets its own line: it answers a different question from the direction
+      // reading, and sharing a line invites reading "no directional edge" as "this factor buys
+      // nothing at all". Baseline skill is what the model already achieves without the factor, and
+      // it is what tells apart a gain on top of real skill from a gain on top of nothing.
+      const volDelta = delta.volatility || {}, volInside = inside.volatility || {}, volOutside = outside.volatility || {},
+        volAucVerdict = verdictOf(volDelta.auc, volAucThreshold),
+        // 波动这一行有两个指标，只报「有没有增量」会把「只是整体水位变了、排序反而更差」读成好消息 ——
+        // 而那恰好是这批数据里出现的情形（4h 宏观事件窗口：Brier 技巧 +1.03pp 而 AUC −1.40pp）。
+        // 所以这行的判定必须分别说明水平与排序各发生了什么，不能压成一句「有增量」。
+        // The volatility line carries two metrics, and a single "adds value" verdict would read
+        // "the overall level moved but the ranking got worse" as good news - which is exactly what
+        // this data does at 4h inside an event window (+1.03pp Brier skill against a -1.40pp AUC).
+        // The verdict therefore has to say what happened to the level and to the ranking separately.
+        volVerdict = (() => {
+          const skill = Number(volDelta.brierSkill), rank = Number(volDelta.auc);
+          if (!Number.isFinite(skill) || !Number.isFinite(rank)) return { tone: "muted", label: tx("样本不足", "insufficient") };
+          const skillUp = skill > volThreshold, skillDown = skill < -volThreshold, rankUp = rank > volAucThreshold, rankDown = rank < -volAucThreshold;
+          // A reversal is the one reading that must not be summarised away: a delta that holds in one half
+          // of the independent samples and inverts in the other is a coin, and saying "level up" without
+          // saying that would be the panel's own version of crying wolf. It outranks the seven-way verdict.
+          // 反向是唯一一个绝不能被总结掉掉的读数：一个差值在独立样本的一半上成立、在另一半上反转，那就是
+          // 一枚硬币；只说「水平改善」而不说这件事，就成了面板自己在虚报。它的优先级高于那七种判定。
+          const flipped = Boolean(volDelta.stability?.brierSkill?.flipped || volDelta.stability?.auc?.flipped);
+          if (flipped) return { tone: "warn", label: tx("前后段反向·还不可判", "halves disagree · not yet readable") };
+          if (skillUp && rankUp) return { tone: "bull", label: tx("水平与排序同增", "level + ranking up") };
+          if (skillUp && rankDown) return { tone: "muted", label: tx("仅水平改善·排序变差", "level up · ranking worse") };
+          if (skillUp) return { tone: "bull", label: tx("仅水平改善", "level only") };
+          if (rankUp) return { tone: "bull", label: tx("仅排序改善", "ranking only") };
+          if (skillDown && rankDown) return { tone: "bear", label: tx("两项同降", "both down") };
+          if (skillDown) return { tone: "bear", label: tx("仅水平变差", "level worse only") };
+          if (rankDown) return { tone: "bear", label: tx("仅排序变差", "ranking worse only") };
+          return { tone: "muted", label: tx("无差异", "no difference") };
+        })();
+      const dh = base.directionHead || {};
+      const dhCalGap = (Number.isFinite(Number(dh.calibrationPredictedRate)) && Number.isFinite(Number(dh.calibrationBaseRate))) ? (Number(dh.calibrationPredictedRate) - Number(dh.calibrationBaseRate)) * 100 : null;
+      const dhCalTone = dhCalGap == null ? "muted" : (Math.abs(dhCalGap) < 1 ? "bull" : "bear");
+      const dhCalLabel = dhCalGap == null ? tx("无数据", "no data") : (Math.abs(dhCalGap) < 1 ? tx("已校准", "calibrated") : tx("偏差 " + dhCalGap.toFixed(1) + "pp", "off " + dhCalGap.toFixed(1) + "pp"));
+      const dhLiveGap = (Number.isFinite(Number(dh.testPredictedRate)) && Number.isFinite(Number(dh.testBaseRate))) ? (Number(dh.testPredictedRate) - Number(dh.testBaseRate)) * 100 : null;
+      const dhLiveTone = dhLiveGap == null ? "muted" : (Math.abs(dhLiveGap) < 3 ? "bull" : (Math.abs(dhLiveGap) < 8 ? "muted" : "bear"));
+      return `<div class="research-ablation-horizon">`
+        + `<div class="research-ablation-row"><b>${key}</b><span>${tx("特征列", "columns")} ${base.featureWidth ?? "--"} → ${arm.featureWidth ?? "--"}</span><span>${tx("独立样本", "independent")} ${base.samples ?? 0}</span>${Number(arm.skippedSegments) > 0 ? `<span class="bear">${tx("跳过训练段", "skipped segments")} ${arm.skippedSegments}/${(arm.segments ?? 0) + arm.skippedSegments}</span>` : ""}<span class="${verdict.tone}">${tx("Δ 相对多数类", "Δ vs majority")} ${pp(delta.deltaVsMajority)}</span><span class="${verdict.tone}"><b>${verdict.label}</b></span><span>${tx("方向类准确率", "directional accuracy")} ${rate(base.threeClass?.directionalAccuracy)} → ${rate(arm.threeClass?.directionalAccuracy)}</span><span>${tx("漏报率", "missed breakout")} ${rate(base.threeClass?.missedBreakout)} → ${rate(arm.threeClass?.missedBreakout)}</span><span class="muted">${safeText(condition.label || "")} n=${inside.baseline?.samples ?? 0} · ${tx("ΔM", "ΔM")} ${pp(inside.deltaVsMajority)}</span><span class="muted">${tx("窗口外", "outside")} n=${outside.baseline?.samples ?? 0} · ${tx("ΔM", "ΔM")} ${pp(outside.deltaVsMajority)}</span></div>`
+        + `<div class="research-ablation-row research-ablation-vol"><b>${tx("波动", "vol")}</b><span>${tx("波动头列", "vol cols")} ${base.volatilityColumns ?? "--"} → ${arm.volatilityColumns ?? "--"}</span><span>${tx("大动占比", "big-move rate")} ${rate(base.volatility?.bigRate)}</span><span>${tx("基线技巧", "baseline skill")} ${pp(base.volatility?.brierSkill)}</span><span>${tx("预测/实际", "predicted/actual")} ${rate(base.volatility?.predictedRate)} / ${rate(base.volatility?.bigRate)}${Number.isFinite(Number(base.volatility?.rateRatio)) ? ` · ${Number(base.volatility.rateRatio).toFixed(2)}×` : ""}</span><span class="${volVerdict.tone}">${tx("Δ Brier 技巧", "Δ Brier skill")} ${pp(volDelta.brierSkill)}</span><span class="${volAucVerdict.tone}">${tx("Δ AUC", "Δ AUC")} ${pp(volDelta.auc)}</span><span class="${volVerdict.tone}"><b>${volVerdict.label}</b></span><span class="muted">${safeText(condition.label || "")} n=${volInside.baseline?.samples ?? 0} · ${tx("ΔBSS", "ΔBSS")} ${pp(volInside.brierSkill)}</span><span class="muted">${tx("窗口外", "outside")} n=${volOutside.baseline?.samples ?? 0} · ${tx("ΔBSS", "ΔBSS")} ${pp(volOutside.brierSkill)}</span></div>`
+        + `<div class="research-ablation-row research-ablation-dir"><b>${tx("方向头", "dir head")}</b><span>${tx("AUC", "AUC")} ${dh.auc != null ? dh.auc.toFixed(3) : "--"}</span><span>${tx("BSS", "BSS")} ${pp(dh.brierSkill)}</span><span>${tx("ECE", "ECE")} ${dh.ece != null ? (dh.ece * 100).toFixed(1) + "%" : "--"}</span><span class="${dhCalTone}">${tx("校准", "cal")}：${dhCalLabel}</span><span class="${dhLiveTone}">${tx("实测/预测", "actual/pred")} ${rate(dh.testBaseRate)} / ${rate(dh.testPredictedRate)}</span></div>`
+        + `</div>`;
+    }).join("");
+    return `<article><div class="research-ablation-row research-ablation-title"><b>${safeText(factor.label)}</b><span class="muted">${safeText(factor.key)} · ${tx("列", "cols")} +${factor.columns}</span><span class="muted">${safeText(factor.note || "")}</span><span class="muted">${tx("暴露条件", "exposed when")}：${safeText(factor.condition?.label || "")}</span></div>${rows}</article>`;
+  }).join("");
+  const contexts = data.contexts || {};
+  const contextNote = tx(`上下文：日历事件 ${contexts.calendarEvents || 0} 个 · 资金费率结算 ${contexts.fundingSettlements || 0} 条`,
+    `Contexts: ${contexts.calendarEvents || 0} calendar events · ${contexts.fundingSettlements || 0} funding settlements`);
+  const method = (data.methodology || []).map((line) => `<li>${safeText(line)}</li>`).join("");
+  // 结果是否来自缓存必须写明：同一份缓存与刚刚重算出来的数字看不出差别，但前者省掉了两分钟。
+  // Whether the result came from the cache has to be stated: a cached payload is indistinguishable
+  // from a fresh one, and it saved two minutes.
+  const cacheNote = data.cached ? `${tx("服务端缓存（30 分钟内）", "server cache (within 30 min)")} · ` : "";
+  // A reader who does not know which numbers are decided and which are merely read will treat every
+  // number as a verdict. This block is the difference between a panel that answers a question and a
+  // panel that produces output.
+  // 一个不知道「哪些数字是被判定的、哪些只是被读出来的」的读者，会把每个数字都当成结论。这一段就是
+  // 「一个回答问题的面板」与「一个只是产出东西的面板」之间的差别。
+  const howto = [
+    tx("先看这一行值不值得信：样本数，以及有没有标「跳过训练段」或「前后段反向」。标了反向的格子读作「还没有结论」，不是「结论相反」。",
+      "First check whether the row is readable at all: sample count, and whether it carries a skipped-segment or halves-disagree mark. A halves-disagree row reads as 'no verdict yet', not as 'the opposite verdict'."),
+    tx("再看差值落在带内还是带外：带内一律是「无差异」，它的意思是「在这批样本、这个模型、这几列下测不出」，不等于「这个东西没有信息」。",
+      "Then check whether the delta clears its band. Inside the band always means 'no difference' — meaning 'not measurable with this sample, model and column set', not 'this factor carries no information'."),
+    tx("波动那一行有两个数，回答两个问题：水平（Δ Brier 技巧）＝整体水位报得准不准；排序（Δ AUC）＝能不能挑出更容易动的那些桶。只有两个都动，才算真的会择时。",
+      "The volatility line carries two numbers answering two questions: level (Δ Brier skill) = is the overall rate reported correctly; ranking (Δ AUC) = can it pick out the buckets that move. Only when both move is there any timing."),
+    tx("「预测/实际」的倍数离 1 越远，越说明是尺度问题而不是信号问题：远大于 1 是喊了没动，远小于 1 是大量漏报。尺度坏了会把 Brier 技巧压成负值，即便排序是对的。",
+      "The further predicted/actual sits from 1, the more the problem is scaling rather than signal: far above 1 means it calls moves that never arrive, far below means it misses them. Bad scaling drives Brier skill negative even when the ranking is right."),
+    tx("只有在某个暴露条件下格子变了、全局没变时，别当成噪声：全局均值会掩盖只在窄区间起作用的因子 —— 但那也意味着它只对少数桶有用。",
+      "A reading that moves only inside the exposed condition while the headline does not is not noise: a global mean hides factors that act in a narrow range — but it also means it only helps on those buckets."),
+  ].map(line => `<li>${safeText(line)}</li>`).join("");
+  panel.innerHTML = `<div class="research-ablation-grid">${cards}</div><small>${cacheNote}${contextNote} · ${tx("判定阈值", "verdict bands")}：${tx("方向", "direction")} ±${(threshold * 100).toFixed(1)}pp · ${tx("波动水平", "volatility level")} ±${(volThreshold * 100).toFixed(1)}pp · ${tx("波动排序", "volatility ranking")} ±${volAucThreshold}（${tx("AUC 增量，无量纲", "AUC increment, dimensionless")}） · ${tx("指标基于互不重叠的独立样本子集。", "metrics computed on the non-overlapping subset.")}</small><details class="research-ablation-howto" open><summary>${tx("这个面板怎么读", "How to read this panel")}</summary><ol>${howto}</ol></details><ul class="research-ablation-method">${method}</ul>`;
+}
+// 参数与门槛面板：只读地把服务端的单一配置源摊开。它不写任何状态，也不参与任何计算。
+function formatTuningValue(value) {
+  if (Array.isArray(value)) return value.join(", ");
+  if (typeof value === "boolean") return value ? "true" : "false";
+  return String(value);
+}
+async function loadResearchTuning() {
+  const panel = document.getElementById("researchTuningResult");
+  if (!panel) return;
+  panel.innerHTML = `<small class="muted">${tx("读取中…", "Loading…")}</small>`;
+  try {
+    const response = await fetch("/api/research-tuning", { cache: "no-store" });
+    if (!response.ok) throw new Error(await describeHttpFailure(response));
+    renderResearchTuning(await response.json());
+  } catch (error) {
+    panel.innerHTML = `<small class="bear">${tx("读取失败", "Failed")}：${String((error && error.message) || error)}</small>`;
+  }
+}
+function renderResearchTuning(data) {
+  const panel = document.getElementById("researchTuningResult");
+  if (!panel) return;
+  const entries = Object.entries((data && data.effective) || {});
+  if (!entries.length) {
+    panel.innerHTML = `<small class="muted">${tx("未读到任何配置项", "No configuration returned")}</small>`;
+    return;
+  }
+  // 分组标题用中文短句，否则读者只能看到 theta / gates 这类内部代号。
+  const titles = {
+    theta: tx("震荡带", "Chop band"), analogue: tx("近邻池", "Analogue pool"),
+    fusion: tx("融合模型", "Fusion model"), calendarFeatures: tx("日历特征", "Calendar features"),
+    replay: tx("历史回放", "Replay"), horizons: tx("周期定义", "Horizons"),
+    blend: tx("实时融合", "Live blend"), gates: tx("升级门槛", "Promotion gates"),
+    economics: tx("成本模型", "Cost model"), ablation: tx("消融判定", "Ablation verdict"),
+    funding: tx("资金费率", "Funding rate"),
+  };
+  const overridden = new Set(((data && data.overrides) || []).map((item) => item.path));
+  const buckets = new Map();
+  for (const [path, value] of entries) {
+    const head = path.split(".")[0];
+    if (!buckets.has(head)) buckets.set(head, []);
+    buckets.get(head).push([path, value]);
+  }
+  const cards = [...buckets].map(([head, items]) => {
+    const rows = items.map(([path, value]) => {
+      const short = path.split(".").slice(1).join(".") || path;
+      const hit = overridden.has(path);
+      return `<span class="${hit ? "bull" : "muted"}">${short} <b>${formatTuningValue(value)}</b>${hit ? tx("（环境变量覆盖）", " (env override)") : ""}</span>`;
+    }).join("");
+    return `<article><b>${titles[head] || head}</b><small class="muted">${head}</small>${rows}</article>`;
+  }).join("");
+  const overrideNote = data.overrideCount
+    ? tx(`当前有 ${data.overrideCount} 项被环境变量覆盖，它们不再等于内置默认值。`, `${data.overrideCount} value(s) overridden by environment, no longer equal to the built-in defaults.`)
+    : tx("当前全部使用内置默认值。", "All values are the built-in defaults.");
+  const errorNote = data.error ? `<span class="bear">${tx("覆盖解析失败：", "Override parse failed: ")}${data.error}</span>` : "";
+  panel.innerHTML = `<div class="research-tuning-summary"><span>${tx("指纹", "Fingerprint")} <b>${data.fingerprint}</b></span><span>${tx("来源", "Source")} ${data.source}</span><span>${tx("配置项", "Leaves")} ${entries.length}</span><span class="${data.overrideCount ? "bull" : "muted"}">${overrideNote}</span>${errorNote}</div><div class="research-tuning-grid">${cards}</div>`;
+}
 async function loadResearchOutlook(force = false) {
   if (researchOutlookLoading) return;
   researchOutlookLoading = true;
   const card = ensureResearchOutlookCard();
   if (card && !card.innerHTML)
-    card.innerHTML = `<div class="research-outlook-head"><div><h2>${tx("BTC 多因子研究预测", "BTC multi-factor research outlook")}</h2><p>${tx("正在读取历史样本、公开新闻与市场结构…", "Reading history samples, public news, and market structure…")}</p></div></div>`;
+    card.innerHTML = `<div class="research-outlook-head"><div><h2>${tx(coinLabel() + " 多因子研究预测", coinLabel() + " multi-factor research outlook")}</h2><p>${tx("正在读取历史样本、公开新闻与市场结构…", "Reading history samples, public news, and market structure…")}</p></div></div>`;
   try {
     const response = await apiFetch(
         `/api/research-outlook${force ? "?refresh=1" : ""}`,
@@ -13665,7 +14512,7 @@ async function loadResearchOutlook(force = false) {
     renderResearchOutlook(data);
   } catch (error) {
     if (card)
-      card.innerHTML = `<div class="research-outlook-head"><div><h2>${tx("BTC 多因子研究预测", "BTC multi-factor research outlook")}</h2><p class="bear">${tx("研究数据暂不可用：", "Research data unavailable: ")}${safeText(error.message)}</p></div><button type="button" id="refreshResearchOutlook">${tx("重试", "Retry")}</button></div>`;
+      card.innerHTML = `<div class="research-outlook-head"><div><h2>${tx(coinLabel() + " 多因子研究预测", coinLabel() + " multi-factor research outlook")}</h2><p class="bear">${tx("研究数据暂不可用：", "Research data unavailable: ")}${safeText(error.message)}</p></div><button type="button" id="refreshResearchOutlook">${tx("重试", "Retry")}</button></div>`;
     card
       ?.querySelector("#refreshResearchOutlook")
       ?.addEventListener("click", () => loadResearchOutlook(true));
@@ -13673,7 +14520,9 @@ async function loadResearchOutlook(force = false) {
     researchOutlookLoading = false;
   }
 }
+let abExperimentPayload = null;
 function renderAbExperimentRegistry(payload) {
+  abExperimentPayload = payload || abExperimentPayload;
   const holder = $("abExperimentRegistry");
   if (!holder) return;
   const metric = (value) => (Number.isFinite(value) ? value.toFixed(3) : "--"),
@@ -13788,15 +14637,16 @@ function installDataCadenceLabels() {
         ),
     ],
     [
+      /* 共振卡不标数据源（用户要求）：这里只说节奏，避免与周期标签里的来源重复。 */
       ".optional",
       () =>
         tx(
-          `${selectedSource()} 多周期 K 线 · 每 10 秒`,
-          `${selectedSource()} multi-horizon candles · every 10s`,
+          "多周期 K 线 · 打开页面自动计算 · 15m 约每分钟刷新 · 可手动重算",
+          "multi-horizon candles · computed on load · 15m refreshed about every minute · manual recalc available",
         ),
     ],
     [
-      ".correlation-card",
+      ".fed-corr-panel",
       () =>
         tx(
           "BTC + Yahoo Finance（SPY / QQQ）· 缓存 5 分钟 · 手动更新",
@@ -13893,6 +14743,9 @@ function installDataCadenceLabels() {
   let queued = false;
   const refresh = () => {
     queued = false;
+    /* 卡片整块重绘会连 help-dot 一起重建，新按钮上没有 cadenceBaseTip；所以先归位卡片说明，
+       再让频率安装器把「数据源与更新频率」追加到说明后面（顺序反了会把说明顶掉）。 */
+    syncCardHelpTips();
     installDataCadenceLabels();
   };
   new MutationObserver(() => {
@@ -13987,195 +14840,6 @@ $("appVersion")?.addEventListener("click", () => {
     log.style.right = "auto";
   });
 });
-
-/* Local-only personal notifications. Each browser keeps its own SendKey and
-   rules in localStorage; the website server never receives either value. */
-(() => {
-  const main = document.querySelector("main");
-  if (!main) return;
-  const sendKeyStorage = "btc_local_serverchan_sendkey_v1",
-    rulesStorage = "btc_local_notification_rules_v1";
-  localStorage.removeItem(sendKeyStorage);
-  let lastPrice = null,
-    rules = [];
-  try {
-    const saved = JSON.parse(localStorage.getItem(rulesStorage) || "[]");
-    if (Array.isArray(saved))
-      rules = saved
-        .filter(
-          (row) =>
-            row && typeof row.id === "string" && Number(row.targetPrice) > 0,
-        )
-        .slice(0, 30);
-  } catch {}
-  const saveRules = () =>
-    localStorage.setItem(rulesStorage, JSON.stringify(rules));
-  const card = document.createElement("section");
-  card.id = "wechatAlertCard";
-  card.className = "card wechat-alert-card";
-  card.innerHTML = `<div class="forecast-head"><div><h2>${tx("消息推送", "Message alerts")}</h2><p>${tx("SendKey 与规则仅保存在当前浏览器；本站服务器不会接收或保存。页面需保持打开才能监测并推送。", "The SendKey and rules stay only in this browser; this server never receives or stores them. Keep this page open for monitoring and delivery.")}</p></div><span id="wechatAlertState" class="badge flat"></span></div><form id="wechatKeyForm" class="wechat-key-form"><label>${tx("Server酱 SendKey", "ServerChan SendKey")}<input name="sendKey" type="password" autocomplete="off" placeholder="SCT…"></label><a href="https://sct.ftqq.com/sendkey" target="_blank" rel="noopener">${tx("获取 SendKey", "Get SendKey")}</a><button type="submit">${tx("仅保存到本机", "Save locally only")}</button><button type="button" id="testLocalSendKey">${tx("测试推送", "Test push")}</button><button type="button" id="clearLocalSendKey" class="danger">${tx("清除本机 Key", "Clear local Key")}</button></form><form id="wechatAlertForm" class="wechat-alert-form"><label>${tx("触发类型", "Trigger")}<select name="kind"><option value="price_above">${tx("上涨到指定价", "Rises to target")}</option><option value="price_below">${tx("下跌到指定价", "Falls to target")}</option><option value="long_liquidation">${tx("多头爆仓价", "Long liquidation")}</option><option value="short_liquidation">${tx("空头爆仓价", "Short liquidation")}</option></select></label><label>${tx("触发价格（USDT）", "Target price (USDT)")}<input name="targetPrice" type="number" inputmode="decimal" min="0" step="0.01" required placeholder="80000"></label><label>${tx("触发冷却（分钟）", "Cooldown (minutes)")}<input name="cooldownMinutes" type="number" inputmode="numeric" min="0" step="1" value="0" required><small>${tx("0 = 不限制", "0 = no limit")}</small></label><button type="submit">${tx("添加推送规则", "Add alert rule")}</button></form><div id="wechatAlertDetail" class="wechat-alert-detail"></div>`;
-  const footer = main.querySelector("footer");
-  if (footer) main.insertBefore(card, footer);
-  else main.append(card);
-  const form = $("wechatAlertForm"),
-    keyForm = $("wechatKeyForm"),
-    stateEl = $("wechatAlertState"),
-    detail = $("wechatAlertDetail"),
-    keyInput = keyForm.elements.sendKey;
-  keyInput.value = sessionStorage.getItem(sendKeyStorage) || "";
-  const kindName = (kind) =>
-    ({
-      price_above: tx("上涨到指定价", "Rises to target"),
-      price_below: tx("下跌到指定价", "Falls to target"),
-      long_liquidation: tx("多头爆仓价", "Long liquidation"),
-      short_liquidation: tx("空头爆仓价", "Short liquidation"),
-    })[kind] || kind;
-  const render = () => {
-    const sendKey = (sessionStorage.getItem(sendKeyStorage) || "").trim(),
-      ready = /^SCT/i.test(sendKey);
-    stateEl.className = `badge ${ready ? "bull" : "flat"}`;
-    stateEl.textContent = ready
-      ? tx("本机推送已就绪", "Local push ready")
-      : tx("未填本机 Key", "No local Key");
-    detail.innerHTML = `<p>${tx("当前浏览器独立保存；多用户之间不会共享 Key 或规则。冷却时间由每条规则自行设定，0 表示不限制。", "This browser stores independently; users never share Keys or rules. Each rule sets its own cooldown; 0 means no limit.")}</p><div class="notification-rule-list">${rules.length ? rules.map((row) => `<article><span><b>BTC/USDT ${tx("价格提醒", "price alert")}</b><small>${kindName(row.kind)} · $${Number(row.targetPrice).toLocaleString("en-US")} · ${tx("冷却", "Cooldown")} ${Number(row.cooldownMinutes) || 0} ${tx("分钟", "min")}</small></span><em class="bull">${tx("本机启用", "Local")}</em><button type="button" data-delete-notification="${row.id}">${tx("删除", "Delete")}</button></article>`).join("") : `<small>${tx("尚未添加规则。", "No rules yet.")}</small>`}</div>`;
-    detail.querySelectorAll("[data-delete-notification]").forEach((button) =>
-      button.addEventListener("click", () => {
-        rules = rules.filter(
-          (row) => row.id !== button.dataset.deleteNotification,
-        );
-        saveRules();
-        render();
-      }),
-    );
-  };
-  const send = async (rule, price, { test = false } = {}) => {
-    const key = (sessionStorage.getItem(sendKeyStorage) || "").trim();
-    if (!/^SCT/i.test(key))
-      throw new Error(
-        tx("请先保存有效的本机 SendKey。", "Save a valid local SendKey first."),
-      );
-    const livePrice = `$${Number(price).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
-      title = test
-        ? `BTC/USDT ${tx("测试推送", "test push")} ${livePrice}`
-        : `BTC/USDT ${tx("价格提醒", "price alert")} · ${livePrice}`,
-      desp = `${test ? tx("这是一条测试消息。", "This is a test message.") : `${kindName(rule.kind)} $${Number(rule.targetPrice).toLocaleString("en-US")}`}\n\n${tx("当前 OKX 永续价格：", "Current OKX perpetual price: ")}${livePrice}\n${tx("触发时间：", "Time: ")}${new Date().toLocaleString("zh-CN", { hour12: false })}`;
-    const body = new URLSearchParams({ title, desp });
-    try {
-      await fetch(`https://sctapi.ftqq.com/${encodeURIComponent(key)}.send`, {
-        method: "POST",
-        mode: "no-cors",
-        body,
-        keepalive: true,
-      });
-    } catch {
-      navigator.sendBeacon?.(
-        `https://sctapi.ftqq.com/${encodeURIComponent(key)}.send`,
-        body,
-      );
-    }
-  };
-  const check = () => {
-    const price = state?.ticker?.last;
-    if (!Number.isFinite(price)) {
-      return;
-    }
-    if (lastPrice === null) {
-      lastPrice = price;
-      return;
-    }
-    const now = Date.now();
-    for (const rule of rules) {
-      const up =
-          rule.kind === "price_above" || rule.kind === "short_liquidation",
-        crossed = up
-          ? lastPrice < rule.targetPrice && price >= rule.targetPrice
-          : lastPrice > rule.targetPrice && price <= rule.targetPrice,
-        ruleCooldown = Math.max(0, Number(rule.cooldownMinutes) || 0) * 60_000;
-      if (
-        crossed &&
-        (!ruleCooldown ||
-          !rule.lastTriggeredAt ||
-          now - rule.lastTriggeredAt >= ruleCooldown)
-      ) {
-        rule.lastTriggeredAt = now;
-        saveRules();
-        send(rule, price).catch(() => {});
-      }
-    }
-    lastPrice = price;
-  };
-  keyForm.addEventListener("submit", (event) => {
-    event.preventDefault();
-    const key = keyInput.value.trim();
-    if (key && !/^SCT/i.test(key)) {
-      alert(
-        tx(
-          "请输入以 SCT 开头的 Server酱 Turbo SendKey。",
-          "Enter a ServerChan Turbo SendKey beginning with SCT.",
-        ),
-      );
-      return;
-    }
-    if (key) sessionStorage.setItem(sendKeyStorage, key);
-    else sessionStorage.removeItem(sendKeyStorage);
-    render();
-  });
-  $("clearLocalSendKey").addEventListener("click", () => {
-    sessionStorage.removeItem(sendKeyStorage);
-    keyInput.value = "";
-    render();
-  });
-  $("testLocalSendKey").addEventListener("click", async () => {
-    const price = state?.ticker?.last;
-    if (!Number.isFinite(price)) {
-      alert(
-        tx(
-          "实时价格尚未加载，请稍后重试。",
-          "Live price is not loaded yet. Try again shortly.",
-        ),
-      );
-      return;
-    }
-    try {
-      await send(null, price, { test: true });
-      alert(
-        tx(
-          "测试推送请求已发送，请查看微信。浏览器无法读取跨站送达回执。",
-          "Test push request sent. Check WeChat; the browser cannot read cross-site delivery receipts.",
-        ),
-      );
-    } catch (error) {
-      alert(error.message);
-    }
-  });
-  form.addEventListener("submit", (event) => {
-    event.preventDefault();
-    const targetPrice = Number(form.elements.targetPrice.value),
-      cooldownMinutes = Math.max(
-        0,
-        Number(form.elements.cooldownMinutes.value) || 0,
-      );
-    if (
-      !Number.isFinite(targetPrice) ||
-      targetPrice <= 0 ||
-      !Number.isFinite(cooldownMinutes)
-    ) {
-      return;
-    }
-    rules.push({
-      id: crypto.randomUUID(),
-      kind: form.elements.kind.value,
-      targetPrice,
-      cooldownMinutes,
-      lastTriggeredAt: null,
-    });
-    saveRules();
-    form.reset();
-    form.elements.cooldownMinutes.value = "0";
-    render();
-  });
-  return; // Replaced below by the modal-style local alert composer.
-})();
 
 // Install after every historical compatibility wrapper so the validity range
 // updates with both candle refreshes and one-second live quotes.
@@ -14437,7 +15101,7 @@ renderTicker = function () {
   const market =
     {
       okx: tx("OKX USDT 永续", "OKX USDT perpetual"),
-      coinbase: tx("Coinbase BTC-PERP 永续", "Coinbase BTC-PERP perpetual"),
+      coinbase: tx("Coinbase " + coinMetaOf().coinbase + " 永续", "Coinbase " + coinMetaOf().coinbase + " perpetual"),
       binance: tx("Binance USDT-M 永续", "Binance USDT-M perpetual"),
       gate: tx("Gate USDT 永续", "Gate USDT perpetual"),
     }[source] || tx("USDT 永续", "USDT perpetual");
@@ -14480,7 +15144,6 @@ function renderChart({ immediate = false } = {}) {
   /* Keep pan button state aligned with the scheduled range. */
   updatePanControls();
 }
-
 
 /* Keep one named boundary for every decision-layer refresh during migration. */
 const renderDecisionPanelsLegacy = renderAnalysis;
@@ -14535,7 +15198,7 @@ function syncRiskInputs(source) {
       probabilityForm.elements[field].value = from[field];
   }
   /* Persist both legacy keys until their consumers are removed in the next migration step. */
-  localStorage.setItem("btc_position_state", JSON.stringify(positionState));
+  persistPositionState();
   /* Persist the probability card compatibility state. */
   localStorage.setItem("btc_liq_probability", JSON.stringify(liqProbState));
   /* Recalculate the position summary with the shared inputs. */
@@ -14657,15 +15320,17 @@ positionCalc = function () {
    Shortcut layer only: it wires an action bar, swaps the renderer and widens the historical
    windows without rewriting the legacy card markup. */
 (function () {
-  /* 做多 / 做空持仓价的本地记录（用户每次确认持仓或改开仓均价时更新）。 */
-  const ENTRY_BOOK_KEY = "btc_position_entry_book";
+  /* 做多 / 做空持仓价的本地记录（用户每次确认持仓或改开仓均价时更新）。
+     多币种（v2.12.5）：按币种独立存储，BTC 沿用旧键。 */
+  const entryBookKey = () =>
+    "btc_position_entry_book" + coinStorageSuffix();
   /* 日线样本少于这个根数时不展示长周期窗口，避免用十几个样本凑出一个假概率。 */
   const MIN_DAILY_SAMPLES = 200;
   const MIRRORED_FIELDS = ["exchange", "side", "amount", "leverage", "entry"];
 
   function readEntryBook() {
     try {
-      const raw = JSON.parse(localStorage.getItem(ENTRY_BOOK_KEY) || "{}");
+      const raw = JSON.parse(localStorage.getItem(entryBookKey()) || "{}");
       return {
         long: Number(raw.long) > 0 ? Number(raw.long) : null,
         short: Number(raw.short) > 0 ? Number(raw.short) : null,
@@ -14674,10 +15339,19 @@ positionCalc = function () {
       return { long: null, short: null };
     }
   }
-  let entryBook = readEntryBook();
+  let entryBook = readEntryBook(),
+    entryBookCoin = activeCoin();
+  /* 币种切换后第一次触到记录簿时，先换成当前币种自己的记录，
+     避免把 BTC 的历史持仓价抄进其它币种的键里。 */
+  function syncEntryBookCoin() {
+    if (entryBookCoin !== activeCoin()) {
+      entryBookCoin = activeCoin();
+      entryBook = readEntryBook();
+    }
+  }
   function saveEntryBook() {
     try {
-      localStorage.setItem(ENTRY_BOOK_KEY, JSON.stringify(entryBook));
+      localStorage.setItem(entryBookKey(), JSON.stringify(entryBook));
     } catch {
       /* 隐私模式下 localStorage 可能不可写，记录失败不影响本次会话使用。 */
     }
@@ -14923,6 +15597,7 @@ positionCalc = function () {
   }
   /* 顶部卡片改动后把舱段价格抄进本地记录，让历史记录始终跟得上。 */
   function refreshEntryBookFromSlots() {
+    syncEntryBookCoin();
     let changed = false;
     for (const slot of topSlots())
       if (slot.price && entryBook[slot.side] !== slot.price) {
@@ -14976,6 +15651,7 @@ positionCalc = function () {
 
   /* 记录用户自己的做多 / 做空持仓价。 */
   function recordPositionEntry() {
+    syncEntryBookCoin();
     const form = $("positionForm");
     if (!form || !form.elements.entry || !form.elements.side) return;
     const price = Number(form.elements.entry.value);
@@ -15190,7 +15866,7 @@ positionCalc = function () {
       )
         probabilityForm.elements[field].value = from[field];
     }
-    localStorage.setItem("btc_position_state", JSON.stringify(positionState));
+    persistPositionState();
     localStorage.setItem("btc_liq_probability", JSON.stringify(liqProbState));
     renderPosition();
     setDirty(true);
@@ -15221,10 +15897,14 @@ positionCalc = function () {
   }
   $("confirmPosition")?.addEventListener("click", recordPositionEntry);
 
-  /* 顶部两张持仓卡一改动就刷新浮层与本地记录，菜单里不再出现旧值。 */
+  /* 顶部两张持仓卡一改动就刷新浮层与本地记录，菜单里不再出现旧值；
+     同时重绘主图 —— 持仓价/开仓时间变了，买入/卖出气球与参考线要跟着走。 */
   window.addEventListener("btc:personal-entries-changed", () => {
     refreshEntryBookFromSlots();
     syncEntryMenu();
+    try {
+      renderChart();
+    } catch {}
   });
 
   function boot() {
@@ -15232,4 +15912,819 @@ positionCalc = function () {
   }
   setTimeout(boot, 0);
   setTimeout(boot, 600);
+})();
+
+/* ===== v2.10.69：图表悬浮缩略图 + 一键返回顶部 =========================
+   入口：图表工具栏「重置」旁的「缩略图」开关。
+   行为：开启后当 .chart-box 滚出视口时，屏幕右上出现置顶悬浮缩略图
+   （主图 + RSI 副图 canvas 实时快照，约 0.5s 刷新，标题栏带实时价格）；
+   标题栏拖动位置、右下角手柄或 − /＋ 按钮缩放、点击缩略图本体放大/还原；
+   图表滚回视野时自动隐藏避免遮挡；位置与尺寸记忆在本机。 */
+(() => {
+  const PREFS_KEY = "btc_chart_thumb_prefs_v1",
+    MIN_W = 220,
+    MIN_H = 150,
+    MAX_W = 920,
+    MAX_H = 640;
+
+  /* ---------- 一键返回顶部 ---------- */
+  const backToTop = document.createElement("button");
+  backToTop.type = "button";
+  backToTop.id = "backToTop";
+  backToTop.title = tx("返回顶部", "Back to top");
+  backToTop.setAttribute("aria-label", tx("返回顶部", "Back to top"));
+  backToTop.textContent = "↑";
+  backToTop.hidden = true;
+  backToTop.addEventListener(
+    "click",
+    (event) => {
+      event.stopPropagation();
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    },
+  );
+  document.body.append(backToTop);
+  const syncBackToTop = () => {
+    backToTop.hidden = window.scrollY < Math.max(320, window.innerHeight * 0.5);
+  };
+  window.addEventListener("scroll", syncBackToTop, { passive: true });
+  window.addEventListener("resize", syncBackToTop);
+  syncBackToTop();
+
+  /* ---------- 工具栏开关（从「重置」旁独立出来，单独一颗按钮） ---------- */
+  const zoomTools = document.querySelector(".zoom-tools");
+  if (!zoomTools) return;
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.id = "thumbToggle";
+  toggle.title = tx(
+    "图表悬浮缩略图：滚动离开图表后置顶显示",
+    "Floating chart thumbnail: pins to the screen once the chart scrolls away",
+  );
+  toggle.textContent = tx("悬浮缩略图", "Floating thumbnail");
+  const thumbTools = document.createElement("div");
+  thumbTools.className = "thumb-tools";
+  thumbTools.append(toggle);
+  /* 插在缩放组之后（而不是塞进缩放组内部）：窄屏下位置与改造前一致，
+     宽屏下由 CSS 的 order 把它排到最右，并与「重置」拉开一段小间距。 */
+  zoomTools.after(thumbTools);
+
+  /* ---------- 本机偏好 ---------- */
+  let prefs = { on: false, x: null, y: null, w: 300, h: 210 };
+  try {
+    const saved = JSON.parse(localStorage.getItem(PREFS_KEY) || "null");
+    if (saved && typeof saved === "object") prefs = { ...prefs, ...saved };
+  } catch {}
+  const savePrefs = () => {
+    try {
+      localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+    } catch {}
+  };
+
+  /* ---------- 悬浮缩略图骨架 ---------- */
+  const widget = document.createElement("aside");
+  widget.id = "chartThumb";
+  widget.hidden = true;
+  widget.innerHTML = `
+    <div class="ct-head">
+      <div class="ct-row">
+        <span class="ct-title">${tx("实时缩略图", "Live thumbnail")}</span>
+        <span class="ct-spacer"></span>
+        <button type="button" class="ct-btn" data-ct="smaller" title="${tx("缩小", "Smaller")}">−</button>
+        <button type="button" class="ct-btn" data-ct="bigger" title="${tx("放大", "Bigger")}">＋</button>
+        <button type="button" class="ct-btn" data-ct="close" title="${tx("关闭缩略图", "Close thumbnail")}">×</button>
+      </div>
+      <div class="ct-row">
+        <span class="ct-price-lab">${tx(coinPair() + " 最新价", coinPair() + " last price")}</span>
+        <span class="ct-price" id="chartThumbPrice">--</span>
+      </div>
+    </div>
+    <div class="ct-body">
+      <canvas id="chartThumbCanvas"></canvas>
+      <span class="ct-rz" title="${tx("拖拽调整大小", "Drag to resize")}"></span>
+    </div>`;
+  document.body.append(widget);
+
+  const head = widget.querySelector(".ct-head"),
+    bodyEl = widget.querySelector(".ct-body"),
+    canvas = widget.querySelector("#chartThumbCanvas"),
+    priceEl = widget.querySelector("#chartThumbPrice"),
+    rzHandle = widget.querySelector(".ct-rz"),
+    chartBox = document.querySelector(".chart-box");
+
+  let restoreW = Math.max(MIN_W, prefs.w),
+    restoreH = Math.max(MIN_H, prefs.h),
+    isExpanded = false,
+    chartVisible = true,
+    paintTimer = null,
+    priceTimer = null,
+    prevPriceText = null,
+    prevPriceNum = null;
+
+  const clampW = (w) => Math.max(MIN_W, Math.min(MAX_W, Math.round(w)));
+  const clampH = (h) => Math.max(MIN_H, Math.min(MAX_H, Math.round(h)));
+
+  function clampPosition() {
+    const maxX = Math.max(8, window.innerWidth - widget.offsetWidth - 8),
+      maxY = Math.max(8, window.innerHeight - 64);
+    prefs.x =
+      prefs.x == null ? maxX : Math.max(8, Math.min(prefs.x, maxX));
+    prefs.y = prefs.y == null ? 84 : Math.max(8, Math.min(prefs.y, maxY));
+    widget.style.left = `${prefs.x}px`;
+    widget.style.top = `${prefs.y}px`;
+  }
+
+  function applySize(w, h) {
+    prefs.w = clampW(Math.min(w, window.innerWidth - 32));
+    prefs.h = clampH(Math.min(h, window.innerHeight - 140));
+    widget.style.width = `${prefs.w}px`;
+    bodyEl.style.height = `${prefs.h}px`;
+    widget.classList.toggle("is-expanded", isExpanded);
+    clampPosition();
+    paint();
+  }
+
+  /* ---------- 主图 + RSI 副图实时快照 ---------- */
+  function paint() {
+    if (widget.hidden) return;
+    const src = document.getElementById("chart");
+    if (!src) return;
+    const sub = document.getElementById("chartRsi"),
+      dpr = window.devicePixelRatio || 1,
+      bw = Math.max(1, bodyEl.clientWidth),
+      bh = Math.max(1, bodyEl.clientHeight),
+      bwPx = Math.round(bw * dpr),
+      bhPx = Math.round(bh * dpr);
+    if (canvas.width !== bwPx || canvas.height !== bhPx) {
+      canvas.width = bwPx;
+      canvas.height = bhPx;
+    }
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const baseBg = getComputedStyle(document.body)
+      .getPropertyValue("--bg-base")
+      .trim();
+    ctx.fillStyle = baseBg || "#0d1117";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    const gap = Math.round(3 * dpr),
+      mainH = sub ? Math.round((canvas.height - gap) * 0.76) : canvas.height;
+    if (sub && canvas.height - mainH - gap > 4)
+      ctx.drawImage(
+        sub,
+        0,
+        mainH + gap,
+        canvas.width,
+        canvas.height - mainH - gap,
+      );
+    ctx.drawImage(src, 0, 0, canvas.width, mainH);
+    syncPrice();
+  }
+
+  /* ---------- 标题栏实时价格：逐位跳动 ---------- */
+  /* 只取 #price 的首个价格 token：该元素与涨跌幅等是同级节点，直接读父节点
+     会把整行富文本一起读进来。跳动语义与顶部 hero 大价格同款 ——
+     方向取自「本次价 vs 上次价」，涨=绿(#00d4aa) / 跌=红(#ff4d6a)，
+     复用同一套 .price-digit / .changed-up / .changed-down 样式；
+     区别是大价格从「首个变化位」一路跳到末尾，这里严格只跳真正变化的那几位
+     （按右对齐逐位比对，价格位数变化时多出的高位同样算变化）。 */
+  function syncPrice() {
+    if (widget.hidden) return;
+    const value =
+      (document.getElementById("price")?.textContent ?? "")
+        .trim()
+        .split(/\s+/)[0] || "";
+    if (!value || value === prevPriceText) return;
+    const num = Number(value.replace(/[^0-9.]/g, "")),
+      prev = prevPriceText,
+      shift = prev === null ? 0 : value.length - prev.length,
+      dir =
+        prev === null || !Number.isFinite(num) || !Number.isFinite(prevPriceNum)
+          ? ""
+          : num > prevPriceNum
+            ? "up"
+            : num < prevPriceNum
+              ? "down"
+              : "";
+    priceEl.innerHTML = [...value]
+      .map((ch, i) => {
+        const digit = /[0-9]/.test(ch);
+        /* 右对齐取上一串的同一位；逗号、小数点与货币符号自身不跳动。 */
+        const at = i - shift,
+          tick = digit && dir !== "" && (at < 0 || prev[at] !== ch);
+        return `<span class="${digit ? "price-digit" : ""}${
+          tick ? ` changed-${dir}` : ""
+        }">${ch}</span>`;
+      })
+      .join("");
+    prevPriceText = value;
+    prevPriceNum = Number.isFinite(num) ? num : prevPriceNum;
+  }
+
+  function startLoop() {
+    if (paintTimer == null) paintTimer = setInterval(paint, 500);
+    if (priceTimer == null) priceTimer = setInterval(syncPrice, 250);
+    paint();
+  }
+  function stopLoop() {
+    if (paintTimer != null) {
+      clearInterval(paintTimer);
+      paintTimer = null;
+    }
+    if (priceTimer != null) {
+      clearInterval(priceTimer);
+      priceTimer = null;
+    }
+    prevPriceText = null; // 重新出现时不要补做一次陈旧的跳动
+    prevPriceNum = null;
+  }
+
+  /* ---------- 显示 / 隐藏（图表在视野内时自动让位） ---------- */
+  function syncVisibility() {
+    const show = prefs.on && !chartVisible;
+    toggle.classList.toggle("is-active", prefs.on);
+    if (show) {
+      widget.hidden = false;
+      clampPosition();
+      applySize(prefs.w, prefs.h);
+      startLoop();
+    } else {
+      widget.hidden = true;
+      stopLoop();
+    }
+  }
+  if (chartBox)
+    new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries)
+          chartVisible = entry.intersectionRatio >= 0.2;
+        syncVisibility();
+      },
+      { threshold: [0, 0.2, 0.5] },
+    ).observe(chartBox);
+  else chartVisible = false;
+
+  /* ---------- 工具栏开关 ---------- */
+  toggle.addEventListener("click", (event) => {
+    event.stopPropagation();
+    prefs.on = !prefs.on;
+    savePrefs();
+    syncVisibility();
+  });
+
+  /* ---------- 标题栏：拖动 + 尺寸按钮 + 关闭 ---------- */
+  head.addEventListener("click", (event) => {
+    const op = event.target.closest("button")?.dataset.ct;
+    if (!op) return;
+    event.stopPropagation();
+    if (op === "close") {
+      prefs.on = false;
+      savePrefs();
+      syncVisibility();
+      return;
+    }
+    if (op === "smaller" || op === "bigger") {
+      isExpanded = false;
+      const step = op === "bigger" ? 90 : -90;
+      restoreW = clampW(prefs.w + step);
+      restoreH = clampH(prefs.h + Math.round(step * 0.7));
+      applySize(restoreW, restoreH);
+      savePrefs();
+    }
+  });
+  head.addEventListener("pointerdown", (event) => {
+    if (event.target.closest("button")) return;
+    event.stopPropagation();
+    const startX = event.clientX,
+      startY = event.clientY,
+      baseX = prefs.x,
+      baseY = prefs.y;
+    const onMove = (ev) => {
+      prefs.x = baseX + (ev.clientX - startX);
+      prefs.y = baseY + (ev.clientY - startY);
+      clampPosition();
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      savePrefs();
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp, { once: true });
+    event.preventDefault();
+  });
+
+  /* ---------- 点击缩略图本体：放大 / 还原 ---------- */
+  bodyEl.addEventListener("click", (event) => {
+    if (event.target.closest(".ct-rz")) return;
+    event.stopPropagation();
+    if (isExpanded) {
+      isExpanded = false;
+      applySize(restoreW, restoreH);
+    } else {
+      restoreW = prefs.w;
+      restoreH = prefs.h;
+      isExpanded = true;
+      applySize(
+        Math.min(760, Math.round(window.innerWidth * 0.62)),
+        Math.min(520, Math.round(window.innerHeight * 0.6)),
+      );
+    }
+    savePrefs();
+  });
+
+  /* ---------- 右下角手柄：自由缩放 ---------- */
+  rzHandle.addEventListener("pointerdown", (event) => {
+    event.stopPropagation();
+    event.preventDefault();
+    const startX = event.clientX,
+      startY = event.clientY,
+      baseW = prefs.w,
+      baseH = prefs.h;
+    const onMove = (ev) => {
+      isExpanded = false;
+      restoreW = clampW(baseW + (ev.clientX - startX));
+      restoreH = clampH(baseH + (ev.clientY - startY));
+      applySize(restoreW, restoreH);
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      savePrefs();
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp, { once: true });
+  });
+
+  /* ---------- 视口变化时回收位置与尺寸 ---------- */
+  window.addEventListener("resize", () => {
+    if (widget.hidden) return;
+    applySize(prefs.w, prefs.h);
+  });
+
+  syncVisibility();
+})();
+
+/* ===== v2.11.0 补充：语言切换时整卡重渲宏观两张卡 =====================
+   「宏观事件中枢」与「宏观环境与跨市场联动」都按当前语言整卡渲染
+   （数据刷新时重建，不随 applyLanguage 逐节点替换）。语言切换那一刻
+   若只等下次数据刷新，标题 / 范围按钮 / 副标题会停留在上一语言。 */
+(() => {
+  const applyLanguageBeforeMacroMerger = applyLanguage;
+  applyLanguage = function () {
+    applyLanguageBeforeMacroMerger();
+    try {
+      if ($("investmentCalendarCard") && investmentCalendarData) {
+        renderInvestmentCalendar(investmentCalendarData);
+      }
+      if ($("fedMonitorCard") && macroCalendarData) {
+        renderFedMonitor(macroCalendarData);
+        paintCorrelationPanel();
+      }
+    } catch {
+      /* 语言切换不应因宏观卡重渲失败而中断。 */
+    }
+  };
+})();
+
+/* ===== v2.11.9：语言切换时整卡重渲研究区两张卡 =====================
+   「BTC 多因子研究预测」与「A/B 实验中心」同样按当前语言整卡渲染
+   （数据刷新时重建，不随 applyLanguage 逐节点替换）。在此之前，语言
+   切换那一刻若只等下一次数据刷新，标题、副标题、按钮与实验注册表文案
+   会停留在上一语言（最长约 15 分钟）。这里用缓存的数据就地重渲；
+   数据尚未到达时跳过，交给正常的首次渲染。 */
+(() => {
+  const applyLanguageBeforeResearchLang = applyLanguage;
+  applyLanguage = function () {
+    applyLanguageBeforeResearchLang();
+    try {
+      if ($("researchOutlookCard") && researchOutlookData) {
+        renderResearchOutlook(researchOutlookData);
+      }
+      if ($("abEvaluationCard") && abExperimentPayload) {
+        renderAbExperimentRegistry(abExperimentPayload);
+      }
+    } catch {
+      /* 语言切换不应因研究区重渲失败而中断。 */
+    }
+  };
+})();
+
+/* ===== v2.11.10 / v2.11.13：智能顶部栏 ==============================
+   目标：让顶栏别长期占着首屏空间 —— 不管是滚动还是静置，都会自己让位。
+   做法：栏体改为 fixed 定位（首屏由 .header-slot 撑住原始高度，布局
+   零位移），收起时整条上滑出视口并放弃点击；唤回通道有四条：
+   ① 向下滚动到阈值后收起；② 向上滚动到阈值后唤回；③ 鼠标进入视口
+   顶部热区；④ 键盘焦点进入栏内。
+   静置收起有两档：离开顶部时唤回后静置 4s 收起；**停在首页顶部时
+   无任何交互（含鼠标不动）静置 5s 也收起**，并把占位块一起收掉、
+   让内容整体上提；鼠标再回到顶部热区即唤回。
+   鼠标停在栏上、焦点在栏内、栏内浮层打开、栏内刚点过时不收起。
+
+   Smart top bar: stows on scroll-down, on idle at the top of the page,
+   and shortly after being recalled; it returns on scroll-up, the top
+   hover zone, or keyboard focus. While stowed at the very top the
+   placeholder collapses too, so the content really moves up. */
+(() => {
+  const header = document.querySelector("main > header"),
+    main = document.querySelector("main");
+  if (!header || !main || header.classList.contains("is-smart-bar")) return;
+
+  const STOW_AFTER_MS = 4000, // 离开顶部时：唤回后静置多久再次收起
+    TOP_STOW_AFTER_MS = 5000, // 停在页面顶部时：无任何交互静置多久收起
+    DOWN_STEP = 56, // 向下滚动累计多少像素后收起
+    UP_STEP = 24, // 向上滚动累计多少像素后唤回
+    TOP_ZONE = 36, // 鼠标进入视口顶部多少像素内即唤回
+    POPUP_RETRY_MS = 2500, // 被浮层拦住时的重试间隔
+    TOP_RESET = 24; // 进入这个区间算「在页面顶部」
+
+  // 栏体离流后，原本由它的 margin-bottom 提供的间距要由占位块补齐。
+  // 实测值会被后续样式块覆盖（当前是 18px，而不是基础块里的 12px），
+  // 所以这里实测一次而不是写死，避免首屏多出或少掉一段间距。
+  let gapPx = parseFloat(getComputedStyle(header).marginBottom) || 0;
+
+  // 占位块：栏体 fixed 后由它保留首屏空间，高度跟随栏体自适应。
+  const slot = document.createElement("div");
+  slot.className = "header-slot";
+  slot.setAttribute("aria-hidden", "true");
+  header.after(slot);
+  header.classList.add("is-smart-bar");
+
+  let slotFull = 0, // 占位块的完整高度（栏高 + 间距）
+    topCollapsed = false, // 当前是否「在顶部把占位收掉」的状态
+    lastY = window.scrollY,
+    acc = 0,
+    hovered = false,
+    graceUntil = 0,
+    idleTimer = 0,
+    lastBump = 0,
+    frame = 0;
+
+  // 栏内控件弹出的浮层一旦打开，收起会把它一起带走 —— 此时不收起。
+  const popupOpen = () =>
+    !!document.querySelector(
+      '#versionChangelog:not([hidden]),#apiCenterModal:not([hidden]),#accountServiceCard:not([hidden]),#localAlertModal:not([hidden]),#pushSettingsModal:not([hidden]),#voiceSettingsModal:not([hidden]),.connectivity-toggle[aria-expanded="true"]',
+    );
+
+  const canStow = () =>
+    !hovered &&
+    !popupOpen() &&
+    !header.contains(document.activeElement) &&
+    Date.now() > graceUntil;
+
+  // 栏体固定后不再由 main 的盒模型定位：宽度与左边距实时跟随内容区。
+  const syncLayout = () => {
+    const style = getComputedStyle(main),
+      rect = main.getBoundingClientRect(),
+      padLeft = parseFloat(style.paddingLeft) || 0,
+      padRight = parseFloat(style.paddingRight) || 0;
+    document.documentElement.style.setProperty(
+      "--smart-bar-top",
+      style.paddingTop || "20px",
+    );
+    header.style.left = `${Math.round(rect.left + padLeft)}px`;
+    header.style.width = `${Math.max(
+      0,
+      Math.round(main.clientWidth - padLeft - padRight),
+    )}px`;
+    slotFull = header.offsetHeight + gapPx;
+    applySlotHeight();
+  };
+
+  // 占位块高度：只有在「页面顶部 + 已收起」时才收成 0，让内容整体上提；
+  // 一旦离开顶部就补回原高（配套滚动补偿，见 onScroll），
+  // 这样下滑途中唤回栏体不会把下面的内容再顶一次。
+  const applySlotHeight = () => {
+    const collapse =
+      header.classList.contains("is-stowed") && window.scrollY <= TOP_RESET;
+    topCollapsed = collapse;
+    slot.style.height = `${collapse ? 0 : slotFull}px`;
+  };
+
+  // 媒体查询会改栏体的 margin-bottom，窗口尺寸变化后重新实测一次。
+  // 整个实测在同一帧内完成，不会产生可见跳动。
+  const refreshGap = () => {
+    const left = header.style.left,
+      width = header.style.width;
+    header.classList.remove("is-smart-bar");
+    gapPx = parseFloat(getComputedStyle(header).marginBottom) || 0;
+    header.classList.add("is-smart-bar");
+    header.style.left = left;
+    header.style.width = width;
+  };
+
+  const stow = () => {
+    clearTimeout(idleTimer);
+    idleTimer = 0;
+    header.classList.add("is-stowed");
+    applySlotHeight();
+  };
+
+  // 停在页面顶部时用更长的静置时长（用户明确要 5s），
+  // 离开顶部后沿用唤回续命的 4s。
+  const stowDelay = () =>
+    window.scrollY <= TOP_RESET ? TOP_STOW_AFTER_MS : STOW_AFTER_MS;
+
+  const scheduleStow = () => {
+    clearTimeout(idleTimer);
+    const tick = () => {
+      if (canStow()) {
+        idleTimer = 0;
+        stow();
+        return;
+      }
+      // 只有「浮层开着」这一种拦阻会自己消失且不产生任何事件
+      // （例如面板被脚本收起），所以这种情况下隔一会重试；
+      // 鼠标悬停 / 焦点在栏内都会由对应事件重新计时，不在这里轮询。
+      if (popupOpen()) idleTimer = setTimeout(tick, POPUP_RETRY_MS);
+      else idleTimer = 0;
+    };
+    idleTimer = setTimeout(tick, stowDelay());
+  };
+
+  // 任何「人还在动」的信号都重新计时：鼠标移动、滚轮、按键、点击、触摸。
+  // 已收起时不必计时（收起态没有待办），等唤回时再从头开始。
+  const bumpIdle = () => {
+    if (header.classList.contains("is-stowed")) return;
+    const now = Date.now();
+    if (now - lastBump < 250) return; // mousemove 很密，节流一下
+    lastBump = now;
+    scheduleStow();
+  };
+
+  const reveal = () => {
+    acc = 0;
+    if (header.classList.contains("is-stowed"))
+      header.classList.remove("is-stowed");
+    applySlotHeight();
+    scheduleStow();
+  };
+
+  const onScroll = () => {
+    if (frame) return;
+    frame = requestAnimationFrame(() => {
+      frame = 0;
+      const y = window.scrollY,
+        dy = y - lastY;
+
+      // 顶部收起态下开始下滑：先把占位块补回原高，再等量补偿滚动位置。
+      // 两步相抵后画面完全不动，只是把文档高度还原成常规状态，
+      // 避免「下滑途中唤回栏体」时把下面的内容再顶一次。
+      if (topCollapsed && y > TOP_RESET) {
+        expandSlot();
+        lastY = window.scrollY;
+        acc = 0;
+        header.classList.toggle("is-detached", true);
+        return;
+      }
+
+      lastY = y;
+      header.classList.toggle("is-detached", y > TOP_RESET);
+      if (y <= TOP_RESET) {
+        acc = 0;
+        reveal();
+        return;
+      }
+      // 只累加同一方向的距离：来回小幅抖动不会误触发。
+      acc = dy > 0 ? Math.max(0, acc + dy) : Math.min(0, acc + dy);
+      if (acc >= DOWN_STEP) {
+        acc = 0;
+        if (canStow()) stow();
+      } else if (acc <= -UP_STEP) {
+        acc = 0;
+        reveal();
+      }
+    });
+  };
+
+  // 把顶部收掉的占位补回，并同步补偿滚动位置（视觉零跳动）。
+  // 两个坑：
+  // ① 浏览器自己也有一套「滚动锚定」（content 上方尺寸变化时自动调
+  //    scrollTop 保持画面稳定），会和这里的补偿叠加成跳两次 —— 所以
+  //    改动期间显式关掉，下一帧恢复。
+  // ② 这一步必须瞬时生效，不能走 .header-slot 的高度过渡：过渡会让
+  //    占位在后面几帧里慢慢长高，而我们一次就把 scrollTop 补到位，
+  //    两者错位会看到内容先上一截再慢慢退回来。
+  const expandSlot = () => {
+    if (!topCollapsed) return;
+    topCollapsed = false;
+    const root = document.documentElement,
+      wasAnimated = slot.classList.contains("is-animated"),
+      prevAnchor = root.style.overflowAnchor;
+    root.style.overflowAnchor = "none";
+    slot.classList.remove("is-animated");
+    slot.style.height = `${slotFull}px`;
+    if (slotFull > 0) window.scrollTo(0, window.scrollY + slotFull);
+    requestAnimationFrame(() => {
+      root.style.overflowAnchor = prevAnchor;
+      if (wasAnimated) slot.classList.add("is-animated");
+    });
+  };
+
+  // 停在顶部边缘不再往复触发：只在已收起时才唤回。
+  // 顶部同样生效 —— 首页静置收起后，鼠标回到顶部热区即唤回。
+  const reviveAtTop = (event) => {
+    if (!header.classList.contains("is-stowed")) return;
+    if (event.clientY > TOP_ZONE) return;
+    reveal();
+  };
+
+  window.addEventListener("scroll", onScroll, { passive: true });
+  window.addEventListener(
+    "resize",
+    () => {
+      refreshGap();
+      syncLayout();
+    },
+    { passive: true },
+  );
+  document.addEventListener("mousemove", reviveAtTop, { passive: true });
+  document.addEventListener("pointerdown", reviveAtTop, { passive: true });
+  for (const type of ["mousemove", "wheel", "pointerdown", "keydown", "touchstart"])
+    document.addEventListener(type, bumpIdle, { passive: true });
+  header.addEventListener("pointerenter", () => {
+    hovered = true;
+    reveal();
+  });
+  header.addEventListener("pointerleave", () => {
+    hovered = false;
+    scheduleStow();
+  });
+  // 栏内任意一点击都可能弹出浮层，给一段免打扰窗口再考虑收起。
+  header.addEventListener("pointerdown", () => {
+    graceUntil = Date.now() + 2500;
+    reveal();
+  });
+  document.addEventListener("focusin", (event) => {
+    if (!header.contains(event.target)) return;
+    graceUntil = Date.now() + 4000;
+    reveal();
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) onScroll();
+  });
+
+  // 字体加载完成、窗口缩放、栏内文字换行都会改变栏高，需重新对位。
+  if (window.ResizeObserver) new ResizeObserver(syncLayout).observe(header);
+  window.addEventListener("load", syncLayout, { once: true });
+  if (document.fonts && document.fonts.ready)
+    document.fonts.ready.then(syncLayout).catch(() => {});
+
+  syncLayout();
+  header.classList.toggle("is-detached", window.scrollY > TOP_RESET);
+  // 占位块的高度过渡只在首帧之后启用，否则首次 syncLayout 会把
+  // 0 → 栏高 的赋值当成动画，开屏就看见内容跳一下。
+  requestAnimationFrame(() => slot.classList.add("is-animated"));
+  scheduleStow(); // 开屏即计时：停在首页不动 → 5s 后自动让位
+})();
+
+/* ══ 多币种：模式开关 + 币种切换器 / Coin mode toggle & switcher ═════════════
+ * 挂在这里（文件末尾）是刻意的：上方的面板渲染函数此时都已就绪，切换币种后
+ * 才能安全地逐个重拉。整段不改动比特币模式下的任何既有行为 —— 比特币模式下
+ * 开关只显示「₿ 比特币」，切换器隐藏，activeCoin() 恒为 BTC。
+ */
+(() => {
+  const header = document.querySelector("main>header .controls");
+  if (!header) return;
+
+  // ── 1. 顶部分段模式开关（位于账号按钮左侧）────────────────────────────────
+  const modeBtn = document.createElement("div");
+  modeBtn.id = "coinModeToggle";
+  modeBtn.className = "coin-mode-segment";
+  modeBtn.setAttribute("role", "group");
+  modeBtn.setAttribute("aria-label", tx("模式切换", "Mode switch"));
+  modeBtn.innerHTML =
+    '<button type="button" data-mode="bitcoin" aria-pressed="false">' + tx("₿ 比特币", "₿ Bitcoin") + '</button>' +
+    '<button type="button" data-mode="multi" aria-pressed="false">' + tx("多币种", "Multi-coin") + '</button>';
+  modeBtn.addEventListener("click", (event) => {
+    // 顶栏有全局收起监听，不阻断会让刚展开的浮层立刻关掉。
+    event.stopPropagation();
+    const chip = event.target.closest && event.target.closest("[data-mode]");
+    if (!chip) return;
+    setCoinMode(chip.dataset.mode);
+  });
+
+  // 账号按钮由 cloud-alerts.js 稍后插入，顺序可能被改写；用观察器兜住位置。
+  const placeModeButton = () => {
+    const account = $("accountLoginToggle");
+    if (account) {
+      if (account.previousElementSibling !== modeBtn) header.insertBefore(modeBtn, account);
+    } else if (header.firstElementChild !== modeBtn) {
+      header.insertBefore(modeBtn, header.firstElementChild);
+    }
+  };
+  placeModeButton();
+  if (window.MutationObserver) new MutationObserver(placeModeButton).observe(header, { childList: true });
+
+  // ── 2. 币种切换器（实时价格上方，仅多币种模式可见）──────────────────────
+  const hero = document.querySelector(".hero");
+  const switcher = document.createElement("div");
+  switcher.id = "coinSwitcher";
+  switcher.className = "coin-switcher";
+  switcher.hidden = true;
+  switcher.innerHTML = COIN_KEYS.map(
+    (key) =>
+      '<button type="button" class="coin-chip" data-coin="' + key + '"><span class="coin-chip-mark">' +
+      COINS[key].label + '</span><span class="coin-chip-name">' + COINS[key].name.zh + '</span></button>'
+  ).join("");
+  switcher.addEventListener("click", (event) => {
+    const chip = event.target.closest && event.target.closest("[data-coin]");
+    if (!chip) return;
+    event.stopPropagation();
+    setActiveCoin(chip.dataset.coin);
+  });
+  if (hero && hero.parentNode) hero.parentNode.insertBefore(switcher, hero);
+  else { const main = document.querySelector("main"); if (main) main.append(switcher); }
+
+  // ── 3. 渲染 ─────────────────────────────────────────────────────────────
+  const isEn = () => (localStorage.getItem("btc_lang") || "zh") === "en";
+  function paintModeButton() {
+    const multi = isMultiCoinMode();
+    const activeMode = multi ? "multi" : "bitcoin";
+    modeBtn.title = multi
+      ? "当前：多币种模式（可切换 BTC / ETH / ZEC / BNB）—— 点击左侧按钮回到比特币模式"
+      : "当前：比特币模式 —— 点击右侧按钮切换到多币种模式";
+    modeBtn.querySelectorAll("[data-mode]").forEach((btn) => {
+      const on = btn.dataset.mode === activeMode;
+      btn.classList.toggle("is-active", on);
+      btn.setAttribute("aria-pressed", String(on));
+    });
+  }
+  function paintSwitcher() {
+    switcher.hidden = !isMultiCoinMode();
+    switcher.querySelectorAll("[data-coin]").forEach((chip) => {
+      const on = chip.dataset.coin === activeCoin();
+      chip.classList.toggle("is-active", on);
+      chip.setAttribute("aria-pressed", String(on));
+      const nameEl = chip.querySelector(".coin-chip-name");
+      if (nameEl) nameEl.textContent = isEn() ? COINS[chip.dataset.coin].name.en : COINS[chip.dataset.coin].name.zh;
+    });
+  }
+  /** 把页面里写死的「BTC / USDT」之类文案改成当前币种。
+   *  比特币模式下**原样还原**挂载时抓到的字符串，一个字都不动 —— 这是「比特币模式
+   *  等于旧版页面」这条硬约束在文案层的体现。 */
+  const h1El = document.querySelector("main>header h1");
+  const mutedEl = document.querySelector(".hero .muted");
+  const ORIGINAL = { title: document.title, h1: h1El && h1El.textContent, muted: mutedEl && mutedEl.textContent };
+  function paintCoinLabels() {
+    const base = activeCoin() === BASE_COIN;
+    if (base) {
+      document.title = ORIGINAL.title;
+      if (h1El && ORIGINAL.h1 != null) h1El.textContent = ORIGINAL.h1;
+      if (mutedEl && ORIGINAL.muted != null) mutedEl.textContent = ORIGINAL.muted;
+      return;
+    }
+    const pair = coinPair(), suffix = isEn() ? "Long/Short Indicator" : "多空指标指示器";
+    document.title = pair + " " + suffix;
+    // h1 与标题保持一致；₿ 是比特币专属符号，非 BTC 时不展示，避免 ETH/ZEC/BNB 误带 ₿。
+    // h1 mirrors the document title; ₿ is Bitcoin-specific and is omitted for non-BTC coins.
+    if (h1El) h1El.textContent = document.title;
+    if (mutedEl) mutedEl.textContent = pair;
+  }
+  function paint() { paintModeButton(); paintSwitcher(); paintCoinLabels(); }
+
+  // ── 4. 切换动作 ─────────────────────────────────────────────────────────
+  function setCoinMode(mode) {
+    coinMode = mode === "multi" ? "multi" : "bitcoin";
+    localStorage.setItem(COIN_MODE_KEY, coinMode);
+    paint();
+    refreshCoinPanels();
+    notifyCoinChanged();
+  }
+  function setActiveCoin(coin) {
+    const key = normalizeCoin(coin);
+    if (key === selectedCoin && isMultiCoinMode()) return;
+    selectedCoin = key;
+    localStorage.setItem(COIN_SYMBOL_KEY, selectedCoin);
+    paint();
+    refreshCoinPanels();
+    notifyCoinChanged();
+  }
+  function notifyCoinChanged() {
+    const label = coinLabel() + "（" + coinNameOf() + "）";
+    window.dispatchEvent(new CustomEvent("btc:coin-changed", { detail: { coin: activeCoin(), mode: coinMode } }));
+    try { showAppDialog({ message: "已切换到 " + label + "，正在重新加载该币种的全部数据。", confirmText: "好" }); }
+    catch { /* 弹层未就绪时静默 */ }
+  }
+  /** 切换后逐个重拉与币种相关的面板；任一面板自身失败不该影响其它面板。 */
+  function refreshCoinPanels() {
+    const jobs = [
+      () => loadCurrent(),
+      () => loadQuote(),
+      () => loadDerivativeMarketContext(true),
+      () => loadHorizonForecasts(),
+      () => loadResearchOutlook(true),
+      () => refreshResonance(false),
+      () => loadFedMonitor(),
+      () => loadInvestmentCalendar(true),
+      () => loadFixedRuleSignal(true),
+      () => renderPosition(),
+    ];
+    for (const job of jobs) { try { Promise.resolve(job()).catch(() => {}); } catch { /* ignore */ } }
+  }
+
+  // 语言切换时同步币种名称与标题。
+  window.addEventListener("btc:voice-language-changed", () => { paint(); });
+  paint();
+  window.btcCoinContext = {
+    mode: () => coinMode, coin: activeCoin,
+    setMode: setCoinMode, setCoin: setActiveCoin, repaint: paint
+  };
 })();

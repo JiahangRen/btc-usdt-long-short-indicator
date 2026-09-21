@@ -206,7 +206,7 @@
   function injectStyle() {
     if (document.getElementById(STYLE_ID)) return;
     let css = [
-      ".btc-ai-launch{position:fixed;right:22px;bottom:22px;z-index:1200;display:inline-flex;align-items:center;gap:8px;padding:11px 16px;border-radius:999px;border:1.5px solid #ff6b6b;background:var(--bg-elevated,#232a33);color:var(--text-primary,#e8eaed);font:500 13px/1 system-ui,-apple-system,'Segoe UI',sans-serif;cursor:grab;touch-action:none;box-shadow:0 8px 24px rgba(0,0,0,.35);transition:transform .12s ease;animation:btc-ai-glow 2.6s ease-in-out infinite,btc-ai-hue 7s linear infinite}",
+      ".btc-ai-launch{--btc-dock-margin:8px;position:fixed;right:22px;bottom:22px;z-index:1200;box-sizing:border-box;height:40px;display:inline-flex;align-items:center;gap:8px;padding:0 16px;border-radius:999px;border:1.5px solid #ff6b6b;background:var(--bg-elevated,#232a33);color:var(--text-primary,#e8eaed);font:600 13px/1 system-ui,-apple-system,'Segoe UI',sans-serif;white-space:nowrap;cursor:grab;touch-action:none;box-shadow:0 8px 24px rgba(0,0,0,.35);transition:transform .12s ease,translate .22s cubic-bezier(.34,.9,.3,1),max-width .22s cubic-bezier(.34,.9,.3,1),opacity .45s ease;animation:btc-ai-glow 2.6s ease-in-out infinite,btc-ai-hue 7s linear infinite}",
       ".btc-ai-launch[hidden]{display:none}",
       // 波纹扩散：两个向外扩的发光圆环，用伪元素画。inset:-1px 让环贴在胶囊外侧，
       // z-index:-1 让环落在按钮自身背景之后（本元素有 z-index 会自成层叠上下文，环仍在页面内容之上）。
@@ -330,6 +330,66 @@
       ".btc-ai-launch-tip{position:absolute;right:0;bottom:calc(100% + 12px);white-space:nowrap;background:var(--accent-purple,#a78bfa);color:#14121f;font:500 12px/1 system-ui,sans-serif;padding:7px 11px;border-radius:9px;box-shadow:0 8px 22px rgba(0,0,0,.45);pointer-events:none;animation:btc-ai-tip-in .35s ease both}",
       ".btc-ai-launch-tip::after{content:'';position:absolute;top:100%;right:20px;border:6px solid transparent;border-top-color:var(--accent-purple,#a78bfa)}",
       "@keyframes btc-ai-tip-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}",
+      // ---------- 贴边吸附 / 贴边半隐藏 / 静置淡化 ----------
+      // Displacement uses the standalone `translate` property (never `transform`, which the hover
+      // scale and drag scale already own), so the two stack instead of overwriting each other.
+      // 收起时平移「自身宽度的一半 + 贴边缝」：屏幕里正好留下另一半，
+      // 那一半里只显示图标 —— 一眼能认出这是哪个按钮，又只占半边。
+      // Shifting by half the width plus the dock gap leaves exactly half on screen, holding the icon.
+      ".btc-ai-launch.btc-ai-docked{cursor:pointer}",
+      // 收起后统一成同一个规格（宽 80 × 高 40，与「从欧易同步持仓」那颗**完全一致**）：
+      // 两个按钮同时贴在屏幕两侧时，尺寸不一致会非常扎眼（一大一小、一高一矮）。
+      // 宽度收在 80px、藏起 55% ⇒ 屏幕里正好留 36px（45%），18px 的图标居中放在这 36px 里。
+      // ⚠️ 用 max-width 而不是 width：父级宽度定死的话，鼠标悬停展开时文字会被挤进这 80px
+      // 里逐字换行（「AI 助手」变成竖排两行）。max-width 既能收窄、又能平滑放开。
+      // Locked to one shared size (80×40) so the two docked pills match exactly. `max-width`
+      // rather than `width`, because a hard width would wrap the label into a vertical stack
+      // whenever the button is expanded (hover) while still docked.
+      ".btc-ai-launch.btc-ai-collapsed{max-width:80px}",
+      ".btc-ai-launch.btc-ai-dock-right.btc-ai-collapsed{translate:calc(55% + var(--btc-dock-margin)) 0}",
+      ".btc-ai-launch.btc-ai-dock-left.btc-ai-collapsed{translate:calc(-55% - var(--btc-dock-margin)) 0}",
+      // 展开态的选择器比收起态多一个 :hover，特异性更高才压得住上面两条；同时把宽度上限放开。
+      // The hover rule needs one more class than the collapsed rules to win on specificity.
+      ".btc-ai-launch.btc-ai-dock-left.btc-ai-collapsed:hover,.btc-ai-launch.btc-ai-dock-right.btc-ai-collapsed:hover{translate:0 0;max-width:420px}",
+      // 收起态：文字与状态点「隐去但保留宽度」—— 用 visibility 而不是 display，
+      // 否则按钮宽度会收缩，而下面那条位移是按「自身宽度的 50%」算的，基准一变位置就飘。
+      // 腾出来的位置由绝对定位的图标顶上（绝对定位不参与 flex 计算，所以宽度纹丝不动）。
+      // Hide the text via visibility (not display) so the button keeps its width — the 50% offset
+      // is measured against it. The icon is absolutely positioned so it adds no width either.
+      ".btc-ai-mark{display:none;position:absolute;top:50%;width:18px;height:18px;margin-top:-9px;color:var(--text-primary,#e8eaed);filter:drop-shadow(0 0 7px rgba(255,255,255,.6));pointer-events:none}",
+      ".btc-ai-mark svg{display:block;width:100%;height:100%}",
+      ".btc-ai-launch.btc-ai-collapsed .btc-ai-dot,.btc-ai-launch.btc-ai-collapsed .btc-ai-launch-label{visibility:hidden}",
+      ".btc-ai-launch.btc-ai-collapsed .btc-ai-mark{display:block}",
+      // 图标落在「露在屏幕里的那一半」：贴右边时按钮的左半可见，所以图标靠左；贴左边反之。
+      // 偏移 9px = (可见 36px − 图标 18px) / 2，正好在露出的那 36px 里居中。
+      ".btc-ai-launch.btc-ai-dock-right.btc-ai-collapsed .btc-ai-mark{left:9px}",
+      ".btc-ai-launch.btc-ai-dock-left.btc-ai-collapsed .btc-ai-mark{right:9px}",
+      // 鼠标搭上来（滑回完整形态）时文字与状态点回来、图标让位。
+      ".btc-ai-launch.btc-ai-collapsed:hover .btc-ai-dot,.btc-ai-launch.btc-ai-collapsed:hover .btc-ai-launch-label{visibility:visible}",
+      ".btc-ai-launch.btc-ai-collapsed:hover .btc-ai-mark{display:none}",
+      ".btc-ai-launch.btc-ai-collapsed .btc-ai-launch-tip{display:none}",
+      ".btc-ai-launch.btc-ai-idle{opacity:.32}",
+      ".btc-ai-launch.btc-ai-idle:hover,.btc-ai-launch.btc-ai-idle:focus-visible{opacity:1}",
+      // ---------- 兜底：把「从欧易同步持仓」那颗按钮钉到与本站按钮同一规格 ----------
+      // 那颗按钮由浏览器扩展注入，而扩展是本机手动加载的 —— 改了扩展代码必须去扩展页点刷新，
+      // 它才进浏览器。只要漏刷一次，页面上就会出现「页面这颗已更新、扩展那颗还是旧规格」，
+      // 并排看就是一个大一个小（宽度对齐了、高度还是旧的，甚至被折行的文字撑高）。
+      // 这里用 !important 把尺寸、半隐藏位移、宽度上限钉成本页的规格：
+      // !important 的作者样式能压过扩展写的 inline style，所以无论扩展新旧，
+      // 两颗并排的观感都一致。扩展更新后两边数值相同，不会冲突。
+      // Fallback for the extension-injected sync pill. It is loaded manually via chrome://extensions,
+      // so a stale copy silently reintroduces the "one big, one small" mismatch. These rules pin the
+      // size, the half-hide offset and the width cap to this page's spec — an !important author rule
+      // beats the extension's inline styles, so the pair always looks identical.
+      "#okxFillerBtn{box-sizing:border-box !important;height:40px !important;padding:0 16px !important;font-size:13px !important;font-weight:600 !important;line-height:1 !important;border-width:1.5px !important;white-space:nowrap !important}",
+      "#okxFillerBtn.okx-collapsed{max-width:80px !important}",
+      "#okxFillerBtn.okx-dock-right.okx-collapsed{translate:calc(55% + 8px) !important}",
+      "#okxFillerBtn.okx-dock-left.okx-collapsed{translate:calc(-55% - 8px) !important}",
+      // 展开态同样要多一级 :hover，否则压不住上面两条。
+      "#okxFillerBtn.okx-dock-left.okx-collapsed:hover,#okxFillerBtn.okx-dock-right.okx-collapsed:hover{translate:0 0 !important;max-width:420px !important}",
+      // 图标也钉在同一位置（露出的那 36px 正中），否则新旧扩展的图标会一个偏左一个偏右。
+      "#okxFillerBtn.okx-dock-right.okx-collapsed .okx-mark{left:9px !important}",
+      "#okxFillerBtn.okx-dock-left.okx-collapsed .okx-mark{right:9px !important}",
       // 八向缩放把手：四条边各一条细带（单轴拉伸），四角各一个小方块（同时改宽高）。
       // 8-way resize grips: thin strips along each edge (one axis) plus corner squares (both).
       ".btc-ai-rz{position:absolute;z-index:4;touch-action:none;background:transparent}",
@@ -435,6 +495,16 @@
   function currentLang() {
     let attr = (document.documentElement.getAttribute("lang") || "").toLowerCase();
     return attr.indexOf("en") === 0 ? "en" : "zh";
+  }
+  // 多币种：返回当前激活币种（比特币模式下恒为 BTC）。AI 助手据此把实时快照
+  // 与对话锁定到对应币种——这是「整页内容都跟币种相关」的最后一环，否则模型
+  // 永远在聊 BTC。btcCoinContext 由 app.js 在 idle 回调注入前就绪，这里再加一道兜底。
+  function aiCoin() {
+    try {
+      const ctx = window.btcCoinContext;
+      const coin = ctx && typeof ctx.coin === "function" ? ctx.coin() : null;
+      return (coin && String(coin).toUpperCase()) || "BTC";
+    } catch (_) { return "BTC"; }
   }
   function escapeHtml(text) {
     return String(text).replace(/[&<>"']/g, function (ch) {
@@ -714,11 +784,17 @@
     let fontScale = 1;
     let shotBusy = false;
 
+    // 贴边半隐藏时露出的那半边显示的图标（星芒）—— 收起后只剩它，靠它认出这是 AI 助手。
+    // The mark shown on the visible half once docked: with the text hidden it is the only cue
+    // telling this apart from the price-sync pill.
+    const AI_LAUNCH_MARK =
+      '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.6 2.9l1.55 4.2 4.2 1.55-4.2 1.55-1.55 4.2-1.55-4.2L4.85 8.65l4.2-1.55L10.6 2.9z" fill="currentColor"/><path d="M17.9 13.4l.95 2.55 2.55.95-2.55.95-.95 2.55-.95-2.55-2.55-.95 2.55-.95.95-2.55z" fill="currentColor" opacity=".78"/></svg>';
+
     let launch = document.createElement("button");
     launch.type = "button";
     launch.className = "btc-ai-launch";
     launch.hidden = true;
-    launch.innerHTML = '<span class="btc-ai-dot"></span><span class="btc-ai-launch-label">' + t.open + "</span>";
+    launch.innerHTML = '<span class="btc-ai-dot"></span><span class="btc-ai-launch-label">' + t.open + '</span><span class="btc-ai-mark">' + AI_LAUNCH_MARK + "</span>";
 
     let panel = document.createElement("section");
     panel.className = "btc-ai-panel";
@@ -801,17 +877,112 @@
       try { localStorage.setItem("btc_ai_launch_seen", "1"); } catch (e) {}
     }
 
-    // 恢复上次拖动到的位置
-    // Restore the last dragged position.
+    // ---------- 位置记忆 + 贴边吸附 + 静置淡化 ----------
+    // Position memory, edge docking and idle dimming.
+    let DOCK_SNAP = 56;     // 松手时离左右边多近就吸附过去 / snap-to-edge distance
+    let DOCK_MARGIN = 8;    // 吸附后留的缝 / gap kept once docked
+    let IDLE_DELAY = 2600;  // 鼠标离开多久后变淡 / idle dimming delay
+    let launchDock = "";    // "" | "left" | "right"
+
+    function launchWidth() { return launch.offsetWidth || 92; }
+    function launchHeight() { return launch.offsetHeight || 37; }
+    // ⚠️ 一律以「布局视口」宽度为准，不要用 window.innerWidth：
+    // fixed 元素的包含块是不含滚动条的布局视口，而 innerWidth 把滚动条算在内。
+    // 页面有垂直滚动条时（本页几乎总是有），按 innerWidth 计算会把按钮放到滚动条底下 ——
+    // 贴右边收起的按钮露出那一条正好被滚动条盖住，点都点不到。
+    // Always measure against the layout viewport: that is the containing block of a fixed
+    // element, while innerWidth includes the scrollbar. Using innerWidth parks the docked pill
+    // underneath the scrollbar and the visible sliver becomes unclickable.
+    function viewW() { return document.documentElement.clientWidth || window.innerWidth; }
+    function clampLaunch(x, y) {
+      let w = launchWidth(), h = launchHeight(), pad = 4;
+      return {
+        x: Math.max(pad, Math.min(viewW() - w - pad, x)),
+        y: Math.max(pad, Math.min(window.innerHeight - h - pad, y))
+      };
+    }
+    function writeLaunchPos(x, y) {
+      let p = clampLaunch(x, y);
+      launch.style.right = "auto";
+      launch.style.bottom = "auto";
+      launch.style.left = Math.round(p.x) + "px";
+      launch.style.top = Math.round(p.y) + "px";
+      return p;
+    }
+    function dockedX() {
+      return launchDock === "left" ? DOCK_MARGIN : viewW() - launchWidth() - DOCK_MARGIN;
+    }
+    function saveLaunchPos() {
+      try {
+        localStorage.setItem("btc_ai_launch_pos", JSON.stringify({
+          x: parseInt(launch.style.left, 10),
+          y: parseInt(launch.style.top, 10),
+          dock: launchDock || ""
+        }));
+      } catch (err) { /* 隐私模式 / private mode */ }
+    }
+    // 贴边收起：只在「已吸附 + 面板没开」时生效，鼠标悬停由 CSS 的 :hover 滑出完整按钮。
+    // Peek-away applies only while docked with the panel closed; :hover slides it back out.
+    function syncLaunchDock() {
+      let docked = !!launchDock;
+      launch.classList.toggle("btc-ai-dock-left", launchDock === "left");
+      launch.classList.toggle("btc-ai-dock-right", launchDock === "right");
+      launch.classList.toggle("btc-ai-docked", docked);
+      let collapsed = docked && panel.hidden;
+      launch.classList.toggle("btc-ai-collapsed", collapsed);
+      if (collapsed) launch.classList.remove("btc-ai-idle"); // 已只露一条，不必再叠淡化
+      // ⚠️ 收起态宽度是写死的 80px，展开态却是内容宽度 —— 宽度一变，贴边的 x 就必须按新宽度重算。
+      // 少了这一步，位移量（自身宽度的 55%）与定位基准对不上，露出来的会明显多于 45%（实测 60%）。
+      // The collapsed width is fixed at 80px while the expanded one follows the label, so the
+      // docked x has to be recomputed once the width changes — otherwise the 55% offset is
+      // measured against a stale basis and far more than 45% stays on screen.
+      if (docked) {
+        let y = parseInt(launch.style.top, 10);
+        if (Number.isFinite(y)) { writeLaunchPos(dockedX(), y); saveLaunchPos(); }
+      }
+    }
+    // 静置淡化：鼠标不在按钮上就开始计时，到点整体变淡；移回去立刻恢复原样。
+    // Idle dimming: once the pointer leaves, the button fades back so it stops fighting the chart.
+    let launchIdleTimer = 0;
+    function scheduleLaunchIdle() {
+      clearTimeout(launchIdleTimer);
+      launch.classList.remove("btc-ai-idle");
+      launchIdleTimer = setTimeout(function () {
+        // 面板开着说明正在用；已贴边收起则只露一条，都不需要再叠淡化。
+        // Skip while the panel is in use or while already peeked away.
+        if (!panel.hidden) return;
+        if (launchDock) return;
+        launch.classList.add("btc-ai-idle");
+      }, IDLE_DELAY);
+    }
+    function wakeLaunch() {
+      launch.classList.remove("btc-ai-idle");
+      clearTimeout(launchIdleTimer);
+    }
+    launch.addEventListener("mouseenter", wakeLaunch);
+    launch.addEventListener("mouseleave", scheduleLaunchIdle);
+    launch.addEventListener("focusin", wakeLaunch);
+    launch.addEventListener("focusout", scheduleLaunchIdle);
+
+    // 恢复上次的位置与贴边状态。⚠️ 关键：必须夹回当前视口 ——
+    // 之前是直接照搬存档坐标，于是在更宽的窗口里把按钮拖到右边、之后窗口变小，
+    // 按钮就永久停在屏幕外（看不见、也点不到），用户会报「按钮不见了」。
+    // Restore the saved position/dock state, clamped into the CURRENT viewport: previously the
+    // raw coordinates were reused verbatim, so docking right on a wide window then shrinking it
+    // parked the button permanently off-screen — the "my button disappeared" report.
     try {
       let savedPos = JSON.parse(localStorage.getItem("btc_ai_launch_pos") || "null");
       if (savedPos && Number.isFinite(savedPos.x) && Number.isFinite(savedPos.y)) {
-        launch.style.right = "auto";
-        launch.style.bottom = "auto";
-        launch.style.left = savedPos.x + "px";
-        launch.style.top = savedPos.y + "px";
+        launchDock = savedPos.dock === "left" || savedPos.dock === "right" ? savedPos.dock : "";
+        let p = writeLaunchPos(savedPos.x, savedPos.y);
+        if (launchDock) p = writeLaunchPos(dockedX(), p.y);
+        // 一律把夹紧后的坐标写回：存档里可能还躺着上次那种越界值，
+        // 留着它只会让「下次为什么又偏了」多绕一圈。
+        saveLaunchPos();
       }
-    } catch (e) {}
+    } catch (e) { /* 隐私模式 / private mode */ }
+    syncLaunchDock();
+    scheduleLaunchIdle();
 
     let dragMoved = false;
     let lastDragAt = 0;
@@ -820,6 +991,7 @@
     let DRAG_THRESHOLD = 4;
     launch.addEventListener("pointerdown", function (e) {
       if (e.button !== 0) return;
+      wakeLaunch();
       let rect = launch.getBoundingClientRect();
       let offX = e.clientX - rect.left;
       let offY = e.clientY - rect.top;
@@ -833,37 +1005,66 @@
           dragging = true;
           dragMoved = true;
           launch.classList.add("btc-ai-dragging");
+          // 贴着边收起时，露在外面的只是按钮的一小条 —— 先把收起态解开、按当前光标重算抓取点，
+          // 否则整段拖动都发生在那半截屏幕外的按钮上（一松手就跳回）。
+          // While peeked away only a sliver is on screen: clear the collapsed state first and
+          // re-derive the grab offset from the cursor, or the whole drag runs off-screen.
+          launch.classList.remove("btc-ai-collapsed");
+          rect = launch.getBoundingClientRect();
+          offX = Math.max(0, Math.min(rect.width - 2, ev.clientX - rect.left));
+          offY = Math.max(0, Math.min(rect.height - 2, ev.clientY - rect.top));
         }
         let w = rect.width, h = rect.height;
-        let x = Math.max(4, Math.min(window.innerWidth - w - 4, ev.clientX - offX));
+        let x = Math.max(4, Math.min(viewW() - w - 4, ev.clientX - offX));
         let y = Math.max(4, Math.min(window.innerHeight - h - 4, ev.clientY - offY));
         launch.style.right = "auto";
         launch.style.bottom = "auto";
         launch.style.left = x + "px";
         launch.style.top = y + "px";
       }
+      let settled = false;
       function up() {
+        if (settled) return;
+        settled = true;
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        window.removeEventListener("pointercancel", up);
         try { launch.releasePointerCapture(e.pointerId); } catch (err) {}
         launch.classList.remove("btc-ai-dragging");
-        launch.removeEventListener("pointermove", move);
-        launch.removeEventListener("pointerup", up);
-        launch.removeEventListener("pointercancel", up);
         if (dragMoved) {
           lastDragAt = Date.now();
-          try {
-            localStorage.setItem("btc_ai_launch_pos", JSON.stringify({
-              x: parseInt(launch.style.left, 10),
-              y: parseInt(launch.style.top, 10)
-            }));
-          } catch (err) {}
+          // 贴边吸附：松手时离左/右边够近就吸附过去，然后半隐藏（屏幕里只留一半、显示图标）。
+          // 拖到别处则解除吸附，恢复完整显示。
+          // Snap to the nearest edge when released close enough, then hide half of it behind the
+          // edge keeping only the icon; anywhere else clears the dock.
+          let r = launch.getBoundingClientRect();
+          let vw = viewW();
+          if (r.left <= DOCK_SNAP) {
+            launchDock = "left";
+          } else if (vw - r.right <= DOCK_SNAP) {
+            launchDock = "right";
+          } else {
+            launchDock = "";
+          }
+          writeLaunchPos(launchDock ? dockedX() : r.left, r.top);
+          syncLaunchDock();
+          saveLaunchPos();
+          scheduleLaunchIdle();
           // 按钮被挪走后，已打开的面板重新贴回去。
           // The button moved: re-anchor an open panel to its new spot.
           if (!panel.hidden) placePanel();
         }
       }
-      launch.addEventListener("pointermove", move);
-      launch.addEventListener("pointerup", up);
-      launch.addEventListener("pointercancel", up);
+      // 监听一律挂在 window 上，而不是按钮自身：
+      // 拖拽期间光标的位移量通常大于按钮本身，把监听挂在按钮上就得依赖指针捕获一定成功 ——
+      // 一旦捕获没生效（或光标在窗口外松开），pointerup 收不到，按钮会永久卡在「拖动中」状态
+      // （光标一直抓握、动效暂停、位置不再更新）。挂在 window 上则始终收得到。
+      // Listeners live on window rather than the button: the pointer usually travels further than
+      // the button itself, so relying on pointer capture alone risks losing pointerup and leaving
+      // the button stuck in its dragging state.
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+      window.addEventListener("pointercancel", up);
     });
 
     // ---------- 聊天窗口：跟随按钮定位 + 八向拖拽缩放 ----------
@@ -987,7 +1188,18 @@
     });
     // 视口变化后重新贴回按钮（面板始终紧贴主按钮，不会飘在页面外）。
     // Re-anchor to the button after a viewport change so the panel never strands off-screen.
-    window.addEventListener("resize", placePanel);
+    // 窗口缩放：面板重新定位，同时把悬浮按钮夹回视口内（贴边的则重新贴到新的边上）。
+    // On resize: re-place the panel and pull the launch button back into view — a docked one
+    // re-anchors to the new edge instead of being left off-screen.
+    window.addEventListener("resize", function () {
+      if (launch.style.left) {
+        let r = launch.getBoundingClientRect();
+        let p = writeLaunchPos(r.left, r.top);
+        if (launchDock) writeLaunchPos(dockedX(), p.y);
+        syncLaunchDock();
+      }
+      placePanel();
+    });
 
     let log = panel.querySelector(".btc-ai-log");
     let quick = panel.querySelector(".btc-ai-quick");
@@ -1576,7 +1788,7 @@
       toggleModelMenu(false);
       toggleStyleMenu(false);
       toggleConvMenu(false);
-      if (withPanel) panel.hidden = true;
+      if (withPanel) { panel.hidden = true; syncLaunchDock(); scheduleLaunchIdle(); }
     }
 
     // ================= 字号缩放 / Text zoom =================
@@ -1806,14 +2018,16 @@
       input.disabled = state;
     }
 
-    async function loadConfig() {
+    let configRetryTimer = 0;
+    async function loadConfig(attempt) {
+      attempt = attempt || 0;
       try {
         let response = await fetch("/api/ai/config");
-        if (!response.ok) return;
+        if (!response.ok) throw new Error("HTTP " + response.status);
         let payload = await response.json();
         configured = Boolean(payload.available);
         launch.hidden = !configured;
-        if (!configured) panel.hidden = true;
+        if (!configured) { panel.hidden = true; syncLaunchDock(); }
         model = payload.model || payload.defaultModel || "";
         modelList = Array.isArray(payload.models) ? payload.models : [];
         modelTag.textContent = configured ? shortModel(model) : "";
@@ -1831,9 +2045,23 @@
           }
         }
       } catch (error) {
+        // 服务端可能只是还没起来 / 正在重启（本项目 8787 会被反复 kickstart），
+        // 一次网络抖动就把按钮永久隐藏的话，用户看到的就是「AI 助手按钮不见了」。
+        // 所以先退避重试几次；确实拿不到配置时**保持按钮可见** —— 点开后有明确提示，
+        // 也总好过按钮凭空消失、用户连入口都找不到。
+        // Retry with backoff before concluding anything: the local service restarts often, and
+        // hiding the button on one transient failure is exactly the "my button vanished" report.
+        // If the config truly cannot be read the button stays visible so the entry point survives.
+        if (attempt < 3) {
+          clearTimeout(configRetryTimer);
+          configRetryTimer = setTimeout(function () { loadConfig(attempt + 1); }, 1200 * (attempt + 1));
+          return;
+        }
         configured = false;
-        launch.hidden = true;
-        panel.hidden = true;
+        modelTag.disabled = true;
+        modelTag.title = t.notConfigured;
+        launch.hidden = false;
+        syncLaunchDock();
       }
     }
 
@@ -2021,7 +2249,7 @@
       botNode.appendChild(statusNode);
 
       try {
-        let response = await fetch("/api/ai/chat", {
+        let response = await fetch("/api/ai/chat?symbol=" + encodeURIComponent(aiCoin()), {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ question: question, history: apiHistory(), stream: true, lang: currentLang(), thinking: thinking, style: answerStyle, search: webEnabled, context: pageContext || collectPageContext() })
@@ -2135,6 +2363,8 @@
       toggleConvMenu(false);
       if (!panel.hidden && !panel.contains(event.target) && event.target !== launch && !launch.contains(event.target)) {
         panel.hidden = true;
+        syncLaunchDock();
+        scheduleLaunchIdle();
       }
     });
 
@@ -2147,7 +2377,7 @@
     input.addEventListener("keydown", function (event) {
       if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); ask(input.value); }
     });
-    closeBtn.onclick = function () { panel.hidden = true; };
+    closeBtn.onclick = function () { panel.hidden = true; syncLaunchDock(); scheduleLaunchIdle(); };
     document.addEventListener("keydown", function (event) {
       if (event.key === "Escape" && !panel.hidden) closeOverlays(true);
     });
@@ -2177,6 +2407,9 @@
     launch.onclick = function () {
       if (Date.now() - lastDragAt < 350) return; // 拖动结束后紧跟的那次点击不触发开合
       panel.hidden = !panel.hidden;
+      // 面板开着时按钮保持完整形态（不然收起会带着面板一起跑到屏幕外）。
+      // While the panel is open the button stays fully visible.
+      syncLaunchDock();
       if (!panel.hidden) {
         placePanel(); // 先定位再显示内容，避免在右下角闪一下
         markLaunchSeen();
@@ -2184,6 +2417,8 @@
         loadConfig();
         loadQuota();
         input.focus();
+      } else {
+        scheduleLaunchIdle();
       }
     };
 
@@ -2204,9 +2439,15 @@
     // 60 秒轮询：刷新额度与倒计时；提问成功后也会主动调一次。
     // Poll every 60s so the countdown stays fresh; also called after each successful answer.
     setInterval(function () { if (!panel.hidden) loadQuota(); }, 60_000);
-    // 语言切换后重刷静态文案（页面使用 data-zh/data-en 同步）。
-    // Refresh static labels after a language switch (the page syncs via data-zh/data-en).
-    new MutationObserver(function () { applyLabels(); }).observe(document.documentElement, { attributes: true, attributeFilter: ["lang"] });
+    // 语言切换后重刷静态文案（页面使用 data-zh/data-en 同步）；面板打开时同步重绘对话与配额。
+    // Refresh static labels after a language switch; repaint the conversation and quota while the panel is open.
+    new MutationObserver(function () {
+      applyLabels();
+      if (!panel.hidden) {
+        try { renderConversation(); } catch (e) {}
+        try { loadQuota(); } catch (e) {}
+      }
+    }).observe(document.documentElement, { attributes: true, attributeFilter: ["lang"] });
   }
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);

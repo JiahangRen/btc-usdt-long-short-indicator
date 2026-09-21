@@ -10,7 +10,7 @@ WORKDIR /app
 # shared 目录单独 COPY 以保留 /app/shared/ 目录名供运行时 import。
 # 注意：多源 COPY 目标以 / 结尾会把所有源塞进该目录，绝不能把 app 文件与 shared 混在同一条 COPY。
 COPY --chown=node:node package.json package-lock.json ./
-COPY --chown=node:node server.mjs ai-chat.mjs alert-store.mjs alert-worker.mjs ./
+COPY --chown=node:node server.mjs ai-chat.mjs alert-store.mjs alert-worker.mjs notification.mjs ./
 COPY --chown=node:node shared ./shared/
 RUN npm ci --omit=dev
 COPY --chown=node:node public ./public

@@ -4,12 +4,23 @@ import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { execFile } from 'node:child_process';
+import { statSync } from 'node:fs';
 import { extname, join, normalize, resolve, sep } from 'node:path';
+import { gzipSync, brotliCompressSync, constants as zlibConstants } from 'node:zlib';
 import { DatabaseSync } from 'node:sqlite';
 import { Communicate } from 'edge-tts.js';
 import { createAiChat, DEFAULT_MODEL as QWEN_DEFAULT_MODEL } from './ai-chat.mjs';
 import { createAlertStore } from './alert-store.mjs';
 import { evaluateAlertRule } from './shared/alert-rule-eval.mjs';
+// Research tuning config + pure fusion-model training, now shared with the
+// training worker thread so the two never drift. See shared/ for the rationale.
+// 研究超参配置与纯融合模型训练，现与训练 Worker 线程共用，避免两处漂移。
+import { RESEARCH_TUNING, RESEARCH_TUNING_ERROR, RESEARCH_TUNING_DEFAULTS, RESEARCH_TUNING_OVERRIDE } from './shared/research-tuning.mjs';
+import { clamp, validCandle, percentChange, chopThreshold, sigmoid, logit, buildFundingFeatures, fundingFeaturesAt, FUNDING_FEATURE_COLUMNS, trainFusionModel } from './shared/ml-train.mjs';
+import { trainFusionModelAsync } from './shared/train-pool.mjs';
+// 币种注册表：所有交易所合约 ID 的唯一真源（shared/coins.mjs）。
+// Coin registry: the single source of truth for every exchange instrument id.
+import { BASE_COIN, COIN_KEYS, COINS, normalizeCoin, coinMeta, instrumentId, okxInstId } from './shared/coins.mjs';
 
 // BTC 指标服务端：负责静态页面、公开数据源、SQLite 快照与实时 OKX 连接。
 // BTC indicator backend: serves the UI, public data sources, SQLite snapshots, and the live OKX connection.
@@ -18,6 +29,29 @@ import { evaluateAlertRule } from './shared/alert-rule-eval.mjs';
 // Process-level safety net: a stray rejection or exception is logged, never crashes the whole service.
 process.on('unhandledRejection', (reason) => console.error('[fatal] unhandledRejection:', reason));
 process.on('uncaughtException', (error) => console.error('[fatal] uncaughtException:', error && error.stack || error));
+
+/* ── 币种上下文 / Coin context ──────────────────────────────────────────────
+ * 一次 HTTP 请求所针对的币种由 ?symbol= 决定，放进 AsyncLocalStorage 里向下传递。
+ * 这样做的关键收益：server.mjs 里几十处读取行情/写库的函数**不必改签名**，
+ * 只要在需要合约 ID 的地方问一句 currentCoin()，就能自动跟着当前请求走。
+ * 没有 ALS 上下文时（启动、定时器、WebSocket、告警 Worker）一律回落到 BTC，
+ * 所以「比特币模式」走的是与多币种改造之前完全相同的那条路径。
+ *
+ * The coin a request targets is resolved from ?symbol= and carried in an
+ * AsyncLocalStorage.  Every downstream function can ask currentCoin() instead
+ * of taking a new parameter, and anything running outside a request (startup,
+ * timers, the WebSocket, the alert worker) still resolves to BTC.
+ */
+const coinScope = new AsyncLocalStorage();
+const currentCoin = () => coinScope.getStore()?.coin || BASE_COIN;
+// 便捷取值：当前币种在各交易所的合约 ID。
+const okxSwapId = (coin = currentCoin()) => okxInstId(coin, 'swap');
+const okxSpotId = (coin = currentCoin()) => okxInstId(coin, 'spot');
+const instIdFor = (source, coin = currentCoin()) => instrumentId(source, coin);
+// 短别名：塞进 URL 模板里不用再写引号，替换既有硬编码时更安全。
+const binanceId = () => instIdFor('binance');
+const gateId = () => instIdFor('gate');
+const coinbaseId = () => instIdFor('coinbase');
 
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || '127.0.0.1';
@@ -242,13 +276,38 @@ async function coinGeckoUsage() {
     return { available:false, reason:error.name==='AbortError'?'CoinGecko 用量查询超时':error.message };
   }
 }
-const database = new DatabaseSync(join(DATA_DIR, 'market.sqlite'));
+// 每币种一个库文件：BTC 继续用 market.sqlite —— 与多币种改造前完全同一个文件、
+// 同一套 schema，一行数据都不迁移。其余币种落在 market-<COIN>.sqlite（按需创建）。
+// 这样「比特币模式」的读写路径零变更，同时新币种不会污染已有的历史样本。
+// One database file per coin: BTC keeps market.sqlite (byte-identical to the
+// pre-multi-coin layout, no migration), other coins get market-<COIN>.sqlite.
+const marketDatabase = new DatabaseSync(join(DATA_DIR, 'market.sqlite'));
+const altDatabases = new Map();
+const databaseFileOf = (coin) => (coin === BASE_COIN ? join(DATA_DIR, 'market.sqlite') : join(DATA_DIR, `market-${coin}.sqlite`));
+function databaseFor(coin = currentCoin()) {
+  const key = normalizeCoin(coin);
+  if (key === BASE_COIN) return marketDatabase;
+  let handle = altDatabases.get(key);
+  if (!handle) {
+    handle = new DatabaseSync(databaseFileOf(key));
+    handle.exec(SCHEMA_SQL);
+    applySchemaMigrations(handle);
+    altDatabases.set(key, handle);
+  }
+  return handle;
+}
+/** 已打开的全部库（BTC + 已用过的其它币种），供清理/统计遍历。 */
+function allDatabases() { return [marketDatabase, ...altDatabases.values()]; }
 const alertStore = await createAlertStore();
 if (!alertStore.enabled) console.warn(`Server-side alerts disabled: ${alertStore.reason}`);
-database.exec(`
+const SCHEMA_SQL = `
   PRAGMA journal_mode = WAL;
   PRAGMA synchronous = NORMAL;
   PRAGMA busy_timeout = 5000;
+  -- 184MB 的库 + 持续写入会把默认的 2MB 页缓存打爆，导致热查询每条都回盘 pread，
+  -- 主线程在等盘（CPU 仅 3% 但 GET / 仍要 1-2s）。扩到 64MB 让热点索引/近期页常驻内存。
+  PRAGMA cache_size = -64000;
+  PRAGMA mmap_size = 0;
   CREATE TABLE IF NOT EXISTS quote_snapshots (
     id INTEGER PRIMARY KEY, source TEXT NOT NULL, observed_at INTEGER NOT NULL,
     last REAL NOT NULL, open24h REAL, change_pct REAL, high24 REAL, low24 REAL
@@ -289,6 +348,33 @@ database.exec(`
     event_name TEXT NOT NULL, event_at INTEGER NOT NULL, source TEXT NOT NULL,
     is_fallback INTEGER NOT NULL DEFAULT 0
   );
+  -- 宏观事件研究样本（阶段 2）。这里的每一行 = 一次已发布的宏观事件 + BTC 在该事件窗口内的
+  -- 实际表现。它不是预测，而是多因子模型可以拿去做条件分层的「已实现事实」。
+  -- 精度字段 date_precision 是硬约束：1h 窗口只在 exact / day 上可解释，day-estimated 只进 1d 窗口。
+  -- Macro event-study rows (stage 2): one published release + what BTC actually did in its window.
+  CREATE TABLE IF NOT EXISTS macro_event_outcomes (
+    id INTEGER PRIMARY KEY, event_key TEXT NOT NULL, event_at INTEGER NOT NULL,
+    period TEXT, actual REAL, previous REAL, surprise_proxy REAL, surprise_z REAL,
+    unit TEXT NOT NULL, date_precision TEXT NOT NULL, source TEXT NOT NULL,
+    before_1d REAL, after_1h REAL, after_4h REAL, after_1d REAL,
+    after_1h_abs REAL, after_1d_abs REAL,
+    realized_vol_1d REAL, baseline_vol_1d REAL, vol_ratio REAL,
+    computed_at INTEGER NOT NULL, UNIQUE(event_key, event_at)
+  );
+  CREATE INDEX IF NOT EXISTS macro_event_outcomes_time ON macro_event_outcomes(event_at DESC);
+  CREATE INDEX IF NOT EXISTS macro_event_outcomes_key_time ON macro_event_outcomes(event_key, event_at DESC);
+  -- 永续合约资金费率历史（多因子候选）。每 8 小时结算一次，交易所公开，可回溯多年。
+  -- 与宏观发布值的关键区别：每个值在 funding_at 那一刻就已公开，因此按 funding_at <= 桶时刻 对齐
+  -- 不构成前视偏差，无需 date_precision 那类精度字段。
+  -- Perpetual funding-rate history (multi-factor candidate): settled every eight hours and public
+  -- years back. The decisive difference from a macro print is that each value is already known at
+  -- the instant it is stamped, so aligning on funding_at <= bucket time leaks nothing forward.
+  CREATE TABLE IF NOT EXISTS funding_rate_history (
+    exchange TEXT NOT NULL, symbol TEXT NOT NULL, funding_at INTEGER NOT NULL,
+    rate REAL NOT NULL, mark_price REAL, fetched_at INTEGER NOT NULL,
+    PRIMARY KEY (exchange, symbol, funding_at)
+  );
+  CREATE INDEX IF NOT EXISTS funding_rate_history_time ON funding_rate_history(funding_at DESC);
   CREATE INDEX IF NOT EXISTS fed_calendar_snapshots_event_time ON fed_calendar_snapshots(event_key, observed_at DESC);
   CREATE TABLE IF NOT EXISTS btc_news_snapshots (
     id INTEGER PRIMARY KEY, observed_at INTEGER NOT NULL, published_at INTEGER,
@@ -342,98 +428,207 @@ database.exec(`
   );
   CREATE INDEX IF NOT EXISTS ab_shadow_pairs_target ON ab_shadow_pairs(target_at, settled_at);
   CREATE INDEX IF NOT EXISTS ab_shadow_pairs_experiment ON ab_shadow_pairs(experiment_key, settled_at DESC);
-`);
+  -- ↓ 清理/统计单列索引。必须放在所有建表之后：这些索引引用的表（candles、
+  --   market_snapshots 等）在下面才创建，写在其前面会让**新建库**在半途中断，
+  --   只剩第一张表（多币种首次建库时正是这样暴露出来的）。
+  -- cleanStorage 与 storageStatus 只按时间列过滤，上面的 (source, observed_at)
+  -- 复合索引服务不了单独的 observed_at 条件，缺这批索引会退化成全表扫描并在
+  -- 主线程上阻塞整个服务（2026-09-20 实测 GET / 被 81 秒）。
+  CREATE INDEX IF NOT EXISTS quote_snapshots_observed ON quote_snapshots(observed_at);
+  CREATE INDEX IF NOT EXISTS candles_updated ON candles(updated_at);
+  -- MAX(updated_at) 的覆盖索引：否则走主键索引逐行回表（okx/5s 25 万行），
+  -- 兜底路径 storedMarketFallback 每次调用都要冻结主线程数秒（2026-09-20 采样实锤）。
+  CREATE INDEX IF NOT EXISTS candles_source_interval_updated ON candles(source, interval, updated_at);
+  CREATE INDEX IF NOT EXISTS market_snapshots_observed ON market_snapshots(observed_at);
+  CREATE INDEX IF NOT EXISTS training_runs_observed ON training_runs(observed_at);
+  CREATE INDEX IF NOT EXISTS derivative_snapshots_observed ON derivative_snapshots(observed_at);
+  CREATE INDEX IF NOT EXISTS macro_market_snapshots_observed ON macro_market_snapshots(observed_at);
+  CREATE INDEX IF NOT EXISTS fed_calendar_snapshots_observed ON fed_calendar_snapshots(observed_at);
+  CREATE INDEX IF NOT EXISTS research_predictions_created ON research_predictions(created_at);
+`;
+// 建库即刷一次：BTC 库沿用原文件，其它币种首次打开时创建同构 schema。
+marketDatabase.exec(SCHEMA_SQL);
 // 为既有数据库补充日历回退标识，迁移可重复执行。
 // Add the calendar fallback flag to existing databases; this migration is safe to rerun.
-try { database.exec('ALTER TABLE fed_calendar_snapshots ADD COLUMN is_fallback INTEGER NOT NULL DEFAULT 0'); }
+function applySchemaMigrations(db) {
+try { db.exec('ALTER TABLE fed_calendar_snapshots ADD COLUMN is_fallback INTEGER NOT NULL DEFAULT 0'); }
 catch (error) { if (!/duplicate column name/i.test(error.message)) throw error; }
-try { database.exec('ALTER TABLE derivative_snapshots ADD COLUMN ofi_pct REAL'); }
+try { db.exec('ALTER TABLE derivative_snapshots ADD COLUMN ofi_pct REAL'); }
 catch (error) { if (!/duplicate column name/i.test(error.message)) throw error; }
-const storeQuote = database.prepare('INSERT INTO quote_snapshots (source, observed_at, last, open24h, change_pct, high24, low24) VALUES (?, ?, ?, ?, ?, ?, ?)');
-const storeCandle = database.prepare('INSERT OR IGNORE INTO candles (source, interval, candle_time, open, high, low, close, volume, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
-const updateCandle = database.prepare('UPDATE candles SET open=?, high=?, low=?, close=?, volume=?, updated_at=? WHERE source=? AND interval=? AND candle_time=?');
+// Three-class research outcomes.  Every forecast is judged as up / flat / down against
+// a volatility-scaled threshold instead of a bare up-or-down coin flip; `theta` records
+// the threshold actually used so a verdict can always be recomputed from stored numbers.
+// 三分类研究结论：每条预测按波动缩放阈值判定偏多 / 震荡 / 偏空，并把当时使用的阈值一起存下来，保证任何结论都能从库里复算。
+for (const [table, column, definition] of [
+  ['research_predictions', 'theta', 'REAL'],
+  ['research_predictions', 'flat_probability', 'REAL'],
+  ['research_predictions', 'outcome_label', 'TEXT'],
+  ['research_predictions', 'window_version', 'INTEGER'],
+  ['research_candidate_forecasts', 'theta', 'REAL'],
+  ['research_candidate_forecasts', 'flat_probability', 'REAL'],
+  ['research_candidate_forecasts', 'outcome_label', 'TEXT'],
+  ['research_candidate_forecasts', 'window_version', 'INTEGER'],
+]) {
+  try { db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`); }
+  catch (error) { if (!/duplicate column name/i.test(error.message)) throw error; }
+}
+}
+applySchemaMigrations(marketDatabase);
+
+/* ── 按币种解析的语句句柄 / Coin-resolved statement handles ─────────────────
+ * 下面几十条 prepared statement 是在模块加载期一次性编译的常量。改成多币种后，
+ * 同一个 SQL 必须能落到不同库上，于是用一层惰性代理：常量本身不绑定任何库，
+ * 每次真正调用 .run()/.get()/.all() 时才按「当前请求币种」解析到对应库，
+ * 并按 (库, SQL) 缓存编译结果。调用点 `storeCandle.run(...)` 一个字都不用改。
+ *
+ * Statement constants below are compiled once at module load.  Under multi-coin
+ * the same SQL must reach different files, so each constant becomes a lazy
+ * proxy: it binds to the right database at call time (per currentCoin()) and
+ * memoises the compiled StatementSync per (database, SQL).  Call sites unchanged.
+ */
+const statementCaches = new WeakMap();
+function prepareOn(coin, sql) {
+  const db = databaseFor(coin);
+  let cache = statementCaches.get(db);
+  if (!cache) statementCaches.set(db, cache = new Map());
+  let compiled = cache.get(sql);
+  if (!compiled) cache.set(sql, compiled = db.prepare(sql));
+  return compiled;
+}
+function stmt(sql) {
+  return new Proxy({}, {
+    get(_target, property) {
+      const compiled = prepareOn(currentCoin(), sql);
+      const value = compiled[property];
+      return typeof value === 'function' ? value.bind(compiled) : value;
+    },
+  });
+}
+// 全局 `database` 保留为代理，供 .exec 等一次性调用使用（同样按当前币种解析）。
+const database = new Proxy({}, {
+  get(_target, property) {
+    const db = databaseFor(currentCoin());
+    const value = db[property];
+    return typeof value === 'function' ? value.bind(db) : value;
+  },
+});
+
+const storeQuote = stmt('INSERT INTO quote_snapshots (source, observed_at, last, open24h, change_pct, high24, low24) VALUES (?, ?, ?, ?, ?, ?, ?)');
+const storeCandle = stmt('INSERT OR IGNORE INTO candles (source, interval, candle_time, open, high, low, close, volume, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
+const updateCandle = stmt('UPDATE candles SET open=?, high=?, low=?, close=?, volume=?, updated_at=? WHERE source=? AND interval=? AND candle_time=?');
 // OKX does not publish sub-minute candles for this perpetual contract.  These
 // rows are built strictly from the public OKX trade stream and remain local.
-const upsertSyntheticOkxCandle = database.prepare(`INSERT INTO candles
+const upsertSyntheticOkxCandle = stmt(`INSERT INTO candles
   (source, interval, candle_time, open, high, low, close, volume, updated_at)
   VALUES ('okx', ?, ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(source, interval, candle_time) DO UPDATE SET
     high=MAX(candles.high, excluded.high), low=MIN(candles.low, excluded.low),
     close=excluded.close, volume=candles.volume + excluded.volume,
     updated_at=excluded.updated_at`);
-const storeMarketSnapshot = database.prepare('INSERT INTO market_snapshots (source, interval, observed_at, candle_count, last, cached) VALUES (?, ?, ?, ?, ?, ?)');
-const storeTrainingRun = database.prepare('INSERT INTO training_runs (observed_at, source, intraday_count, daily_count, forced) VALUES (?, ?, ?, ?, ?)');
-const storeDerivativeSnapshot = database.prepare('INSERT INTO derivative_snapshots (source, observed_at, funding_rate, oi, book_imbalance_pct, book_ratio, taker_buy_ratio_pct, taker_trade_count, ofi_pct) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
-const storeSentimentSnapshot = database.prepare('INSERT INTO sentiment_snapshots (observed_at, value, classification, source) VALUES (?, ?, ?, ?)');
-const storeMacroMarketSnapshot = database.prepare('INSERT INTO macro_market_snapshots (observed_at, metric_key, value, change_pct, available, source, cadence) VALUES (?, ?, ?, ?, ?, ?, ?)');
-const storeFedCalendarSnapshot = database.prepare('INSERT INTO fed_calendar_snapshots (observed_at, event_key, event_name, event_at, source, is_fallback) VALUES (?, ?, ?, ?, ?, ?)');
-const storeNewsSnapshot = database.prepare('INSERT OR IGNORE INTO btc_news_snapshots (observed_at, published_at, title, url, source, sentiment) VALUES (?, ?, ?, ?, ?, ?)');
-const priorOiSnapshot = database.prepare('SELECT observed_at, oi FROM derivative_snapshots WHERE source=? AND observed_at<=? AND oi IS NOT NULL ORDER BY observed_at DESC LIMIT 1');
-const priorFundingSnapshot = database.prepare('SELECT observed_at, funding_rate FROM derivative_snapshots WHERE source=? AND observed_at<=? AND funding_rate IS NOT NULL ORDER BY observed_at DESC LIMIT 1');
-const priorQuoteSnapshot = database.prepare('SELECT observed_at, last FROM quote_snapshots WHERE source=? AND observed_at<=? AND last IS NOT NULL ORDER BY observed_at DESC LIMIT 1');
-const latestQuoteForSource = database.prepare('SELECT observed_at, last, open24h, change_pct, high24, low24 FROM quote_snapshots WHERE source=? ORDER BY observed_at DESC LIMIT 1');
-const latestCandleUpdateForSource = database.prepare('SELECT MAX(updated_at) AS updated_at FROM candles WHERE source=? AND interval=?');
-const latestSentimentSnapshot = database.prepare('SELECT observed_at, value, classification, source FROM sentiment_snapshots ORDER BY observed_at DESC LIMIT 1');
-const latestFedCalendarSnapshots = database.prepare(`SELECT snapshot.observed_at, snapshot.event_key, snapshot.event_name, snapshot.event_at, snapshot.source, snapshot.is_fallback
+const storeMarketSnapshot = stmt('INSERT INTO market_snapshots (source, interval, observed_at, candle_count, last, cached) VALUES (?, ?, ?, ?, ?, ?)');
+const storeTrainingRun = stmt('INSERT INTO training_runs (observed_at, source, intraday_count, daily_count, forced) VALUES (?, ?, ?, ?, ?)');
+const storeDerivativeSnapshot = stmt('INSERT INTO derivative_snapshots (source, observed_at, funding_rate, oi, book_imbalance_pct, book_ratio, taker_buy_ratio_pct, taker_trade_count, ofi_pct) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
+const storeSentimentSnapshot = stmt('INSERT INTO sentiment_snapshots (observed_at, value, classification, source) VALUES (?, ?, ?, ?)');
+const storeMacroMarketSnapshot = stmt('INSERT INTO macro_market_snapshots (observed_at, metric_key, value, change_pct, available, source, cadence) VALUES (?, ?, ?, ?, ?, ?, ?)');
+const storeFedCalendarSnapshot = stmt('INSERT INTO fed_calendar_snapshots (observed_at, event_key, event_name, event_at, source, is_fallback) VALUES (?, ?, ?, ?, ?, ?)');
+const storeNewsSnapshot = stmt('INSERT OR IGNORE INTO btc_news_snapshots (observed_at, published_at, title, url, source, sentiment) VALUES (?, ?, ?, ?, ?, ?)');
+const priorOiSnapshot = stmt('SELECT observed_at, oi FROM derivative_snapshots WHERE source=? AND observed_at<=? AND oi IS NOT NULL ORDER BY observed_at DESC LIMIT 1');
+const priorFundingSnapshot = stmt('SELECT observed_at, funding_rate FROM derivative_snapshots WHERE source=? AND observed_at<=? AND funding_rate IS NOT NULL ORDER BY observed_at DESC LIMIT 1');
+const priorQuoteSnapshot = stmt('SELECT observed_at, last FROM quote_snapshots WHERE source=? AND observed_at<=? AND last IS NOT NULL ORDER BY observed_at DESC LIMIT 1');
+const latestQuoteForSource = stmt('SELECT observed_at, last, open24h, change_pct, high24, low24 FROM quote_snapshots WHERE source=? ORDER BY observed_at DESC LIMIT 1');
+const latestCandleUpdateForSource = stmt('SELECT MAX(updated_at) AS updated_at FROM candles WHERE source=? AND interval=?');
+const latestSentimentSnapshot = stmt('SELECT observed_at, value, classification, source FROM sentiment_snapshots ORDER BY observed_at DESC LIMIT 1');
+const latestFedCalendarSnapshots = stmt(`SELECT snapshot.observed_at, snapshot.event_key, snapshot.event_name, snapshot.event_at, snapshot.source, snapshot.is_fallback
   FROM fed_calendar_snapshots AS snapshot
   INNER JOIN (SELECT event_key, MAX(observed_at) AS observed_at FROM fed_calendar_snapshots GROUP BY event_key) AS latest
     ON latest.event_key=snapshot.event_key AND latest.observed_at=snapshot.observed_at
   ORDER BY snapshot.event_at ASC`);
-const storeResearchPrediction = database.prepare('INSERT OR IGNORE INTO research_predictions (bucket_at, created_at, horizon_key, candle_interval, target_at, entry_price, raw_probability, calibrated_probability, direction, regime) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
-const pendingResearchPredictions = database.prepare('SELECT id, horizon_key, candle_interval, target_at, entry_price FROM research_predictions WHERE settled_at IS NULL AND target_at<=? ORDER BY target_at ASC');
-const settleResearchPrediction = database.prepare('UPDATE research_predictions SET settled_at=?, settled_price=?, actual_return=?, is_up=?, brier=? WHERE id=?');
-const storeResearchTrainingRun = database.prepare('INSERT INTO research_training_runs (started_at, status, model_name) VALUES (?, ?, ?)');
-const completeResearchTrainingRun = database.prepare('UPDATE research_training_runs SET completed_at=?, status=?, metrics_json=?, samples_json=?, error=? WHERE id=?');
-const storeCandidatePrediction = database.prepare('INSERT OR IGNORE INTO research_candidate_predictions (training_run_id, created_at, horizon_key, candle_interval, target_at, entry_price, probability, direction) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
-const pendingCandidatePredictions = database.prepare('SELECT id, training_run_id, candle_interval, target_at, entry_price, probability FROM research_candidate_predictions WHERE settled_at IS NULL AND target_at<=? ORDER BY target_at ASC');
-const settleCandidatePrediction = database.prepare('UPDATE research_candidate_predictions SET settled_at=?, settled_price=?, actual_return=?, is_up=?, brier=? WHERE id=?');
-const storeCandidateForecast = database.prepare('INSERT OR IGNORE INTO research_candidate_forecasts (training_run_id, bucket_at, created_at, horizon_key, candle_interval, target_at, entry_price, probability, direction) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
-const pendingCandidateForecasts = database.prepare('SELECT id, candle_interval, target_at, entry_price, probability FROM research_candidate_forecasts WHERE settled_at IS NULL AND target_at<=? ORDER BY target_at ASC');
-const settleCandidateForecast = database.prepare('UPDATE research_candidate_forecasts SET settled_at=?, settled_price=?, actual_return=?, is_up=?, brier=? WHERE id=?');
-const storeAbShadowPair = database.prepare('INSERT OR IGNORE INTO ab_shadow_pairs (experiment_key, bucket_at, source, candle_interval, horizon_key, target_at, entry_price, regime, a_probability, a_direction, b_probability, b_direction, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
-const pendingAbShadowPairs = database.prepare('SELECT id, candle_interval, target_at, entry_price FROM ab_shadow_pairs WHERE settled_at IS NULL AND target_at<=? ORDER BY target_at ASC');
-const settleAbShadowPair = database.prepare('UPDATE ab_shadow_pairs SET settled_at=?, settled_price=?, actual_return=?, is_up=? WHERE id=?');
+const storeResearchPrediction = stmt('INSERT OR IGNORE INTO research_predictions (bucket_at, created_at, horizon_key, candle_interval, target_at, entry_price, raw_probability, calibrated_probability, flat_probability, direction, regime, theta, window_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+// A horizon re-rates until its bucket settles: the newest model output must replace the
+// row the page will later be graded on, instead of being silently dropped by IGNORE.
+// 同一周期在结算前会反复重估：最新模型输出必须覆盖将要被评分的那一行，而不是被 IGNORE 静默丢弃。
+// window_version 2 marks rows graded on the corrected window: entry is the close of the anchor
+// bar and settlement is the close of the bar that closes exactly one horizon later.  Rows without
+// it were settled against whichever bar happened to be available when a page was opened, so their
+// realised window length varied.  They stay in the table but never enter the authoritative
+// three-class numbers.
+// window_version 2 表示该行采用修正后的窗口：入场取锚定 K 线的收盘，结算取恰好一个持有期之后
+// 收盘的那根。没有此标记的行，结算用的是「打开页面时恰好可用的那根 K 线」，实际持有窗口长度
+// 随访问时机变化；它们保留在表内，但不计入权威的三分类口径。
+const updateResearchPrediction = stmt('UPDATE research_predictions SET created_at=?, target_at=?, entry_price=?, raw_probability=?, calibrated_probability=?, flat_probability=?, direction=?, regime=?, theta=?, window_version=? WHERE bucket_at=? AND horizon_key=? AND settled_at IS NULL');
+const pendingResearchPredictions = stmt('SELECT id, horizon_key, candle_interval, target_at, entry_price, theta FROM research_predictions WHERE settled_at IS NULL AND target_at<=? ORDER BY target_at ASC');
+const settleResearchPrediction = stmt('UPDATE research_predictions SET settled_at=?, settled_price=?, actual_return=?, is_up=?, outcome_label=?, brier=? WHERE id=?');
+const storeResearchTrainingRun = stmt('INSERT INTO research_training_runs (started_at, status, model_name) VALUES (?, ?, ?)');
+const completeResearchTrainingRun = stmt('UPDATE research_training_runs SET completed_at=?, status=?, metrics_json=?, samples_json=?, error=? WHERE id=?');
+const storeCandidatePrediction = stmt('INSERT OR IGNORE INTO research_candidate_predictions (training_run_id, created_at, horizon_key, candle_interval, target_at, entry_price, probability, direction) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+const pendingCandidatePredictions = stmt('SELECT id, training_run_id, candle_interval, target_at, entry_price, probability FROM research_candidate_predictions WHERE settled_at IS NULL AND target_at<=? ORDER BY target_at ASC');
+const settleCandidatePrediction = stmt('UPDATE research_candidate_predictions SET settled_at=?, settled_price=?, actual_return=?, is_up=?, brier=? WHERE id=?');
+const storeCandidateForecast = stmt('INSERT OR IGNORE INTO research_candidate_forecasts (training_run_id, bucket_at, created_at, horizon_key, candle_interval, target_at, entry_price, probability, flat_probability, direction, theta, window_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+const pendingCandidateForecasts = stmt('SELECT id, candle_interval, target_at, entry_price, probability, theta, flat_probability FROM research_candidate_forecasts WHERE settled_at IS NULL AND target_at<=? ORDER BY target_at ASC');
+const settleCandidateForecast = stmt('UPDATE research_candidate_forecasts SET settled_at=?, settled_price=?, actual_return=?, is_up=?, outcome_label=?, brier=? WHERE id=?');
+const pendingAbShadowPairs = stmt('SELECT id, candle_interval, target_at, entry_price FROM ab_shadow_pairs WHERE settled_at IS NULL AND target_at<=? ORDER BY target_at ASC');
+const settleAbShadowPair = stmt('UPDATE ab_shadow_pairs SET settled_at=?, settled_price=?, actual_return=?, is_up=? WHERE id=?');
 let lastStorageCleanup = 0;
 let researchTrainingInProgress = false;
 const lastStoredQuote = new Map();
 const lastStoredDerivative = new Map();
 function safelyStore(work) { try { work(); } catch (error) { console.error('SQLite storage error:', error.message); } }
+// 清理必须对**每个已打开的库**各跑一遍：币种各自一个文件，只清 BTC 库会让
+// 其它币种的快照无限增长。这里绕开 stmt() 的币种解析，显式按库执行。
+// Cleanup has to run once per open database: with one file per coin, cleaning
+// only the BTC file would let the others grow without bound.
+function cleanStorageOn(db, now) {
+  const run = (sql, ...args) => db.prepare(sql).run(...args);
+  run('DELETE FROM quote_snapshots WHERE observed_at < ?', now - 7 * 86_400_000);
+  run('DELETE FROM market_snapshots WHERE observed_at < ?', now - 30 * 86_400_000);
+  run('DELETE FROM candles WHERE updated_at < ?', now - 90 * 86_400_000);
+  run('DELETE FROM training_runs WHERE observed_at < ?', now - 180 * 86_400_000);
+  run('DELETE FROM derivative_snapshots WHERE observed_at < ?', now - 14 * 86_400_000);
+  run('DELETE FROM sentiment_snapshots WHERE observed_at < ?', now - 365 * 86_400_000);
+  run('DELETE FROM macro_market_snapshots WHERE observed_at < ?', now - 180 * 86_400_000);
+  run('DELETE FROM fed_calendar_snapshots WHERE observed_at < ?', now - 180 * 86_400_000);
+  run('DELETE FROM btc_news_snapshots WHERE observed_at < ?', now - 30 * 86_400_000);
+  run('DELETE FROM research_predictions WHERE created_at < ?', now - 180 * 86_400_000);
+  db.exec('PRAGMA wal_checkpoint(PASSIVE)');
+}
 function cleanStorage(now) {
   if (now - lastStorageCleanup < 3_600_000) return;
   lastStorageCleanup = now;
-  database.prepare('DELETE FROM quote_snapshots WHERE observed_at < ?').run(now - 7 * 86_400_000);
-  database.prepare('DELETE FROM market_snapshots WHERE observed_at < ?').run(now - 30 * 86_400_000);
-  database.prepare('DELETE FROM candles WHERE updated_at < ?').run(now - 90 * 86_400_000);
-  database.prepare('DELETE FROM training_runs WHERE observed_at < ?').run(now - 180 * 86_400_000);
-  database.prepare('DELETE FROM derivative_snapshots WHERE observed_at < ?').run(now - 14 * 86_400_000);
-  database.prepare('DELETE FROM sentiment_snapshots WHERE observed_at < ?').run(now - 365 * 86_400_000);
-  database.prepare('DELETE FROM macro_market_snapshots WHERE observed_at < ?').run(now - 180 * 86_400_000);
-  database.prepare('DELETE FROM fed_calendar_snapshots WHERE observed_at < ?').run(now - 180 * 86_400_000);
-  database.prepare('DELETE FROM btc_news_snapshots WHERE observed_at < ?').run(now - 30 * 86_400_000);
-  database.prepare('DELETE FROM research_predictions WHERE created_at < ?').run(now - 180 * 86_400_000);
-  database.exec('PRAGMA wal_checkpoint(PASSIVE)');
+  for (const db of allDatabases()) {
+    try { cleanStorageOn(db, now); }
+    catch (error) { console.error('SQLite storage cleanup error:', error.message); }
+  }
 }
+const persistKey = (source) => `${currentCoin()}:${source}`;
 function persistQuote(source, ticker, observedAt) {
-  if (observedAt - (lastStoredQuote.get(source) || 0) < 5_000) return;
-  lastStoredQuote.set(source, observedAt);
+  const key = persistKey(source);
+  if (observedAt - (lastStoredQuote.get(key) || 0) < 5_000) return;
+  lastStoredQuote.set(key, observedAt);
   safelyStore(() => { storeQuote.run(source, observedAt, ticker.last, ticker.open24h, ticker.changePct, ticker.high24, ticker.low24); cleanStorage(observedAt); });
 }
+const lastPersistMarket = new Map();
 function persistMarket(result, interval) {
+  // 蜡烛每 60s 才重写一次：行情窗口只在最新几根变化，逐次全量写盘既浪费又占主线程。
+  // 兜底/历史数据最多滞后 60s，对展示与回放无影响。
+  const key = `${persistKey(result.source)}:${interval}`, now = result.fetchedAt;
+  if (now - (lastPersistMarket.get(key) || 0) < 60_000) return;
+  lastPersistMarket.set(key, now);
   safelyStore(() => {
-    const now = result.fetchedAt;
-    storeMarketSnapshot.run(result.source, interval, now, result.candles.length, result.ticker.last, 0);
-    result.candles.forEach(candle => storeCandle.run(result.source, interval, candle.time, candle.open, candle.high, candle.low, candle.close, candle.volume, now));
-    result.candles.slice(-2).forEach(candle => updateCandle.run(candle.open, candle.high, candle.low, candle.close, candle.volume, now, result.source, interval, candle.time));
-    persistQuote(result.source, result.ticker, now);
-    cleanStorage(now);
+    const t = result.fetchedAt;
+    storeMarketSnapshot.run(result.source, interval, t, result.candles.length, result.ticker.last, 0);
+    result.candles.forEach(candle => storeCandle.run(result.source, interval, candle.time, candle.open, candle.high, candle.low, candle.close, candle.volume, t));
+    result.candles.slice(-2).forEach(candle => updateCandle.run(candle.open, candle.high, candle.low, candle.close, candle.volume, t, result.source, interval, candle.time));
+    persistQuote(result.source, result.ticker, t);
+    cleanStorage(t);
   });
 }
 function persistTrainingRun(value, forced) {
   safelyStore(() => storeTrainingRun.run(value.fetchedAt, value.source, value.intraday.length, value.daily.length, forced ? 1 : 0));
 }
 function persistDerivativeSnapshot(source, values, observedAt = Date.now()) {
-  if (observedAt - (lastStoredDerivative.get(source) || 0) < 10_000) return;
-  lastStoredDerivative.set(source, observedAt);
+  const key = persistKey(source);
+  if (observedAt - (lastStoredDerivative.get(key) || 0) < 10_000) return;
+  lastStoredDerivative.set(key, observedAt);
   const numberOrNull = value => Number.isFinite(value) ? value : null;
   safelyStore(() => {
     storeDerivativeSnapshot.run(source, observedAt, numberOrNull(values.fundingRate), numberOrNull(values.oi), numberOrNull(values.bookImbalancePct), numberOrNull(values.bookRatio), numberOrNull(values.takerBuyRatioPct), Number.isFinite(values.takerTradeCount) ? values.takerTradeCount : null, numberOrNull(values.ofiPct));
@@ -462,7 +657,7 @@ function persistNewsSnapshots(items, observedAt = Date.now()) {
   });
 }
 function storedCandles(source, interval, limit) {
-  const rows = database.prepare('SELECT candle_time AS time, open, high, low, close, volume FROM candles WHERE source=? AND interval=? ORDER BY candle_time DESC LIMIT ?').all(source, interval, limit);
+  const rows = stmt('SELECT candle_time AS time, open, high, low, close, volume FROM candles WHERE source=? AND interval=? ORDER BY candle_time DESC LIMIT ?').all(source, interval, limit);
   return rows.reverse().map(row => ({ time:+row.time, open:+row.open, high:+row.high, low:+row.low, close:+row.close, volume:+row.volume })).filter(validCandle);
 }
 function storedMarketFallback(source, interval, limit, reason) {
@@ -491,9 +686,14 @@ function persistHistory(source, interval, candles) {
     cleanStorage(now);
   });
 }
+let storageStatusCache={at:0,value:null};
 function storageStatus() {
-  const count = table => database.prepare(`SELECT COUNT(*) AS total FROM ${table}`).get().total;
-  return { engine:'SQLite', quoteSnapshots:count('quote_snapshots'), candles:count('candles'), marketSnapshots:count('market_snapshots'), trainingRuns:count('training_runs'), derivativeSnapshots:count('derivative_snapshots'), sentimentSnapshots:count('sentiment_snapshots'), macroMarketSnapshots:count('macro_market_snapshots'), fedCalendarSnapshots:count('fed_calendar_snapshots'), newsSnapshots:count('btc_news_snapshots') };
+  // COUNT(*) 全表统计很重（market_snapshots 80 万行级别），自检面板每次刷新都会
+  // 打 /api/status；加 30 秒缓存避免每次请求都在主线程上同步扫表。
+  if (storageStatusCache.value && Date.now() - storageStatusCache.at < 30_000) return storageStatusCache.value;
+  const count = table => stmt(`SELECT COUNT(*) AS total FROM ${table}`).get().total;
+  storageStatusCache = { at:Date.now(), value:{ engine:'SQLite', quoteSnapshots:count('quote_snapshots'), candles:count('candles'), marketSnapshots:count('market_snapshots'), trainingRuns:count('training_runs'), derivativeSnapshots:count('derivative_snapshots'), sentimentSnapshots:count('sentiment_snapshots'), macroMarketSnapshots:count('macro_market_snapshots'), fedCalendarSnapshots:count('fed_calendar_snapshots'), newsSnapshots:count('btc_news_snapshots') } };
+  return storageStatusCache.value;
 }
 // 分层缓存策略：报价由 OKX 流持续推送，图表/指标以较低频率刷新，慢速历史保留在 SQLite。
 // Layered cache policy: quotes come from the OKX stream, chart/indicator data
@@ -505,7 +705,7 @@ const SENTIMENT_TTL = 120_000;
 const FED_CALENDAR_TTL = 600_000;
 const FED_MARKET_SIGNALS_TTL = 600_000;
 const NEWS_TTL = 900_000;
-const QUOTE_TTL = 1_000;
+const QUOTE_TTL = 300;
 const UPSTREAM_TIMEOUT = 1_200;
 // A market request must always finish promptly.  Individual upstream calls have
 // their own abort timer, but this protects callers from a stuck/coalesced task.
@@ -516,6 +716,14 @@ const MAX_MARKET_CANDLES = 1800;
 const STALE_QUOTE_MAX_AGE = 60_000;
 const cache = new Map();
 const inFlight = new Map();
+/* 与币种相关的缓存键必须加币种前缀，否则切换币种会命中上一个币种的缓存。
+ * 宏观类缓存（美联储日历、投资日历、情绪指数）全网共用，故意不加前缀 ——
+ * 它们与币种无关，加前缀只会把上游请求数翻四倍。
+ * Coin-dependent cache keys must carry a coin prefix; a plain key would let a
+ * coin switch hit the previous coin's cache.  Macro-level caches (Fed calendar,
+ * investment calendar, sentiment) are deliberately shared: they are coin-agnostic
+ * and prefixing them would quadruple upstream traffic for no benefit. */
+const coinKey = (key) => `${currentCoin()}:${key}`;
 function cacheResult(hit, now = Date.now()) {
   return { ...hit.value, cached:true, cacheAgeMs:Math.max(0, now - hit.time) };
 }
@@ -555,9 +763,57 @@ const okxStream = {
   lastMessageAt:0, tickerAt:0, contextAt:0, connectedAt:0,
   reconnects:0, lastError:null, retryMs:1_000, heartbeat:null, retryTimer:null
 };
+/* 多币种：BTC 继续复用上面这个 okxStream 本体（连接级字段 + BTC 行情字段都在上面），
+ * 其余币种各挂一份纯行情状态。于是「比特币模式」读到的字段与多币种改造前逐字相同，
+ * 不需要任何分支兼容；新增币种也不会让 BTC 的读写路径多走一层。
+ * Multi-coin: BTC keeps using okxStream itself (it carries both connection state
+ * and BTC market state); every other coin gets a market-only state object. */
+const okxCoinStreams = new Map([[BASE_COIN, okxStream]]);
+function createAltOkxStreamState(coin) {
+  return {
+    coin, ticker:null, spotPrice:null, fundingRate:null, nextFundingRate:null,
+    oi:null, oiUnit:coin, orderBook:null, takerTrades:[], cvdNotional:0,
+    bookAt:0, tradeAt:0, premiumPct:null, premiumAt:0, tickerAt:0, contextAt:0
+  };
+}
+function streamFor(coin = currentCoin()) {
+  const key = normalizeCoin(coin);
+  if (key === BASE_COIN) return okxStream;
+  let state = okxCoinStreams.get(key);
+  if (!state) okxCoinStreams.set(key, state = createAltOkxStreamState(key));
+  return state;
+}
+/** 全部已登记的币种流（BTC 在最前），供定时落库遍历。 */
+function allOkxStreams() {
+  return COIN_KEYS.map(key => ({ coin:key, state:streamFor(key) }));
+}
+// instId → 币种反查表：WebSocket 推送只有 instId，必须能反解出它属于哪个币。
+const OKX_INSTID_TO_COIN = new Map();
+for (const key of COIN_KEYS) {
+  OKX_INSTID_TO_COIN.set(COINS[key].okx.swap, key);
+  OKX_INSTID_TO_COIN.set(COINS[key].okx.spot, key);
+}
+const isOkxSpotInstId = instId => instId.endsWith('-USDT') && !instId.endsWith('-SWAP');
+/** 一条公共连接订阅全部币种的六个频道（4 币 × 6 = 24，远低于 OKX 单连接上限）。 */
+function okxSubscribeArgs() {
+  const args = [];
+  for (const key of COIN_KEYS) {
+    const { swap, spot } = COINS[key].okx;
+    args.push(
+      { channel:'tickers', instId:swap }, { channel:'tickers', instId:spot },
+      { channel:'funding-rate', instId:swap }, { channel:'open-interest', instType:'SWAP', instId:swap },
+      { channel:'books5', instId:swap }, { channel:'trades', instId:swap }
+    );
+  }
+  return args;
+}
 const syntheticOkxIntervals = new Map([['5s', 5_000], ['10s', 10_000], ['30s', 30_000]]);
 const isSyntheticOkxInterval = interval => syntheticOkxIntervals.has(interval);
-function recordSyntheticOkxTrade(trade, receivedAt = Date.now()) {
+// 合成 K 线原本在每笔成交时同步写库：3 个周期 × 每秒数十笔成交 = 主线程每秒上百次
+// 同步 UPSERT，直接拖垮 GET / 等所有请求（CPU 仅 3% 却处处慢，根因是等盘）。
+// 改为内存聚合，每 1s 批量落库一次：落库次数从「每笔成交×周期」降到「每秒若干桶」。
+const syntheticCandleBuffer = new Map();
+function recordSyntheticOkxTrade(trade, coin = BASE_COIN, receivedAt = Date.now()) {
   const price = Number(trade.px), size = Number(trade.sz);
   // `ts` is the exchange event time.  It keeps bucket boundaries independent
   // of local WebSocket latency.
@@ -565,24 +821,47 @@ function recordSyntheticOkxTrade(trade, receivedAt = Date.now()) {
   if (!Number.isFinite(price) || !Number.isFinite(size) || size <= 0 || !Number.isFinite(tradeAt)) return;
   for (const [interval, bucketMs] of syntheticOkxIntervals) {
     const bucketAt = Math.floor(tradeAt / bucketMs) * bucketMs;
-    safelyStore(() => upsertSyntheticOkxCandle.run(interval, bucketAt, price, price, price, price, size, receivedAt));
+    const key = `${coin}:${interval}:${bucketAt}`;
+    const cur = syntheticCandleBuffer.get(key);
+    if (cur) {
+      if (price > cur.high) cur.high = price;
+      if (price < cur.low) cur.low = price;
+      cur.close = price; cur.volume += size;
+      if (receivedAt > cur.updatedAt) cur.updatedAt = receivedAt;
+    } else {
+      syntheticCandleBuffer.set(key, { coin, interval, bucketAt, open:price, high:price, low:price, close:price, volume:size, updatedAt:receivedAt });
+    }
   }
 }
-function streamAge(at, now = Date.now()) { return at ? Math.max(0, now - at) : null; }
-function freshOkxTicker(maxAge = 5_000) {
-  return okxStream.ticker && streamAge(okxStream.tickerAt) <= maxAge ? { ...okxStream.ticker } : null;
+function flushSyntheticCandles() {
+  if (!syntheticCandleBuffer.size) return;
+  const pending = [...syntheticCandleBuffer.values()];
+  syntheticCandleBuffer.clear();
+  // 每个币种写自己的库：必须显式进入该币种的上下文，否则会串写到 BTC。
+  for (const coin of new Set(pending.map(c => c.coin))) {
+    coinScope.run(coin, () => safelyStore(() => {
+      for (const c of pending) if (c.coin === coin) upsertSyntheticOkxCandle.run(c.interval, c.bucketAt, c.open, c.high, c.low, c.close, c.volume, c.updatedAt);
+    }));
+  }
 }
-function recentTakerFlow(now = Date.now()) {
+setInterval(flushSyntheticCandles, 1_000).unref?.();
+function streamAge(at, now = Date.now()) { return at ? Math.max(0, now - at) : null; }
+function freshOkxTicker(maxAge = 5_000, coin = currentCoin()) {
+  const st = streamFor(coin);
+  return st.ticker && streamAge(st.tickerAt) <= maxAge ? { ...st.ticker } : null;
+}
+function recentTakerFlow(now = Date.now(), coin = currentCoin()) {
+  const st = streamFor(coin);
   const cutoff = now - 60_000;
-  okxStream.takerTrades = okxStream.takerTrades.filter(trade => trade.time >= cutoff);
-  const buys = okxStream.takerTrades.filter(trade => trade.side === 'buy').reduce((sum, trade) => sum + trade.notional, 0);
-  const sells = okxStream.takerTrades.filter(trade => trade.side === 'sell').reduce((sum, trade) => sum + trade.notional, 0);
+  st.takerTrades = st.takerTrades.filter(trade => trade.time >= cutoff);
+  const buys = st.takerTrades.filter(trade => trade.side === 'buy').reduce((sum, trade) => sum + trade.notional, 0);
+  const sells = st.takerTrades.filter(trade => trade.side === 'sell').reduce((sum, trade) => sum + trade.notional, 0);
   const total = buys + sells;
   return total > 0 ? {
     buyNotional:buys, sellNotional:sells, buyRatioPct:buys / total * 100,
-    imbalancePct:(buys - sells) / total * 100, tradeCount:okxStream.takerTrades.length,
-    cvd60Notional:buys-sells, cvdSessionNotional:okxStream.cvdNotional,
-    windowSeconds:60, updatedAt:okxStream.tradeAt || null
+    imbalancePct:(buys - sells) / total * 100, tradeCount:st.takerTrades.length,
+    cvd60Notional:buys-sells, cvdSessionNotional:st.cvdNotional,
+    windowSeconds:60, updatedAt:st.tradeAt || null
   } : null;
   }
 // Voice rules are evaluated and spoken by the browser only.  The local server
@@ -663,7 +942,7 @@ async function relayTick() {
   if (fresh) last = fresh.last;
   if (!Number.isFinite(last)) {
     try {
-      const fetched = await fetch('https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT', { signal: AbortSignal.timeout(4_000) });
+      const fetched = await fetch(`https://www.okx.com/api/v5/market/ticker?instId=${okxSpotId()}`, { signal: AbortSignal.timeout(4_000) });
       if (fetched.ok) {
         const data = await fetched.json();
         last = Number(data?.data?.[0]?.last);
@@ -707,41 +986,48 @@ async function relayTick() {
 }
 if (SERVER_VOICE_RELAY_ENABLED)
   setInterval(relayTick, VOICE_RELAY_INTERVAL_MS).unref?.();
-function okxDerivativeFeatures(now = Date.now()) {
-  const book = okxStream.orderBook && streamAge(okxStream.bookAt, now) <= 10_000 ? { ...okxStream.orderBook, updatedAt:okxStream.bookAt } : null;
-  const takerFlow = recentTakerFlow(now);
+function okxDerivativeFeatures(now = Date.now(), coin = currentCoin()) {
+  const st = streamFor(coin);
+  const book = st.orderBook && streamAge(st.bookAt, now) <= 10_000 ? { ...st.orderBook, updatedAt:st.bookAt } : null;
+  const takerFlow = recentTakerFlow(now, coin);
   const oiBaseline = priorOiSnapshot.get('okx', now - 300_000);
   const fundingBaseline = priorFundingSnapshot.get('okx', now - 3_600_000);
   const priceBaseline = priorQuoteSnapshot.get('okx', now - 300_000);
-  const oiChangePct = Number.isFinite(okxStream.oi) && Number.isFinite(+oiBaseline?.oi) && +oiBaseline.oi !== 0 ? (okxStream.oi / +oiBaseline.oi - 1) * 100 : null;
-  const fundingChangePct = Number.isFinite(okxStream.fundingRate) && Number.isFinite(+fundingBaseline?.funding_rate) ? (okxStream.fundingRate - +fundingBaseline.funding_rate) * 100 : null;
-  const priceChangePct = Number.isFinite(okxStream.ticker?.last) && Number.isFinite(+priceBaseline?.last) && +priceBaseline.last !== 0 ? (okxStream.ticker.last / +priceBaseline.last - 1) * 100 : null;
+  const oiChangePct = Number.isFinite(st.oi) && Number.isFinite(+oiBaseline?.oi) && +oiBaseline.oi !== 0 ? (st.oi / +oiBaseline.oi - 1) * 100 : null;
+  const fundingChangePct = Number.isFinite(st.fundingRate) && Number.isFinite(+fundingBaseline?.funding_rate) ? (st.fundingRate - +fundingBaseline.funding_rate) * 100 : null;
+  const priceChangePct = Number.isFinite(st.ticker?.last) && Number.isFinite(+priceBaseline?.last) && +priceBaseline.last !== 0 ? (st.ticker.last / +priceBaseline.last - 1) * 100 : null;
   return {
     orderBook:book, takerFlow,
-    premiumPct:streamAge(okxStream.premiumAt, now) <= 60_000 ? okxStream.premiumPct : null,
+    premiumPct:streamAge(st.premiumAt, now) <= 60_000 ? st.premiumPct : null,
     liquidationHeat:null, topTraderRatio:null,
     oiChangePct, oiChangeWindowSeconds:oiBaseline ? Math.round((now - +oiBaseline.observed_at) / 1000) : null,
     fundingChangePct, fundingChangeWindowSeconds:fundingBaseline ? Math.round((now - +fundingBaseline.observed_at) / 1000) : null,
     priceChangePct, priceChangeWindowSeconds:priceBaseline ? Math.round((now - +priceBaseline.observed_at) / 1000) : null
   };
 }
+// 每个币种各存一份衍生品快照；必须进入对应币种上下文，否则会落到 BTC 库里。
 function persistOkxDerivativeSnapshot() {
-  const takerFlow = recentTakerFlow(), book = okxStream.orderBook;
-  persistDerivativeSnapshot('okx', {
-    fundingRate:okxStream.fundingRate, oi:okxStream.oi,
-    bookImbalancePct:book?.imbalancePct, bookRatio:book?.ratio,
-    takerBuyRatioPct:takerFlow?.buyRatioPct, takerTradeCount:takerFlow?.tradeCount,
-    ofiPct:book?.ofiPct
-  });
+  for (const { coin, state } of allOkxStreams()) {
+    coinScope.run(coin, () => {
+      const takerFlow = recentTakerFlow(Date.now(), coin), book = state.orderBook;
+      persistDerivativeSnapshot('okx', {
+        fundingRate:state.fundingRate, oi:state.oi,
+        bookImbalancePct:book?.imbalancePct, bookRatio:book?.ratio,
+        takerBuyRatioPct:takerFlow?.buyRatioPct, takerTradeCount:takerFlow?.tradeCount,
+        ofiPct:book?.ofiPct
+      });
+    });
+  }
 }
-function freshOkxContext(maxAge = 30_000) {
-  if (!freshOkxTicker(maxAge) || !Number.isFinite(okxStream.spotPrice) || !Number.isFinite(okxStream.fundingRate) || !Number.isFinite(okxStream.oi) || streamAge(okxStream.contextAt) > maxAge) return null;
-  const ticker = freshOkxTicker(maxAge);
+function freshOkxContext(maxAge = 30_000, coin = currentCoin()) {
+  const st = streamFor(coin);
+  if (!freshOkxTicker(maxAge, coin) || !Number.isFinite(st.spotPrice) || !Number.isFinite(st.fundingRate) || !Number.isFinite(st.oi) || streamAge(st.contextAt) > maxAge) return null;
+  const ticker = freshOkxTicker(maxAge, coin);
   return {
-    source:'okx', fundingRate:okxStream.fundingRate, nextFundingRate:okxStream.nextFundingRate,
-    oi:okxStream.oi, oiUnit:okxStream.oiUnit, basisPct:(ticker.last / okxStream.spotPrice - 1) * 100,
-    perpPrice:ticker.last, spotPrice:okxStream.spotPrice, fetchedAt:okxStream.contextAt,
-    cached:true, cacheAgeMs:streamAge(okxStream.contextAt), transport:'websocket', ...okxDerivativeFeatures()
+    source:'okx', fundingRate:st.fundingRate, nextFundingRate:st.nextFundingRate,
+    oi:st.oi, oiUnit:st.oiUnit, basisPct:(ticker.last / st.spotPrice - 1) * 100,
+    perpPrice:ticker.last, spotPrice:st.spotPrice, fetchedAt:st.contextAt,
+    cached:true, cacheAgeMs:streamAge(st.contextAt), transport:'websocket', ...okxDerivativeFeatures(Date.now(), coin)
   };
 }
 function clearOkxTimers() {
@@ -760,34 +1046,41 @@ function updateOkxStream(message) {
   const channel = message.arg?.channel, instId = message.arg?.instId;
   const rows = message.data; const row = rows?.[0]; if (!row) return;
   const now = Date.now(); okxStream.lastMessageAt = now;
-  if (channel === 'tickers' && instId === 'BTC-USDT-SWAP') {
+  // 反解这条推送属于哪个币种；未登记的 instId 一律忽略（不会污染 BTC 的字段）。
+  const coin = OKX_INSTID_TO_COIN.get(instId);
+  if (!coin) return;
+  const st = streamFor(coin);
+  // 写库操作必须在该币种上下文里跑，否则快照会串进 BTC 库。
+  const inCoin = (work) => coinScope.run(coin, work);
+  const isSpot = isOkxSpotInstId(instId);
+  if (channel === 'tickers' && !isSpot) {
     const ticker = { last:+row.last, open24h:+row.open24h, changePct:(+row.last / +row.open24h - 1) * 100, high24:+row.high24h, low24:+row.low24h };
-    if (Object.values(ticker).every(Number.isFinite)) { okxStream.ticker = ticker; okxStream.tickerAt = now; persistQuote('okx', ticker, now); }
-  } else if (channel === 'tickers' && instId === 'BTC-USDT') {
-    if (Number.isFinite(+row.last)) { okxStream.spotPrice = +row.last; okxStream.contextAt = now; }
+    if (Object.values(ticker).every(Number.isFinite)) { st.ticker = ticker; st.tickerAt = now; inCoin(() => persistQuote('okx', ticker, now)); }
+  } else if (channel === 'tickers' && isSpot) {
+    if (Number.isFinite(+row.last)) { st.spotPrice = +row.last; st.contextAt = now; }
   } else if (channel === 'funding-rate') {
-    if (Number.isFinite(+row.fundingRate)) { okxStream.fundingRate = +row.fundingRate; okxStream.nextFundingRate = Number.isFinite(+row.nextFundingRate) ? +row.nextFundingRate : +row.fundingRate; okxStream.contextAt = now; }
+    if (Number.isFinite(+row.fundingRate)) { st.fundingRate = +row.fundingRate; st.nextFundingRate = Number.isFinite(+row.nextFundingRate) ? +row.nextFundingRate : +row.fundingRate; st.contextAt = now; }
   } else if (channel === 'open-interest') {
     const oi = Number.isFinite(+row.oiCcy) ? +row.oiCcy : +row.oi;
-    if (Number.isFinite(oi)) { okxStream.oi = oi; okxStream.oiUnit = Number.isFinite(+row.oiCcy) ? 'BTC' : 'contracts'; okxStream.contextAt = now; }
+    if (Number.isFinite(oi)) { st.oi = oi; st.oiUnit = Number.isFinite(+row.oiCcy) ? coin : 'contracts'; st.contextAt = now; }
   } else if (channel === 'books5') {
     const depth = values => values.reduce((sum, level) => sum + Math.max(0, +level[0] || 0) * Math.max(0, +level[1] || 0), 0);
     const bidDepth = depth(row.bids || []), askDepth = depth(row.asks || []), total = bidDepth + askDepth;
-    const previous=okxStream.orderBook;
+    const previous=st.orderBook;
     // OFI approximates the signed change in displayed top-of-book liquidity.
     // It is persisted for future time-aligned training, but is not treated as
     // a historical model input until sufficient snapshots have accumulated.
     const previousTotal=(previous?.bidDepth || 0)+(previous?.askDepth || 0);
     const ofiPct=previousTotal>0 ? ((bidDepth-(previous?.bidDepth || 0))-(askDepth-(previous?.askDepth || 0))) / Math.max(total,previousTotal,1)*100 : null;
     const bestBid=+row.bids?.[0]?.[0],bestAsk=+row.asks?.[0]?.[0],mid=(bestBid+bestAsk)/2,spreadBps=Number.isFinite(mid)&&mid>0&&Number.isFinite(bestBid)&&Number.isFinite(bestAsk)?(bestAsk-bestBid)/mid*10_000:null;
-    if (total > 0) { okxStream.orderBook = { bidDepth, askDepth, ratio:askDepth ? bidDepth / askDepth : null, imbalancePct:(bidDepth - askDepth) / total * 100, ofiPct, spreadBps }; okxStream.bookAt = now; }
+    if (total > 0) { st.orderBook = { bidDepth, askDepth, ratio:askDepth ? bidDepth / askDepth : null, imbalancePct:(bidDepth - askDepth) / total * 100, ofiPct, spreadBps }; st.bookAt = now; }
   } else if (channel === 'trades') {
     for (const trade of rows) {
       const price = +trade.px, size = +trade.sz, side = trade.side === 'buy' ? 'buy' : trade.side === 'sell' ? 'sell' : null;
-      if (side && Number.isFinite(price) && Number.isFinite(size) && size > 0) { const notional=price*size;okxStream.takerTrades.push({ time:now, side, notional });okxStream.cvdNotional+=side==='buy'?notional:-notional; recordSyntheticOkxTrade(trade, now); }
+      if (side && Number.isFinite(price) && Number.isFinite(size) && size > 0) { const notional=price*size;st.takerTrades.push({ time:now, side, notional });st.cvdNotional+=side==='buy'?notional:-notional; recordSyntheticOkxTrade(trade, coin, now); }
     }
-    okxStream.tradeAt = now;
-    recentTakerFlow(now);
+    st.tradeAt = now;
+    recentTakerFlow(now, coin);
   }
 }
 function openOkxStream() {
@@ -798,11 +1091,8 @@ function openOkxStream() {
     okxStream.socket = socket;
     socket.addEventListener('open', () => {
       okxStream.status = 'connected'; okxStream.connectedAt = Date.now(); okxStream.retryMs = 1_000; okxStream.lastError = null;
-      socket.send(JSON.stringify({ op:'subscribe', args:[
-        { channel:'tickers', instId:'BTC-USDT-SWAP' }, { channel:'tickers', instId:'BTC-USDT' },
-        { channel:'funding-rate', instId:'BTC-USDT-SWAP' }, { channel:'open-interest', instType:'SWAP', instId:'BTC-USDT-SWAP' },
-        { channel:'books5', instId:'BTC-USDT-SWAP' }, { channel:'trades', instId:'BTC-USDT-SWAP' }
-      ] }));
+      // 一条连接订阅全部币种（BTC 在前），切换币种时无需重连、无订阅延迟。
+      socket.send(JSON.stringify({ op:'subscribe', args:okxSubscribeArgs() }));
       okxStream.heartbeat = setInterval(() => { if (socket.readyState === WebSocket.OPEN) socket.send('ping'); }, 20_000);
       okxStream.heartbeat.unref?.();
     });
@@ -818,7 +1108,14 @@ openOkxStream();
 async function refreshOkxPremium(){
   // This public historical endpoint can take longer than the quote path; run it
   // out of band with its own deadline so it never delays the market response.
-  try { const payload=await request('https://www.okx.com/api/v5/public/premium-history?instId=BTC-USDT-SWAP',8_000),row=payload.data?.[0],value=+row?.premium; if(payload.code==='0'&&Number.isFinite(value)){okxStream.premiumPct=value*100;okxStream.premiumAt=Date.now()} } catch { /* Feature remains unavailable; it never becomes a synthetic value. */ }
+  // 溢价指数按币种分别取：写回对应币种的行情状态，不串到 BTC。
+  for (const { coin, state } of allOkxStreams()) {
+    try {
+      const payload = await request(`https://www.okx.com/api/v5/public/premium-history?instId=${okxInstId(coin, 'swap')}`, 8_000);
+      const row = payload.data?.[0], value = +row?.premium;
+      if (payload.code === '0' && Number.isFinite(value)) { state.premiumPct = value * 100; state.premiumAt = Date.now(); }
+    } catch { /* Feature remains unavailable; it never becomes a synthetic value. */ }
+  }
 }
 // Defer the initial pass until module-level request timing state is initialized.
 queueMicrotask(refreshOkxPremium);
@@ -872,7 +1169,6 @@ async function requireApiCenterAccess(req, res, provider) {
   if (provider === 'qwen' && !alertStore.enabled) return secureCloudTransport(req, res);
   return Boolean(await requireAlertUser(req, res));
 }
-function validCandle(c) { return c && [c.time, c.open, c.high, c.low, c.close, c.volume].every(Number.isFinite); }
 function intervalFor(source, interval) {
   const map = { '1m':'1m', '5m':'5m', '15m':'15m', '30m':'30m', '1h':'1H', '2h':'2H', '3h':'3H', '4h':'4H', '1d':'1D', '1w':'1W' };
   if (source === 'gate' || source === 'binance') return interval === '1h' ? '1h' : interval === '2h' ? '2h' : interval === '4h' ? '4h' : interval === '1d' ? '1d' : interval === '1w' ? '1w' : interval;
@@ -908,8 +1204,8 @@ async function requestText(url, timeout = 8_000) {
 }
 async function fromGate(interval, limit) {
   const [ticker, rows] = await Promise.all([
-    request('https://api.gateio.ws/api/v4/futures/usdt/tickers?contract=BTC_USDT'),
-    request(`https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract=BTC_USDT&interval=${intervalFor('gate', interval)}&limit=${limit}`)
+    request(`https://api.gateio.ws/api/v4/futures/usdt/tickers?contract=${gateId()}`),
+    request(`https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract=${gateId()}&interval=${intervalFor('gate', interval)}&limit=${limit}`)
   ]);
   const d = ticker[0]; if (!d) throw new Error('ticker payload empty');
   return { ticker: { last:+d.last, open24h:+d.last / (1 + (+d.change_percentage || 0) / 100), changePct:+d.change_percentage, high24:+d.high_24h, low24:+d.low_24h }, candles: rows.map(c => ({ time:+c.t*1000, volume:+c.v, close:+c.c, high:+c.h, low:+c.l, open:+c.o })).reverse() };
@@ -923,12 +1219,12 @@ async function okxCandleRows(interval, limit) {
     // history.  The history endpoint has the same current bars but continues
     // beyond that retention boundary, so range selection stays independent
     // from candle granularity.
-    if (limit <= 300) return request(`https://www.okx.com/api/v5/market/history-candles?instId=BTC-USDT-SWAP&bar=${intervalFor('okx', interval)}&limit=${limit}`);
+    if (limit <= 300) return request(`https://www.okx.com/api/v5/market/history-candles?instId=${okxSwapId()}&bar=${intervalFor('okx', interval)}&limit=${limit}`);
     const pages = [], pageSize = 300;
     let after = '';
     for (let page = 0; page < Math.ceil(limit / pageSize); page++) {
       const suffix = after ? `&after=${after}` : '';
-      const payload = await request(`https://www.okx.com/api/v5/market/history-candles?instId=BTC-USDT-SWAP&bar=${intervalFor('okx', interval)}&limit=${pageSize}${suffix}`);
+      const payload = await request(`https://www.okx.com/api/v5/market/history-candles?instId=${okxSwapId()}&bar=${intervalFor('okx', interval)}&limit=${pageSize}${suffix}`);
       if (payload.code !== '0' || !payload.data?.length) return payload;
       pages.push(...payload.data);
       after = payload.data.at(-1)?.[0];
@@ -946,7 +1242,7 @@ async function okxCandleRows(interval, limit) {
   const pageSize = 300;
   for (let page = 0; page < Math.ceil(hourlyNeeded / pageSize); page++) {
     const suffix = after ? `&after=${after}` : '';
-    const payload = await request(`https://www.okx.com/api/v5/market/history-candles?instId=BTC-USDT-SWAP&bar=1H&limit=${pageSize}${suffix}`);
+    const payload = await request(`https://www.okx.com/api/v5/market/history-candles?instId=${okxSwapId()}&bar=1H&limit=${pageSize}${suffix}`);
     if (payload.code !== '0' || !payload.data?.length) throw new Error(payload.msg || 'OKX 1H history unavailable');
     pages.push(...payload.data);
     after = payload.data.at(-1)?.[0];
@@ -958,7 +1254,7 @@ async function okxCandleRows(interval, limit) {
 async function fromOKX(interval, limit) {
   const streamedTicker = freshOkxTicker();
   if (isSyntheticOkxInterval(interval)) {
-    const tickerPayload = streamedTicker ? null : await request('https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT-SWAP');
+    const tickerPayload = streamedTicker ? null : await request(`https://www.okx.com/api/v5/market/ticker?instId=${okxSwapId()}`);
     const row = tickerPayload?.data?.[0];
     const ticker = streamedTicker || (row && tickerPayload.code === '0' ? {
       last:+row.last, open24h:+row.open24h, changePct:(+row.last / +row.open24h - 1) * 100,
@@ -976,7 +1272,7 @@ async function fromOKX(interval, limit) {
     // 仪表盘必须沿用 OKX 移动端永续合约的同一市场，不能混入 BTC-USDT 现货价格。
     // Keep the dashboard on the same market as the OKX mobile perpetual
     // contract, rather than mixing its price with BTC-USDT spot.
-    streamedTicker ? Promise.resolve(null) : request('https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT-SWAP'),
+    streamedTicker ? Promise.resolve(null) : request(`https://www.okx.com/api/v5/market/ticker?instId=${okxSwapId()}`),
     okxCandleRows(interval, limit)
   ]);
   const d = ticker?.data?.[0]; if ((!streamedTicker && (!d || ticker.code !== '0')) || rows.code !== '0') throw new Error(ticker?.msg || rows.msg || 'invalid API payload');
@@ -1017,7 +1313,7 @@ async function coinbasePerpetualCandles(interval, limit) {
   const end = Date.now();
   const start = end - (limit * multiplier + 4) * baseMs;
   const params = new URLSearchParams({ granularity, start:new Date(start).toISOString(), end:new Date(end).toISOString() });
-  const payload = await request(`https://api.international.coinbase.com/api/v1/instruments/BTC-PERP/candles?${params}`, 8_000);
+  const payload = await request(`https://api.international.coinbase.com/api/v1/instruments/${coinbaseId()}/candles?${params}`, 8_000);
   const rows = Array.isArray(payload) ? payload : payload.aggregations;
   if (!Array.isArray(rows)) throw new Error('invalid Coinbase candles payload');
   const candles = rows.map(c => ({
@@ -1030,9 +1326,9 @@ async function fromCoinbase(interval, limit) {
   const end = Date.now(), start = end - 26 * 3_600_000;
   const hourlyParams = new URLSearchParams({ granularity:'ONE_HOUR', start:new Date(start).toISOString(), end:new Date(end).toISOString() });
   const [quotePayload, candles, hourlyPayload] = await Promise.all([
-    request('https://api.international.coinbase.com/api/v1/instruments/BTC-PERP/quote', 8_000),
+    request(`https://api.international.coinbase.com/api/v1/instruments/${coinbaseId()}/quote`, 8_000),
     coinbasePerpetualCandles(interval, limit),
-    request(`https://api.international.coinbase.com/api/v1/instruments/BTC-PERP/candles?${hourlyParams}`, 8_000)
+    request(`https://api.international.coinbase.com/api/v1/instruments/${coinbaseId()}/candles?${hourlyParams}`, 8_000)
   ]);
   const quote = quotePayload.quote || quotePayload;
   const last = +(quote.trade_price || quote.mark_price || candles.at(-1)?.close);
@@ -1050,38 +1346,43 @@ async function fromCoinbase(interval, limit) {
 }
 async function fromBinance(interval, limit) {
   const [ticker, rows] = await Promise.all([
-    request('https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=BTCUSDT'),
-    request(`https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=${intervalFor('binance', interval)}&limit=${limit}`)
+    request(`https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=${binanceId()}`),
+    request(`https://fapi.binance.com/fapi/v1/klines?symbol=${binanceId()}&interval=${intervalFor('binance', interval)}&limit=${limit}`)
   ]);
   return { ticker: { last:+ticker.lastPrice, open24h:+ticker.openPrice, changePct:+ticker.priceChangePercent, high24:+ticker.highPrice, low24:+ticker.lowPrice }, candles: rows.map(c => ({ time:+c[0], open:+c[1], high:+c[2], low:+c[3], close:+c[4], volume:+c[5] })) };
 }
 const loaders = { gate: fromGate, okx: fromOKX, coinbase: fromCoinbase, binance: fromBinance };
 async function liveQuote(source = 'okx') {
-  const selected = loaders[source] ? source : 'okx', key = `quote:${selected}`, hit = cache.get(key);
-  const streamed = selected === 'okx' ? freshOkxTicker() : null;
-  if (streamed) return { source:selected, ticker:streamed, fetchedAt:okxStream.tickerAt, cached:true, cacheAgeMs:streamAge(okxStream.tickerAt), transport:'websocket', stale:false };
+  const selected = loaders[source] ? source : 'okx', key = coinKey(`quote:${selected}`), hit = cache.get(key);
+  // WS 报价的新鲜度窗口收紧到 1.5 秒：流一旦抖动就尽快回退 REST，
+  // 而不是把最长 5 秒前的旧价继续当作「实时」返回给前端。
+  // Tightened from the 5s default: once the stream stutters, fall back to REST
+  // quickly instead of serving a quote that may already be seconds old.
+  const streamed = selected === 'okx' ? freshOkxTicker(1_500) : null;
+  const st = streamFor();
+  if (streamed) return { source:selected, ticker:streamed, fetchedAt:st.tickerAt, cached:true, cacheAgeMs:streamAge(st.tickerAt), transport:'websocket', stale:false };
   if (hit && Date.now() - hit.time < QUOTE_TTL) return { ...cacheResult(hit), transport:hit.value.transport || 'rest', stale:false };
-  const prior = [...cache.values()].map(entry => entry.value).reverse().find(value => value?.source === selected && value?.ticker)?.ticker;
+  const prior = [...cache.values()].map(entry => entry.value).reverse().find(value => value?.source === selected && value?.coin === currentCoin() && value?.ticker)?.ticker;
   try {
     const value = await coalesce(key, async () => {
       let ticker;
       if (selected === 'okx') {
-        const payload = await request('https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT-SWAP'), row = payload.data?.[0];
+        const payload = await request(`https://www.okx.com/api/v5/market/ticker?instId=${okxSwapId()}`), row = payload.data?.[0];
         if (payload.code !== '0' || !row) throw new Error(payload.msg || 'OKX quote unavailable');
         ticker = { last:+row.last, open24h:+row.open24h, changePct:(+row.last / +row.open24h - 1) * 100, high24:+row.high24h, low24:+row.low24h };
       } else if (selected === 'binance') {
-        const row = await request('https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=BTCUSDT');
+        const row = await request(`https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=${binanceId()}`);
         ticker = { last:+row.lastPrice, open24h:+row.openPrice, changePct:+row.priceChangePercent, high24:+row.highPrice, low24:+row.lowPrice };
       } else if (selected === 'gate') {
-        const row = (await request('https://api.gateio.ws/api/v4/futures/usdt/tickers?contract=BTC_USDT'))[0];
+        const row = (await request(`https://api.gateio.ws/api/v4/futures/usdt/tickers?contract=${gateId()}`))[0];
         if (!row) throw new Error('Gate quote unavailable');
         ticker = { last:+row.last, open24h:+row.last / (1 + (+row.change_percentage || 0) / 100), changePct:+row.change_percentage, high24:+row.high_24h, low24:+row.low_24h };
       } else {
-        const payload = await request('https://api.international.coinbase.com/api/v1/instruments/BTC-PERP/quote', 1_200), row = payload.quote || payload, last = +(row.trade_price || row.mark_price);
+        const payload = await request(`https://api.international.coinbase.com/api/v1/instruments/${coinbaseId()}/quote`, 1_200), row = payload.quote || payload, last = +(row.trade_price || row.mark_price);
         if (!Number.isFinite(last)) throw new Error('Coinbase quote unavailable');
         ticker = { last, open24h:prior?.open24h || last, changePct:prior?.open24h ? (last / prior.open24h - 1) * 100 : 0, high24:Math.max(prior?.high24 || last,last), low24:Math.min(prior?.low24 || last,last) };
       }
-      const fresh = { source:selected, ticker, fetchedAt:Date.now(), cached:false, cacheAgeMs:0, transport:'rest', stale:false };
+      const fresh = { source:selected, coin:currentCoin(), ticker, fetchedAt:Date.now(), cached:false, cacheAgeMs:0, transport:'rest', stale:false };
       remember(key, fresh); persistQuote(selected, ticker, fresh.fetchedAt); return fresh;
     });
     return value;
@@ -1091,7 +1392,7 @@ async function liveQuote(source = 'okx') {
   }
 }
 async function marketContext(source = 'okx') {
-  const selected = loaders[source] ? source : 'okx', key = `market-context:${selected}`;
+  const selected = loaders[source] ? source : 'okx', key = coinKey(`market-context:${selected}`);
   const hit = cache.get(key);
   const streamed = selected === 'okx' ? freshOkxContext() : null;
   if (streamed) return streamed;
@@ -1100,33 +1401,33 @@ async function marketContext(source = 'okx') {
   let value;
   if (selected === 'okx') {
     const [funding, oi, perp, spot] = await Promise.all([
-      request('https://www.okx.com/api/v5/public/funding-rate?instId=BTC-USDT-SWAP'),
-      request('https://www.okx.com/api/v5/public/open-interest?instType=SWAP&instId=BTC-USDT-SWAP'),
-      request('https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT-SWAP'),
-      request('https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT')
+      request(`https://www.okx.com/api/v5/public/funding-rate?instId=${okxSwapId()}`),
+      request(`https://www.okx.com/api/v5/public/open-interest?instType=SWAP&instId=${okxSwapId()}`),
+      request(`https://www.okx.com/api/v5/market/ticker?instId=${okxSwapId()}`),
+      request(`https://www.okx.com/api/v5/market/ticker?instId=${okxSpotId()}`)
     ]);
     const f = funding.data?.[0], o = oi.data?.[0], p = perp.data?.[0], s = spot.data?.[0];
     if (!f || !o || !p || !s) throw new Error('invalid OKX context payload');
-    value = { source:selected, fundingRate:+f.fundingRate, nextFundingRate:+f.nextFundingRate, oi:+o.oiCcy || +o.oi, oiUnit:o.oiCcy ? 'BTC' : 'contracts', basisPct:(+p.last / +s.last - 1) * 100, perpPrice:+p.last, spotPrice:+s.last, fetchedAt:Date.now(), cached:false };
+    value = { source:selected, fundingRate:+f.fundingRate, nextFundingRate:+f.nextFundingRate, oi:+o.oiCcy || +o.oi, oiUnit:o.oiCcy ? coinMeta().oiUnit : 'contracts', basisPct:(+p.last / +s.last - 1) * 100, perpPrice:+p.last, spotPrice:+s.last, fetchedAt:Date.now(), cached:false };
   } else if (selected === 'binance') {
     const [premium, oi, perp, spot] = await Promise.all([
-      request('https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT'),
-      request('https://fapi.binance.com/fapi/v1/openInterest?symbol=BTCUSDT'),
-      request('https://fapi.binance.com/fapi/v1/ticker/price?symbol=BTCUSDT'),
-      request('https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT')
+      request(`https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${binanceId()}`),
+      request(`https://fapi.binance.com/fapi/v1/openInterest?symbol=${binanceId()}`),
+      request(`https://fapi.binance.com/fapi/v1/ticker/price?symbol=${binanceId()}`),
+      request(`https://api.binance.com/api/v3/ticker/price?symbol=${binanceId()}`)
     ]);
-    value = { source:selected, fundingRate:+premium.lastFundingRate, nextFundingRate:+premium.lastFundingRate, oi:+oi.openInterest, oiUnit:'BTC', basisPct:(+perp.price / +spot.price - 1) * 100, perpPrice:+perp.price, spotPrice:+spot.price, fetchedAt:Date.now(), cached:false };
+    value = { source:selected, fundingRate:+premium.lastFundingRate, nextFundingRate:+premium.lastFundingRate, oi:+oi.openInterest, oiUnit:coinMeta().oiUnit, basisPct:(+perp.price / +spot.price - 1) * 100, perpPrice:+perp.price, spotPrice:+spot.price, fetchedAt:Date.now(), cached:false };
   } else if (selected === 'coinbase') {
     const [quotePayload, spot] = await Promise.all([
-      request('https://api.international.coinbase.com/api/v1/instruments/BTC-PERP/quote', 8_000),
-      request('https://api.exchange.coinbase.com/products/BTC-USD/ticker', 8_000)
+      request(`https://api.international.coinbase.com/api/v1/instruments/${coinbaseId()}/quote`, 8_000),
+      request(`https://api.exchange.coinbase.com/products/${normalizeCoin(currentCoin())}-USD/ticker`, 8_000)
     ]);
     const quote = quotePayload.quote || quotePayload, perpPrice=+(quote.trade_price || quote.mark_price), spotPrice=+spot.price;
     value = { source:selected, fundingRate:+quote.predicted_funding, nextFundingRate:+quote.predicted_funding, oi:null, oiUnit:'--', basisPct:(perpPrice / spotPrice - 1) * 100, perpPrice, spotPrice, fetchedAt:Date.now(), cached:false };
   } else {
     const [perpRows, spotRows] = await Promise.all([
-      request('https://api.gateio.ws/api/v4/futures/usdt/tickers?contract=BTC_USDT'),
-      request('https://api.gateio.ws/api/v4/spot/tickers?currency_pair=BTC_USDT')
+      request(`https://api.gateio.ws/api/v4/futures/usdt/tickers?contract=${gateId()}`),
+      request(`https://api.gateio.ws/api/v4/spot/tickers?currency_pair=${gateId()}`)
     ]);
     const perp = perpRows[0], spot = spotRows[0]; if (!perp || !spot) throw new Error('invalid Gate context payload');
     const perpPrice=+perp.last, spotPrice=+spot.last;
@@ -1383,6 +1684,381 @@ async function attachReleasedMacroActuals(events, now=Date.now()) {
     return events.map(event=>event===payroll?{...event,actual}:event);
   } catch { return events; }
 }
+// ==================== 宏观事件研究（阶段 2：point-in-time 事件样本）====================
+// 把 CPI / 核心 CPI / 非农 / FOMC 的发布时刻、实际值与 BTC 在其窗口内的真实表现对齐，产出多因子
+// 模型可以拿去分层的样本。三条方法学边界必须随数据一起标注，不能省略：
+//   1. 免费源拿不到市场预期 consensus ⇒ surprise_proxy = actual − previous，含义是「相对上一次
+//      发布的意外」。它只用于事后分层，不是发布瞬间可用的预测特征。
+//   2. 发布时刻精度分三档：exact（FOMC，Fed 官方决议日 14:00 ET）/ day（非农，次月首个周五
+//      08:30 ET 是 BLS 的稳定惯例）/ day-estimated（CPI，BLS 不承诺固定日，按惯例推算，通常
+//      差 0–2 日）。因此 1h 窗口只在 exact / day 上解释，day-estimated 只进 1d 窗口。
+//   3. FRED 给的是修订后终值，不是发布瞬间的初值。窗口收益不依赖 actual，所以修订只影响
+//      「大意外 / 小意外」的分层，不影响窗口收益本身。
+// ==================== Macro event study (stage 2, point-in-time) ====================
+const MACRO_EVENT_DEFS = [
+  { key:'cpi', name:'美国 CPI', unit:'pct-mom', series:'CPIAUCSL', transform:'pctChange', precision:'day-estimated',
+    source:'U.S. Bureau of Labor Statistics · FRED CPIAUCSL', note:'BLS 不承诺固定发布日，按惯例推算 ±2 日，只用于 1d 窗口' },
+  { key:'core-cpi', name:'美国核心 CPI', unit:'pct-mom', series:'CPILFESL', transform:'pctChange', precision:'day-estimated',
+    source:'U.S. Bureau of Labor Statistics · FRED CPILFESL', note:'与 CPI 同日发布，同样只用于 1d 窗口' },
+  { key:'nfp', name:'美国非农就业', unit:'k-jobs', series:'PAYEMS', transform:'diff', precision:'day',
+    source:'U.S. Bureau of Labor Statistics · FRED PAYEMS', note:'次月首个周五 08:30 ET 是稳定惯例，日级精确' },
+  { key:'fomc', name:'FOMC 利率决议', unit:'pct', series:'DFEDTARU', transform:'level', precision:'exact',
+    source:'Federal Reserve · FRED DFEDTARU', note:'Fed 官方决议日 14:00 ET，时刻精确' },
+];
+const MACRO_EVENT_BY_KEY = Object.fromEntries(MACRO_EVENT_DEFS.map(def => [def.key, def]));
+let macroEventOutcomeStatement = null;
+function macroEventOutcomeUpsert() {
+  return macroEventOutcomeStatement ||= stmt(`INSERT INTO macro_event_outcomes
+    (event_key, event_at, period, actual, previous, surprise_proxy, surprise_z, unit, date_precision, source,
+     before_1d, after_1h, after_4h, after_1d, after_1h_abs, after_1d_abs, realized_vol_1d, baseline_vol_1d, vol_ratio, computed_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    ON CONFLICT(event_key, event_at) DO UPDATE SET
+      period=excluded.period, actual=excluded.actual, previous=excluded.previous, surprise_proxy=excluded.surprise_proxy,
+      unit=excluded.unit, date_precision=excluded.date_precision, source=excluded.source,
+      before_1d=excluded.before_1d, after_1h=excluded.after_1h, after_4h=excluded.after_4h, after_1d=excluded.after_1d,
+      after_1h_abs=excluded.after_1h_abs, after_1d_abs=excluded.after_1d_abs,
+      realized_vol_1d=excluded.realized_vol_1d, baseline_vol_1d=excluded.baseline_vol_1d, vol_ratio=excluded.vol_ratio,
+      computed_at=excluded.computed_at`);
+}
+// FRED 的 fredgraph.csv 端点不需要 API key，且支持一次取全历史。缺少值写成字符 '.'。
+async function fredCsvRows(seriesId, timeout = 15_000) {
+  const text = await requestText(`https://fred.stlouisfed.org/graph/fredgraph.csv?id=${encodeURIComponent(seriesId)}`, timeout);
+  return String(text || '').trim().split('\n').slice(1).map(line => {
+    const comma = line.indexOf(',');
+    if (comma < 0) return null;
+    const date = line.slice(0, comma).trim(), raw = line.slice(comma + 1).trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+    return { date, value: raw === '.' || raw === '' ? null : Number(raw) };
+  }).filter(row => row && Number.isFinite(row.value));
+}
+// 把观测值序列折算成「每次发布时会被报道的那个数字」：环比 %、增量或绝对水平。
+// Turn a level series into the number that actually gets reported at each release.
+function macroObservations(rows, transform) {
+  const changes = [];
+  for (let index = 0; index < rows.length; index++) {
+    const previousValue = index ? Number(rows[index - 1].value) : null, value = Number(rows[index].value);
+    const change = transform === 'level' ? value
+      : transform === 'diff' ? (previousValue === null ? null : value - previousValue)
+      : (previousValue ? (value / previousValue - 1) * 100 : null);
+    if (Number.isFinite(change)) changes.push({ period: String(rows[index].date).slice(0, 7), change });
+  }
+  const byPeriod = new Map();
+  changes.forEach((row, index) => byPeriod.set(row.period, { value: row.change, previous: index ? changes[index - 1].change : null }));
+  return byPeriod;
+}
+// BLS 不承诺 CPI 的固定发布日；历史落在次月 10–16 日之间的工作日。取该区间首个周二~周四作估计。
+function cpiReleaseGuess(year, month) {
+  for (let day = 10; day <= 16; day++) {
+    const weekday = new Date(Date.UTC(year, month, day)).getUTCDay();
+    if (weekday >= 2 && weekday <= 4) return wallToUtc(year, month, day, 8, 30);
+  }
+  return wallToUtc(year, month, 14, 8, 30);
+}
+function macroReleaseSchedule(fromYear, toYear) {
+  const rows = [];
+  for (let year = fromYear; year <= toYear; year++) {
+    for (let month = 0; month < 12; month++) {
+      const observed = new Date(Date.UTC(year, month - 1, 1));
+      const period = `${observed.getUTCFullYear()}-${String(observed.getUTCMonth() + 1).padStart(2, '0')}`;
+      const friday = 1 + ((5 - new Date(Date.UTC(year, month, 1)).getUTCDay() + 7) % 7);
+      rows.push({ key:'nfp', at:wallToUtc(year, month, friday, 8, 30), period, precision:'day' });
+      const cpiAt = cpiReleaseGuess(year, month);
+      rows.push({ key:'cpi', at:cpiAt, period, precision:'day-estimated' });
+      rows.push({ key:'core-cpi', at:cpiAt, period, precision:'day-estimated' });
+    }
+  }
+  return rows;
+}
+// FOMC 决议日取 Fed 官方页。只用**文件名**里的日期：minutes（fomcminutesYYYYMMDD.pdf）与决议
+// 声明（monetaryYYYYMMDD.htm）的命名惯例严格对应会议决议日，且是确定性来源。页面正文里的
+// 日期混着 minutes 发布日等非会议日期，用它补充会凭空造出十几个不存在的「决议日」。
+// 决议例会在周二/周三，用它再滤一层。
+async function fomcDecisionInstants(from, to) {
+  const instants = new Set();
+  let fetched = false;
+  try {
+    const html = await requestText('https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm', 15_000);
+    for (const match of String(html).matchAll(/fomcminutes(\d{4})(\d{2})(\d{2})\.pdf/gi)) instants.add(wallToUtc(+match[1], +match[2] - 1, +match[3], 14, 0));
+    for (const match of String(html).matchAll(/monetary(\d{4})(\d{2})(\d{2})[a-z]?\.htm/gi)) instants.add(wallToUtc(+match[1], +match[2] - 1, +match[3], 14, 0));
+    fetched = instants.size > 0;
+  } catch { /* Fed 页不可达：走下面的回退 */ }
+  // 只在官方页不可达时回退到已入库的决议日——它们已通过同一套文件名校验，不会把旧的污染日期带回来。
+  if (!fetched) for (const row of stmt("SELECT event_at FROM macro_event_outcomes WHERE event_key='fomc'").all()) instants.add(Number(row.event_at));
+  return [...instants].filter(at => { const weekday = new Date(at).getUTCDay(); return weekday === 2 || weekday === 3; })
+    .filter(at => at >= from && at <= to).sort((a, b) => a - b);
+}
+// FOMC 的 actual 是「决议后的目标利率上限」，previous 是决议前的。DFEDTARU 是日度序列，不能像
+// 月度指标那样按「期」聚合——一个月内多次变动会互相覆盖。这里按事件瞬间前后各取一个观测。
+function fomcRateChange(rows, at) {
+  if (!Array.isArray(rows) || !rows.length) return null;
+  const before = rows.filter(row => Date.parse(`${row.date}T00:00:00Z`) < at).at(-1);
+  const after = rows.find(row => Date.parse(`${row.date}T00:00:00Z`) > at);
+  if (!before || !after) return null;
+  return { previous: Number(before.value), actual: Number(after.value) };
+}
+// 定位「在 at 时刻已经收盘」的最后一根 K 线。日线的收盘时刻是 time + 1d，所以事件当天那根
+// 日线在事件发生时尚在运行，绝对不能拿来当事件前的基准——那正是前视偏差的来源。
+function lastClosedBar(candles, at, barMs) {
+  let low = 0, high = candles.length - 1, found = null;
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    if (Number(candles[mid].time) + barMs <= at) { found = candles[mid]; low = mid + 1; } else high = mid - 1;
+  }
+  return found;
+}
+function closedBarReturn(candles, from, to, barMs) {
+  const start = lastClosedBar(candles, from, barMs), end = lastClosedBar(candles, to, barMs);
+  if (!start || !end || start === end) return null;
+  return Number(end.close) / Number(start.close) - 1;
+}
+// 事件后窗口的日内已实现波动（15m 口径），折算成「日波动」便于比较。只有 15m 覆盖到的
+// 近期事件才有值；更早的事件靠日线幅度口径（见 volRatioFor）。
+function candleWindowVolatility(candles, from, to) {
+  const slice = candles.filter(candle => Number(candle.time) > from && Number(candle.time) <= to);
+  if (slice.length < 8) return null;
+  const returns = slice.map(candle => Math.log(Number(candle.close) / Number(candle.open))).filter(Number.isFinite);
+  if (returns.length < 8) return null;
+  const average = returns.reduce((sum, value) => sum + value, 0) / returns.length;
+  const variance = returns.reduce((sum, value) => sum + (value - average) ** 2, 0) / Math.max(returns.length - 1, 1);
+  return Math.sqrt(variance) * Math.sqrt(96);
+}
+// 波动基线：全部日线 |1d 收益| 的中位数，也就是「平常一天」的幅度。事件窗口幅度 ÷ 这个基线
+// 就是「事件被定价了多少」——它比方向命中率稳健得多，也不需要日内数据。
+function baselineDailyAbsReturn(daily) {
+  const values = [];
+  for (let index = 1; index < daily.length; index++) {
+    const value = Number(daily[index].close) / Number(daily[index - 1].close) - 1;
+    if (Number.isFinite(value)) values.push(Math.abs(value));
+  }
+  if (!values.length) return null;
+  values.sort((a, b) => a - b);
+  return values[Math.floor(values.length / 2)];
+}
+const MACRO_BACKFILL_TTL = 6 * 3_600_000;
+let macroBackfillAt = 0, macroBackfillPayload = null;
+async function backfillMacroEventOutcomes({ refresh = false, months = 30 } = {}) {
+  const now = Date.now();
+  if (!refresh && macroBackfillPayload && now - macroBackfillAt < MACRO_BACKFILL_TTL) return { ...macroBackfillPayload, cached: true };
+  const from = now - months * 30.44 * 86_400_000;
+  const series = {}, seriesErrors = {};
+  for (const def of MACRO_EVENT_DEFS) {
+    try {
+      const rows = await fredCsvRows(def.series);
+      // FOMC 保留日度原始序列（按事件瞬间前后取值）；月度指标聚合成「每次发布被报道的那个数」。
+      series[def.key] = def.transform === 'level' ? rows : macroObservations(rows, def.transform);
+    } catch (error) {
+      series[def.key] = def.transform === 'level' ? [] : new Map();
+      seriesErrors[def.key] = String(error?.message || error);
+    }
+  }
+  const events = [
+    ...macroReleaseSchedule(new Date(from).getUTCFullYear() - 1, new Date(now).getUTCFullYear() + 1).filter(row => row.at >= from && row.at <= now),
+    ...(await fomcDecisionInstants(from, now)).map(at => ({ key:'fomc', at, period:null, precision:'exact' })),
+  ].sort((a, b) => a.at - b.at);
+  // 日线承担 1d 窗口（覆盖约 2.8 年），15m 只在它覆盖到的近期补 1h / 4h 与日内已实现波动。
+  // 15m 只有约 30 天历史：拿它算 1d 窗口会把回填静默截断成最近一个月。
+  const daily = storedCandleRange('1d', from - 10 * 86_400_000, now + 2 * 86_400_000);
+  const intraday = storedCandleRange('15m', from - 3 * 86_400_000, now + 86_400_000);
+  const dayMs = 86_400_000, barMs = 900_000, baseline = baselineDailyAbsReturn(daily);
+  const statement = macroEventOutcomeUpsert();
+  // FOMC 的日期完全由官方来源决定：先清掉旧行，否则上一轮混进来的非决议日会永久留在表里。
+  stmt("DELETE FROM macro_event_outcomes WHERE event_key='fomc'").run();
+  let written = 0, withoutWindow = 0, withoutIntraday = 0;
+  for (const event of events) {
+    if (event.at + dayMs > now) { withoutWindow++; continue; }   // 窗口还没走完，不写半个样本
+    let actual = null, previous = null;
+    if (event.key === 'fomc') {
+      const change = fomcRateChange(series.fomc, event.at);
+      if (change) { actual = change.actual; previous = change.previous; }
+    } else {
+      const observation = series[event.key]?.get(event.period) || null;
+      if (observation) { actual = observation.value; previous = observation.previous; }
+    }
+    const surprise = actual !== null && previous !== null ? actual - previous : null;
+    const after1d = closedBarReturn(daily, event.at, event.at + dayMs, dayMs);
+    if (after1d === null) { withoutWindow++; continue; }
+    const before1d = closedBarReturn(daily, event.at - dayMs, event.at, dayMs);
+    const after1h = closedBarReturn(intraday, event.at, event.at + 3_600_000, barMs)
+      , after4h = closedBarReturn(intraday, event.at, event.at + 4 * 3_600_000, barMs);
+    if (after1h === null) withoutIntraday++;
+    const realized = candleWindowVolatility(intraday, event.at, event.at + dayMs);
+    const definition = MACRO_EVENT_BY_KEY[event.key];
+    statement.run(event.key, event.at, event.period, actual, previous, surprise, null, definition.unit, event.precision, definition.source,
+      before1d, after1h, after4h, after1d, after1h === null ? null : Math.abs(after1h), Math.abs(after1d),
+      realized, baseline, baseline ? Math.abs(after1d) / baseline : null, now);
+    written++;
+  }
+  // surprise 的标准化只能在整类样本齐了之后做，否则每次回填标准差都会变。
+  for (const def of MACRO_EVENT_DEFS) {
+    const rows = stmt('SELECT id, surprise_proxy FROM macro_event_outcomes WHERE event_key=? AND surprise_proxy IS NOT NULL').all(def.key);
+    if (rows.length < 4) continue;
+    const values = rows.map(row => Number(row.surprise_proxy));
+    const average = values.reduce((sum, value) => sum + value, 0) / values.length;
+    const deviation = Math.sqrt(values.reduce((sum, value) => sum + (value - average) ** 2, 0) / Math.max(values.length - 1, 1));
+    const update = stmt('UPDATE macro_event_outcomes SET surprise_z=? WHERE id=?');
+    for (const row of rows) update.run(deviation ? (Number(row.surprise_proxy) - average) / deviation : null, row.id);
+  }
+  macroBackfillAt = now;
+  macroBackfillPayload = { generatedAt: now, windowMonths: months, written, skippedIncompleteWindow: withoutWindow,
+    withoutIntraday, dailyCandles: daily.length, intradayCandles: intraday.length,
+    baselineDailyAbsReturn: baseline, seriesErrors };
+  return { ...macroBackfillPayload, cached: false };
+}
+// 读表出统计。全部分层都建立在「已实现事实」上，不是预测——方向命中率只作事后归因，不能当作策略胜率。
+function macroEventStudy() {
+  const rows = stmt('SELECT * FROM macro_event_outcomes ORDER BY event_at ASC').all();
+  const mean = values => values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+  const median = values => { if (!values.length) return null; const sorted = [...values].sort((a, b) => a - b); return sorted[Math.floor(sorted.length / 2)]; };
+  const numeric = (subset, field) => subset.map(row => Number(row[field])).filter(Number.isFinite);
+  const byKind = {};
+  for (const def of MACRO_EVENT_DEFS) {
+    const subset = rows.filter(row => row.event_key === def.key);
+    if (!subset.length) { byKind[def.key] = { name:def.name, unit:def.unit, precision:def.precision, note:def.note, source:def.source, samples:0 }; continue; }
+    // 1h 窗口对 day-estimated 不可解释：日期本身可能差一两天，小时级归因会变成噪声。
+    const hourlyUsable = def.precision !== 'day-estimated';
+    const surpriseRows = subset.filter(row => Number.isFinite(Number(row.surprise_z)) && Number(row.surprise_proxy) !== 0);
+    const unchangedRows = subset.filter(row => Number.isFinite(Number(row.surprise_z)) && Number(row.surprise_proxy) === 0);
+    const positive = surpriseRows.filter(row => Number(row.surprise_z) > 0), negative = surpriseRows.filter(row => Number(row.surprise_z) < 0);
+    const after1d = numeric(subset, 'after_1d');
+    byKind[def.key] = {
+      name:def.name, unit:def.unit, precision:def.precision, note:def.note, source:def.source,
+      samples:subset.length, withActual:subset.filter(row => row.actual !== null).length,
+      from:subset[0].event_at, to:subset[subset.length - 1].event_at,
+      medianAbsReturn:{ h1:hourlyUsable ? median(numeric(subset, 'after_1h_abs')) : null, d1:median(numeric(subset, 'after_1d_abs')) },
+      meanReturn:{ h1:hourlyUsable ? mean(numeric(subset, 'after_1h')) : null, h4:hourlyUsable ? mean(numeric(subset, 'after_4h')) : null, d1:mean(after1d) },
+      positiveRate:{ h1:hourlyUsable ? (numeric(subset, 'after_1h').filter(value => value > 0).length / Math.max(numeric(subset, 'after_1h').length, 1)) : null,
+        d1:after1d.filter(value => value > 0).length / Math.max(after1d.length, 1) },
+      volatility:{ medianRatio:median(numeric(subset, 'vol_ratio')), amplifiedShare:numeric(subset, 'vol_ratio').filter(value => value > 1).length / Math.max(numeric(subset, 'vol_ratio').length, 1) },
+      surpriseSplit:surpriseRows.length >= 4 ? {
+        positive:{ samples:positive.length, meanAfter1d:mean(numeric(positive, 'after_1d')), positiveRate:(() => { const values = numeric(positive, 'after_1d'); return values.filter(value => value > 0).length / Math.max(values.length, 1); })() },
+        negative:{ samples:negative.length, meanAfter1d:mean(numeric(negative, 'after_1d')), positiveRate:(() => { const values = numeric(negative, 'after_1d'); return values.filter(value => value > 0).length / Math.max(values.length, 1); })() },
+      } : null,
+      // 「没有意外」是独立的一类样本，不是小意外。FOMC 多数会议利率不动，把它们塞进正/负
+      // 意外分层里，等于按 z 的符号随机分边，结论会凭空冒出来。
+      unchanged:unchangedRows.length ? { samples:unchangedRows.length, meanAfter1d:mean(numeric(unchangedRows, 'after_1d')),
+        medianVolRatio:median(numeric(unchangedRows, 'vol_ratio')) } : null,
+    };
+  }
+  return { generatedAt:macroBackfillAt || null, total:rows.length, byKind,
+    coverage:rows.length ? { from:rows[0].event_at, to:rows[rows.length - 1].event_at } : null,
+    methodology:[
+      'surprise = 实际值 − 上一次发布值。免费源拿不到市场预期，因此这不是 consensus surprise，只用于事后分层。',
+      '1d 窗口用日线序列（覆盖约 2.8 年），基准取「事件时刻前已收盘的最后一根日线」，事件当天那根日线在事件发生时尚未收盘，用它就是前视偏差。',
+      '事件当根日线收益 = 事件当日收盘 ÷ 前一日收盘 − 1；1h / 4h 窗口用 15m，仅有约 30 天覆盖，更早的事件这两项为空。',
+      '波动放大倍数 = 事件当根日线收益的幅度 ÷ 全部日线 |收益| 的中位数（「平常一天」的幅度）。它是事件是否被定价的直接证据，且方向中性。',
+      'CPI 的发布日精度为日级估计（BLS 不承诺固定日），其 1h 窗口不出统计；1d 窗口不受影响。',
+      '所有收益都是事件窗口的已实现结果，不含交易成本，也不构成策略胜率。',
+    ] };
+}
+// The model may only use information a trader genuinely had at that instant. Event *dates* are
+// published by the Fed and BLS months ahead, so "how many hours until the next FOMC / payrolls /
+// CPI print" is known in real time and is safe as a feature — including for events after the bucket
+// being scored, because the nearest bracketing dates were already on the calendar back then.
+// The printed *values* are a different matter: they exist only from the release instant onward, and
+// FRED stamps an observation with the period it describes rather than the moment it became public,
+// so aligning values by observation date would leak the future into the past. Values are therefore
+// deliberately excluded from the feature set.
+// 模型只能用那一刻真实可得的信息。事件「日期」由 Fed / BLS 提前数月公布，因此「距下次 FOMC／非农／
+// CPI 还有多少小时」在当时就已知，可以安全入模 —— 包括被评分桶之后的事件，因为当时日历上最靠近的
+// 那两个日期早已公布。但「发布值」不同：它们从发布瞬间才存在，而 FRED 用「所描述的时间段」给观测打
+// 戳、不是「公开时刻」，按观测日期对齐会把未来泄漏进过去。因此发布值被有意排除在特征之外。
+const MACRO_HIGH_IMPACT_KEYS = ['fomc', 'nfp', 'cpi'];
+const MACRO_CALENDAR_TTL = 60_000;
+let macroCalendarCache = null, macroCalendarCacheAt = 0;
+function macroHighImpactCalendar() {
+  const now = Date.now();
+  if (macroCalendarCache && now - macroCalendarCacheAt < MACRO_CALENDAR_TTL) return macroCalendarCache;
+  const placeholders = MACRO_HIGH_IMPACT_KEYS.map(() => '?').join(',');
+  // CPI and core CPI print the same day, so the dates are de-duplicated rather than double-counted.
+  // CPI 与核心 CPI 同日发布，因此日期去重而不是重复计数。
+  const instants = stmt(`SELECT event_at FROM macro_event_outcomes WHERE event_key IN (${placeholders}) GROUP BY event_at ORDER BY event_at ASC`)
+    .all(...MACRO_HIGH_IMPACT_KEYS).map(row => Number(row.event_at)).filter(Number.isFinite);
+  macroCalendarCache = instants; macroCalendarCacheAt = now;
+  return instants;
+}
+// Hours since the most recent published event. Kept as a top-level helper so the replay can tag
+// every sample with it for conditional reporting, rather than only consuming it as a model feature.
+// 距最近一次已公布事件的小时数。抽成顶层 helper，好让回放给每条样本打上该标记做条件统计，而不只是
+// 把它当作模型特征消耗掉。
+function hoursSinceEvent(calendar, at) {
+  if (!Array.isArray(calendar) || !calendar.length) return null;
+  let low = 0, high = calendar.length - 1, previous = null;
+  while (low <= high) { const mid = (low + high) >> 1; if (calendar[mid] <= at) { previous = calendar[mid]; low = mid + 1; } else high = mid - 1; }
+  return previous === null ? null : (at - previous) / 3_600_000;
+}
+// ── Perpetual funding rate (multi-factor candidate) ─────────────────────────────────────────────
+// A funding rate is the price of holding a perp: positive means longs pay shorts, which is what a
+// crowded long book looks like. It is a candidate factor, not a settled one — the ablation decides.
+// 资金费率是持有永续的代价：为正表示多头付钱给空头，也就是多头拥挤的样子。它是候选因子而非已经
+// 定论的因子 —— 有没有增量由消融实验决定。
+const FUNDING_ENDPOINT = 'https://fapi.binance.com/fapi/v1/fundingRate';
+// symbol 不再写死：资金费率历史按当前币种拉取，各币种存在各自的库文件里。
+const FUNDING_SOURCE = { exchange: 'binance' };
+// The upstream caps a page at 500 rows and there are three settlements a day, so three years takes
+// roughly seven requests. The request ceiling is a guard against a paging loop that never converges.
+// 上游单页上限 500 行，每天三次结算，三年大约七次请求。请求上限是防止分页循环不收斂的护栏。
+const FUNDING_PAGE = 500, FUNDING_MAX_REQUESTS = 40, FUNDING_FEATURE_TTL = 10 * 60_000;
+let fundingFeatureCache = null, fundingFeatureCacheAt = 0;
+
+// Pages forward through the funding history and upserts every settlement. Upsert rather than
+// insert-or-ignore: an exchange may revise a print, and a stale rate silently feeding a feature is
+// worse than rewriting a row.
+// 沿资金费率历史向前分页，逐条 upsert。用 upsert 而不是 insert-or-ignore：交易所可能修正某个结算
+// 值，而一个过期的费率静默喂进特征，比重写一行更糟。
+async function backfillFundingRates({ from, to } = {}) {
+  const { exchange } = FUNDING_SOURCE, symbol = instIdFor('binance');
+  const start = Number(from) || (Date.now() - 3 * 365 * 86_400_000), end = Number(to) || (Date.now() + 3_600_000);
+  const upsert = stmt(`INSERT INTO funding_rate_history(exchange,symbol,funding_at,rate,mark_price,fetched_at) VALUES(?,?,?,?,?,?)
+    ON CONFLICT(exchange,symbol,funding_at) DO UPDATE SET rate=excluded.rate, mark_price=excluded.mark_price, fetched_at=excluded.fetched_at`);
+  let cursor = start, requests = 0, written = 0, firstAt = null, lastAt = null;
+  while (cursor < end && requests < FUNDING_MAX_REQUESTS) {
+    const page = await request(`${FUNDING_ENDPOINT}?symbol=${symbol}&startTime=${cursor}&endTime=${end}&limit=${FUNDING_PAGE}`, 12_000);
+    if (!Array.isArray(page) || !page.length) break;
+    const fetchedAt = Date.now();
+    for (const item of page) {
+      const at = Number(item?.fundingTime), rate = Number(item?.fundingRate);
+      if (!Number.isFinite(at) || !Number.isFinite(rate)) continue;
+      upsert.run(exchange, symbol, at, rate, Number(item?.markPrice) || null, fetchedAt);
+      written += 1;
+      if (firstAt === null) firstAt = at;
+      lastAt = at;
+    }
+    requests += 1;
+    const advanced = Number(page.at(-1)?.fundingTime);
+    if (!Number.isFinite(advanced) || advanced < cursor) break;
+    cursor = advanced + 1;
+    // The service is single-threaded and a three-year backfill is a dozen sequential round trips.
+    // 服务是单线程的，而三年回填是十几次串行的往返请求。
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  fundingFeatureCache = null;
+  return { exchange, symbol, requests, written, firstAt, lastAt, stored: fundingRateCount() };
+}
+function fundingRateCount() { return Number(stmt('SELECT COUNT(*) AS total FROM funding_rate_history').get()?.total) || 0; }
+
+// Every derived value is computed from the settlements that came *before* it, so the whole series can
+// be materialised once and then read at any historical instant with no look-ahead risk. Computing the
+// rolling statistics at read time instead would re-slice the history for every bucket.
+// 每个派生值都只用它**之前**的结算值计算，因此整条序列可以一次算好，之后在任何历史时刻读取都没有
+// 前视风险。若改成读取时现算滚动统计，就得在每个桶上重新切一次历史。
+function fundingFeatureSeries() {
+  const now = Date.now();
+  if (fundingFeatureCache && now - fundingFeatureCacheAt < FUNDING_FEATURE_TTL) return fundingFeatureCache;
+  const features = buildFundingFeatures(stmt('SELECT funding_at, rate FROM funding_rate_history ORDER BY funding_at ASC').all());
+  fundingFeatureCache = features; fundingFeatureCacheAt = now;
+  return features;
+}
+// Binary search for the last settlement at or before `at`, then report it as four numbers: crowding
+// z-score, recent tilt, absolute level, and how far into the settlement cycle the bucket sits. A
+// bucket predating the whole series returns null so the caller can tell "no data" from "neutral".
+// 二分查找 `at` 之前（含）最近的一次结算，并报成四个数字：拥挤度 z 分数、近期斜率、绝对水平，以及
+// 该桶落在结算周期的哪个位置。早于整条序列的桶返回 null，调用方因此能区分「没有数据」与「中性」。
+// Tied to the length fundingFeaturesAt returns: the column count and the vector it emits must move
+// together, so the constant lives next to the function that produces the vector rather than in the
+// configuration block, where the two could drift apart without anything noticing.
+// 与 fundingFeaturesAt 的返回长度绑定：列数必须与它产出的向量一起变动，所以这个常量紧挨着产出
+// 向量的函数，而不是放在配置块里 —— 放在那里两者可能悄悄漂移而无人察觉。
+
 async function fedMonitor() {
   const calendar=await fedCalendar();
   const events=await attachReleasedMacroActuals(calendar.events||[]);
@@ -1890,13 +2566,13 @@ async function investmentCalendar({ refresh = false } = {}) {
   });
 }
 async function binanceHistory(interval, limit = 1000) {
-  const rows = await request(`https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${interval}&limit=${limit}`, 8_000);
+  const rows = await request(`https://api.binance.com/api/v3/klines?symbol=${binanceId()}&interval=${interval}&limit=${limit}`, 8_000);
   const candles = rows.map(c => ({ time:+c[0], open:+c[1], high:+c[2], low:+c[3], close:+c[4], volume:+c[5] })).filter(validCandle);
   if (candles.length < 300) throw new Error('insufficient historical candles');
   return candles;
 }
 async function gateHistory(interval, limit = 1000) {
-  const rows = await request(`https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract=BTC_USDT&interval=${interval}&limit=${limit}`, 8_000);
+  const rows = await request(`https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract=${gateId()}&interval=${interval}&limit=${limit}`, 8_000);
   const candles = rows.map(c => ({ time:+c.t*1000, open:+c.o, high:+c.h, low:+c.l, close:+c.c, volume:+c.v })).filter(validCandle).sort((a,b) => a.time - b.time);
   if (candles.length < 300) throw new Error('insufficient historical candles');
   return candles;
@@ -1909,7 +2585,7 @@ async function coinbaseHistory(interval, limit = 1000) {
   for (let page = 0; page < Math.ceil(limit / 290) + 1 && byTime.size < limit; page++) {
     const start = end - granularity * 290 * 1000;
     const params = new URLSearchParams({ granularity:String(granularity), start:new Date(start).toISOString(), end:new Date(end).toISOString() });
-    const rows = await request(`https://api.exchange.coinbase.com/products/BTC-USD/candles?${params}`, 8_000);
+    const rows = await request(`https://api.exchange.coinbase.com/products/${normalizeCoin(currentCoin())}-USD/candles?${params}`, 8_000);
     if (!Array.isArray(rows) || !rows.length) break;
     for (const c of rows) {
       const candle = { time:+c[0]*1000, low:+c[1], high:+c[2], open:+c[3], close:+c[4], volume:+c[5] };
@@ -1921,11 +2597,27 @@ async function coinbaseHistory(interval, limit = 1000) {
   if (candles.length < 300) throw new Error('insufficient historical candles');
   return candles;
 }
+const FORECAST_INTERVAL_MS = { '5m':300_000, '15m':900_000, '30m':1_800_000, '1h':3_600_000, '2h':7_200_000, '4h':14_400_000, '1d':86_400_000 };
+function forecastIntervalMs(interval) { return FORECAST_INTERVAL_MS[interval] || 900_000; }
+// A cached history is only reusable while its last bar is still current.  Row count
+// alone is not a freshness test: the daily series once held more than 900 rows while
+// silently frozen three weeks in the past, which starved every daily-horizon forecast.
+// 缓存历史只有在最后一根 K 线仍然新鲜时才可复用；条数不能当新鲜度判据 —— 日线曾在上千条的情况下静默停在三周前，导致所有日线周期预测失去数据源。
+function historyIsFresh(candles, interval, now = Date.now()) {
+  const last = Number(candles.at(-1)?.time || 0);
+  return candles.length > 0 && last > 0 && now - last <= forecastIntervalMs(interval) * 2;
+}
 async function forecastHistory(interval) {
-  const failures = [];
+  const failures = [], now = Date.now();
+  let staleFallback = null;
   for (const [source, loader] of [['coinbase', coinbaseHistory], ['gate', gateHistory], ['binance', binanceHistory]]) {
     const stored = storedCandles(source, interval, 1000);
-    if (stored.length >= 900) return { candles:stored, source, cached:true, storage:'sqlite' };
+    if (stored.length >= 900) {
+      if (historyIsFresh(stored, interval, now)) return { candles:stored, source, cached:true, storage:'sqlite' };
+      // Keep the frozen series usable when every upstream fails, but never present it as current.
+      // 上游全部失败时仍保留这份冻结序列，但绝不把它伪装成最新数据。
+      if (!staleFallback) staleFallback = { candles:stored, source, cached:true, storage:'sqlite', stale:true, staleReason:'last bar is older than two intervals' };
+    }
     try {
       const candles = await loader(interval);
       persistHistory(source, interval, candles);
@@ -1933,6 +2625,7 @@ async function forecastHistory(interval) {
     }
     catch (e) { failures.push(`${source}: ${e.name === 'AbortError' ? 'timeout' : e.message}`); }
   }
+  if (staleFallback) return staleFallback;
   throw new Error(failures.join('; '));
 }
 // 公开新闻只用于给历史价格模型增加有限的环境权重；标题情绪不是事实核验，也不能单独产生交易结论。
@@ -1965,11 +2658,11 @@ function parseBitcoinNews(xml) {
   return items;
 }
 function storedBitcoinNews(now = Date.now()) {
-  const rows=database.prepare('SELECT title, url, source, published_at AS publishedAt, sentiment FROM btc_news_snapshots WHERE observed_at >= ? ORDER BY COALESCE(published_at, observed_at) DESC LIMIT 24').all(now - 24 * 86_400_000);
+  const rows=stmt('SELECT title, url, source, published_at AS publishedAt, sentiment FROM btc_news_snapshots WHERE observed_at >= ? ORDER BY COALESCE(published_at, observed_at) DESC LIMIT 24').all(now - 24 * 86_400_000);
   return rows.map(row => { const title=String(row.title), source=row.source || 'SQLite', category=classifyNewsEvent(title); return { title, url:row.url || '', source, publishedAt:Number(row.publishedAt) || null, sentiment:Number(row.sentiment) || 0, category, sourceWeight:sourceWeight(source), eventWeight:eventWeight(category) }; });
 }
 async function bitcoinNews({ refresh = false } = {}) {
-  const key='btc-news', hit=cache.get(key), now=Date.now();
+  const key=coinKey('btc-news'), hit=cache.get(key), now=Date.now();
   if (!refresh && hit && now-hit.time<NEWS_TTL) return { ...cacheResult(hit, now), stale:false };
   const stored=storedBitcoinNews(now);
   try {
@@ -1987,109 +2680,167 @@ async function bitcoinNews({ refresh = false } = {}) {
     throw error;
   }
 }
-function percentChange(closes, end, span) { const start=closes[Math.max(0,end-span)], current=closes[end]; return Number.isFinite(start) && start > 0 && Number.isFinite(current) ? current / start - 1 : 0; }
+// ---- Research tuning: single source of truth for every threshold and weight ----
+// The research module grades itself against a swarm of constants (the chop band multiple,
+// the independent-sample gate, the cost model, the blend weights). Spread across a dozen
+// functions they are impossible to review together and impossible to vary per experiment.
+// This block is the only place those numbers live. Anything that reads a research threshold
+// reads it from here.
+//
+// Overrides are environment-only, so a running service can never be reconfigured by a client
+// request and silently change what a replay means. Set BTC_RESEARCH_TUNING to a JSON object
+// shaped like this block; it is deep-merged over the defaults and every override is reported
+// back through /api/research-tuning along with a fingerprint that identifies the exact
+// configuration a result was produced under.
+//
+// 研究模块靠一堆常数给自己打分（震荡带倍数、独立样本门槛、成本模型、融合权重）。散在十几个函数里
+// 既无法一起审查，也无法按实验调整。这个块是这些数字的唯一所在地，凡读取研究门槛的地方都从这里读。
+//
+// 覆盖只能走环境变量，运行中的服务绝不会被客户端请求改配置、从而悄悄改变一次回放的含义。
+// 把 BTC_RESEARCH_TUNING 设成与本块同形的 JSON 对象即可，它会深合并到默认值之上；
+// 每个覆盖项都会通过 /api/research-tuning 回报，并附一个指纹，标明某份结果是在哪套配置下产出的。
+// Flatten to leaf paths so a diff can name exactly which numbers a run used.
+// 展平成叶子路径，这样 diff 能准确指出一次运行用了哪些数字。
+function flattenTuning(value, prefix = '', out = {}) {
+  for (const [key, item] of Object.entries(value)) {
+    const path = prefix ? `${prefix}.${key}` : key;
+    if (item && typeof item === 'object' && !Array.isArray(item)) flattenTuning(item, path, out);
+    else out[path] = item;
+  }
+  return out;
+}
+// A stable, short fingerprint of the effective configuration. Two results may only be compared
+// when they carry the same fingerprint; a mismatch means they were not run under equal rules.
+// 生效配置的稳定短指纹。只有指纹相同的结果才可互相比较；不一致说明它们不是在同一套规则下跑出来的。
+function tuningFingerprint() {
+  const flat = flattenTuning(RESEARCH_TUNING), text = Object.keys(flat).sort().map(key => `${key}=${JSON.stringify(flat[key])}`).join('|');
+  let hash = 2166136261;
+  for (let index = 0; index < text.length; index++) { hash ^= text.charCodeAt(index); hash = Math.imul(hash, 16777619); }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+function researchTuningReport() {
+  const effective = flattenTuning(RESEARCH_TUNING), defaults = flattenTuning(RESEARCH_TUNING_DEFAULTS);
+  const overrides = Object.keys(effective).filter(key => JSON.stringify(effective[key]) !== JSON.stringify(defaults[key]))
+    .map(key => ({ path: key, value: effective[key], default: defaults[key] }));
+  return { defaults, effective, overrides, overrideCount: overrides.length, fingerprint: tuningFingerprint(),
+    windowVersion: RESEARCH_WINDOW_VERSION, error: RESEARCH_TUNING_ERROR,
+    source: RESEARCH_TUNING_OVERRIDE.patch ? 'env:BTC_RESEARCH_TUNING' : 'built-in defaults' };
+}
+// One chop band, one definition, four call sites: the analogue pool, the trainer's labels, the
+// replay's fallback band, and the storage re-grade. If these ever disagree a settled row is graded
+// against two different thresholds depending on which path touched it last.
+// 一个震荡带、一处定义、四个调用点：近邻池、训练器标签、回放兜底带、库存重评分。它们一旦不一致，
+// 同一条已结算的行会因最后被哪条路径碰到而用两套不同阈值评分。
+// One horizon table, generated from configuration, so the live path, the replay, the ablation and
+// the candidate trainer can never drift apart on what "4h" means. Callers supply only the candles.
+// 一张周期表，由配置生成，使实时路径、回放、消融、候选训练四者对「4h 是什么」永远不会漂移。
+// 调用方只提供 K 线。
+function researchHorizonDefinitions(candlesByInterval) {
+  return Object.entries(RESEARCH_TUNING.horizons).map(([key, config]) => ({
+    key, label: config.label, horizon: config.horizon, interval: config.interval,
+    cap: config.cap, minDirectional: config.minDirectional,
+    barMs: forecastIntervalMs(config.interval), candles: candlesByInterval[config.interval],
+  }));
+}
 function historicalProjection(candles, horizon) {
   const closes=candles.map(candle => +candle.close).filter(value => Number.isFinite(value) && value > 0), end=closes.length-1;
   if (end < Math.max(80, horizon + 30)) throw new Error('insufficient price-history samples');
-  const featureAt=index => { const volatility=closes.slice(Math.max(1,index-20),index+1).reduce((total,value,offset,rows) => offset ? total + Math.abs(value / rows[offset-1] - 1) : total,0)/20, trend=percentChange(closes,index,Math.max(20,horizon*4)); return { short:percentChange(closes,index,Math.max(2,Math.round(horizon/2))), medium:percentChange(closes,index,Math.max(6,horizon*2)), volatility, trend, regime:trend>.015?'bull':trend<-.015?'bear':'range' }; };
+  const analogueCfg=RESEARCH_TUNING.analogue, distanceWeights=analogueCfg.distance, featureWindow=RESEARCH_TUNING.theta.lookback;
+  const featureAt=index => { const volatility=closes.slice(Math.max(1,index-featureWindow),index+1).reduce((total,value,offset,rows) => offset ? total + Math.abs(value / rows[offset-1] - 1) : total,0)/featureWindow, trend=percentChange(closes,index,Math.max(20,horizon*4)); return { short:percentChange(closes,index,Math.max(2,Math.round(horizon/2))), medium:percentChange(closes,index,Math.max(6,horizon*2)), volatility, trend, regime:trend>.015?'bull':trend<-.015?'bear':'range' }; };
   const target=featureAt(end), candidates=[];
   for (let index=30;index<=end-horizon;index++) {
-    const row=featureAt(index), distance=Math.abs(row.short-target.short)*20 + Math.abs(row.medium-target.medium)*12 + Math.abs(row.volatility-target.volatility)*18 + Math.abs(row.trend-target.trend)*8;
+    const row=featureAt(index), distance=Math.abs(row.short-target.short)*distanceWeights.short + Math.abs(row.medium-target.medium)*distanceWeights.medium + Math.abs(row.volatility-target.volatility)*distanceWeights.volatility + Math.abs(row.trend-target.trend)*distanceWeights.trend;
     candidates.push({ distance, change:closes[index+horizon]/closes[index]-1, regime:row.regime });
   }
-  const sameRegime=candidates.filter(row=>row.regime===target.regime), pool=sameRegime.length>=60?sameRegime:candidates;
-  const sorted=[...pool].sort((a,b)=>a.distance-b.distance), scale=Math.max(.001,sorted[Math.floor(sorted.length*.35)]?.distance || .01);
+  const sameRegime=candidates.filter(row=>row.regime===target.regime), pool=sameRegime.length>=analogueCfg.regimeMinPool?sameRegime:candidates;
+  const sorted=[...pool].sort((a,b)=>a.distance-b.distance), scale=Math.max(.001,sorted[Math.floor(sorted.length*analogueCfg.scaleQuantile)]?.distance || .01);
   const weighted=pool.map(row=>({...row,weight:Math.exp(-row.distance/scale)})), weightTotal=weighted.reduce((sum,row)=>sum+row.weight,0);
   const expected=weighted.reduce((sum,row)=>sum+row.change*row.weight,0)/weightTotal, up=weighted.filter(row=>row.change>0).reduce((sum,row)=>sum+row.weight,0)/weightTotal;
   const normalized=weighted.map(row=>({...row,weight:row.weight/weightTotal})).sort((a,b)=>a.change-b.change), quantile=q=>{let cumulative=0;for(const row of normalized){cumulative+=row.weight;if(cumulative>=q)return row.change}return normalized.at(-1)?.change || 0};
-  const effectiveSamples=1/normalized.reduce((sum,row)=>sum+row.weight**2,0), medianDistance=sorted[Math.floor(sorted.length*.5)]?.distance || scale;
-  return { expectedReturn:Number.isFinite(expected) ? expected : 0, upProbability:up, samples:Math.round(effectiveSamples), candidateCount:pool.length, momentum:target.medium, volatility:target.volatility, regime:target.regime, matchQuality:clamp(Math.exp(-medianDistance/Math.max(scale,.001)),0,1), distribution:{p10:quantile(.1),p50:quantile(.5),p90:quantile(.9)} };
+  const effectiveSamples=1/normalized.reduce((sum,row)=>sum+row.weight**2,0), medianDistance=sorted[Math.floor(sorted.length*analogueCfg.medianQuantile)]?.distance || scale;
+  // Chop versus direction: one standard deviation of log returns, scaled by the horizon.
+  // The band must be identical to the one the trainer and the backfill use, or settled rows
+  // would be graded against two different thresholds.
+  // 震荡与方向的分界：对数收益的一个标准差按周期缩放。这个带必须与训练器和回填用的完全一致，
+  // 否则已结算的行会被两套不同的阈值评分。
+  const terminalReturns=[];for(let point=Math.max(1,end-(featureWindow-1));point<=end;point++)terminalReturns.push(Math.log(closes[point]/closes[point-1]));
+  const terminalMean=terminalReturns.reduce((sum,value)=>sum+value,0)/Math.max(terminalReturns.length,1);
+  const terminalSigma=Math.sqrt(terminalReturns.reduce((sum,value)=>sum+(value-terminalMean)**2,0)/Math.max(terminalReturns.length,1))||.000001;
+  const theta=chopThreshold(terminalSigma,horizon);
+  const classWeight=key=>weighted.filter(row=>{
+    if(key==='up')return row.change>theta;
+    if(key==='down')return row.change<-theta;
+    return Math.abs(row.change)<=theta;
+  }).reduce((sum,row)=>sum+row.weight,0)/weightTotal;
+  const classProbabilities={ up:classWeight('up'), flat:classWeight('flat'), down:classWeight('down') };
+  return { expectedReturn:Number.isFinite(expected) ? expected : 0, upProbability:up, theta, classProbabilities, samples:Math.round(effectiveSamples), candidateCount:pool.length, momentum:target.medium, volatility:target.volatility, regime:target.regime, matchQuality:clamp(Math.exp(-medianDistance/Math.max(scale,.001)),0,1), distribution:{p10:quantile(analogueCfg.quantiles.p10),p50:quantile(analogueCfg.quantiles.p50),p90:quantile(analogueCfg.quantiles.p90)} };
 }
-function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
-function sigmoid(value) { return 1/(1+Math.exp(-Math.max(-18,Math.min(18,value)))); }
-function logit(probability) { const value=clamp(probability,.001,.999); return Math.log(value/(1-value)); }
-// ---- Shared A/B shadow experiments ---------------------------------------
-// These helpers deliberately operate on *closed* candles only.  They are not
-// used by any visible live card, which keeps the currently deployed A rules
-// frozen while a B rule gathers paired outcomes in the background.
-function abEma(values, period) { let value=values[0]||0, alpha=2/(period+1); for(const next of values.slice(1)) value=next*alpha+value*(1-alpha); return value; }
-function abRsi(values, period=14) { if(values.length<=period)return 50;let gains=0,losses=0;for(let i=values.length-period;i<values.length;i++){const d=values[i]-values[i-1];gains+=Math.max(0,d);losses+=Math.max(0,-d)}return losses===0?100:100-100/(1+gains/Math.max(losses,.0000001)); }
-function abAtr(series, period=14) { const rows=series.slice(-(period+1));if(rows.length<2)return 0;const ranges=[];for(let i=1;i<rows.length;i++)ranges.push(Math.max(rows[i].high-rows[i].low,Math.abs(rows[i].high-rows[i-1].close),Math.abs(rows[i].low-rows[i-1].close)));return ranges.reduce((sum,x)=>sum+x,0)/ranges.length; }
-function abRegime(series) { const closes=series.map(row=>Number(row.close)), last=closes.at(-1), trend=last/closes[Math.max(0,closes.length-21)]-1, atrPct=abAtr(series,14)/Math.max(last,1);return Math.abs(trend)<Math.max(.003,atrPct*1.6)?'range':trend>0?'bull':'bear'; }
-function abDirection(probability, band=.035) { return probability>=.5+band?'up':probability<=.5-band?'down':'flat'; }
-// Exact server-side equivalents of the visible rule card's closed-candle
-// score.  Keeping this separate from the older shadow baseline prevents a
-// convenient but invalid comparison against a merely similar heuristic.
-function ruleEma(values, period) { if(values.length<period)return NaN;let value=values.slice(0,period).reduce((sum,row)=>sum+row,0)/period,alpha=2/(period+1);for(let index=period;index<values.length;index++)value=values[index]*alpha+value*(1-alpha);return value; }
-function ruleRsi(values, period=14) { if(values.length<=period)return NaN;let gain=0,loss=0;for(let index=1;index<=period;index++){const delta=values[index]-values[index-1];if(delta>=0)gain+=delta;else loss-=delta;}let averageGain=gain/period,averageLoss=loss/period;for(let index=period+1;index<values.length;index++){const delta=values[index]-values[index-1];averageGain=(averageGain*(period-1)+Math.max(delta,0))/period;averageLoss=(averageLoss*(period-1)+Math.max(-delta,0))/period;}return averageLoss===0?100:100-100/(1+averageGain/averageLoss); }
-function ruleAtr(series, period=14) { if(series.length<=period)return NaN;let total=0;for(let index=1;index<=period;index++){const row=series[index],prior=series[index-1];total+=Math.max(row.high-row.low,Math.abs(row.high-prior.close),Math.abs(row.low-prior.close));}let value=total/period;for(let index=period+1;index<series.length;index++){const row=series[index],prior=series[index-1],range=Math.max(row.high-row.low,Math.abs(row.high-prior.close),Math.abs(row.low-prior.close));value=(value*(period-1)+range)/period;}return value; }
-function liveRuleMetrics(series) { const closes=series.map(row=>Number(row.close));if(closes.length<200)return null;const close=closes.at(-1),e20=ruleEma(closes,20),e50=ruleEma(closes,50),e200=ruleEma(closes,200),rsi=ruleRsi(closes),macd=ruleEma(closes,12)-ruleEma(closes,26),basis=closes.slice(-20).reduce((sum,row)=>sum+row,0)/20,sd=Math.sqrt(closes.slice(-20).reduce((sum,row)=>sum+(row-basis)**2,0)/20),bb=(close-(basis-2*sd))/(4*sd||1);let score=0;score+=e20>e50?25:-25;score+=close>e50?20:-20;score+=Number.isFinite(e200)?(close>e200?20:-20):0;score+=clamp(macd/(close*.0015)*15,-15,15);score+=clamp((rsi-50)/2.5,-10,10);score+=clamp((bb-.5)*20,-10,10);return {score:Math.round(score),close,e20,e50,e200,rsi,atr:ruleAtr(series,14),bb}; }
-function scoreProbability(score) { return clamp(sigmoid(score/35),.08,.92); }
-function abRuleProbabilities(series) {
-  const closes=series.map(row=>Number(row.close)), close=closes.at(-1), ema20=abEma(closes.slice(-80),20), ema50=abEma(closes.slice(-160),50), ema200=abEma(closes.slice(-220),200), rsi=abRsi(closes), atrPct=abAtr(series,14)/Math.max(close,1), momentum=close/closes[Math.max(0,closes.length-5)]-1;
-  // A reproduces the existing card's overlapping EMA-style score.  B counts
-  // the trend structure once, filters weak/high-volatility states, and uses a
-  // wider neutral band (hysteresis) rather than adding a new ML layer.
-  let a=0;a+=ema20>=ema50?25:-25;a+=close>=ema50?20:-20;a+=close>=ema200?20:-20;a+=clamp(momentum/.004,-1,1)*15;a+=clamp((rsi-50)/20,-1,1)*10;
-  const trend=close>ema20&&ema20>ema50&&ema50>ema200?1:close<ema20&&ema20<ema50&&ema50<ema200?-1:0;
-  const volumeNow=Math.log1p(Number(series.at(-1)?.volume||0)), volumeMean=series.slice(-21,-1).reduce((sum,row)=>sum+Math.log1p(Number(row.volume||0)),0)/20;
-  const confirmation=trend&&(rsi>52&&trend>0||rsi<48&&trend<0)&&volumeNow>=volumeMean*.94?trend:0;
-  const bScore=confirmation*.9+clamp(momentum/Math.max(atrPct*2,.001),-1,1)*.28+clamp((rsi-50)/28,-1,1)*.18-(atrPct>.012?Math.sign(confirmation)*.12:0);
-  return { a:clamp(sigmoid(a/31),.08,.92), b:clamp(sigmoid(bScore*1.25),.08,.92), regime:abRegime(series), meta:{ atrPct, rsi, trend, volumeConfirmation:confirmation!==0 } };
-}
-function abStrictRuleProbabilities(series) {
-  const live=liveRuleMetrics(series);if(!live)return { a:.5,b:.5,regime:abRegime(series),meta:{ready:false} };
-  const direction=score=>score>=55?1:score<=-55?-1:0;
-  const recent=[2,1,0].map(offset=>liveRuleMetrics(series.slice(0,series.length-offset))).filter(Boolean);
-  const consensus=recent.length===3&&recent.every(metric=>direction(metric.score)===direction(live.score)&&direction(metric.score)!==0), trend=live.close>live.e20&&live.e20>live.e50&&live.e50>live.e200?1:live.close<live.e20&&live.e20<live.e50&&live.e50<live.e200?-1:0, volumeNow=Math.log1p(Number(series.at(-1)?.volume||0)),volumeMean=series.slice(-21,-1).reduce((sum,row)=>sum+Math.log1p(Number(row.volume||0)),0)/20,volumeConfirmed=volumeNow>=volumeMean*.94,aligned=consensus&&trend===direction(live.score)&&volumeConfirmed&&((trend>0&&live.rsi>52)||(trend<0&&live.rsi<48));
-  return { a:scoreProbability(live.score), b:aligned?scoreProbability(live.score):.5, regime:abRegime(series), meta:{ready:true,score:live.score,threeCloseConsensus:consensus,trendAligned:trend===direction(live.score),volumeConfirmed,aligned} };
-}
-// GitHub v2.4.0 classified each closed-candle score immediately.  The current
-// card first requires two matching directions in the latest three closes and
-// then holds that state until the score returns inside the ±28 exit band.  Run
-// both state machines chronologically so B never sees a future candle.
-function abGithubCurrentRuleProbabilities(series) {
-  const live=liveRuleMetrics(series);if(!live)return {a:.5,b:.5,regime:abRegime(series),meta:{ready:false}};
-  const direction=score=>score>=45?1:score<=-45?-1:0;
-  let held=0,confirmedAt=null;
-  for(let end=199;end<series.length;end++){
-    const window=series.slice(0,end+1), metric=liveRuleMetrics(window), current=direction(metric.score);
-    const recent=[2,1,0].map(offset=>end-offset>=199?direction(liveRuleMetrics(series.slice(0,end-offset+1)).score):0);
-    const sustained=current!==0&&recent.filter(value=>value===current).length>=2;
-    if(held===0&&sustained){held=current;confirmedAt=Number(series[end].time)}
-    else if(held!==0&&sustained&&current!==held){held=current;confirmedAt=Number(series[end].time)}
-    else if(held!==0&&Math.abs(metric.score)<=28){held=0;confirmedAt=null}
+// A forecast must be anchored to a bar that has already closed.  Pricing it off the
+// still-forming bar spends future information and shifts every bucket by one interval.
+// 预测必须锚定已收盘的 K 线；用正在形成的那根等于花费未来信息，并让每个桶整体位移一个周期。
+function lastClosedCandle(candles, barMs, now = Date.now()) {
+  for (let index = candles.length - 1; index >= 0; index--) {
+    const time = Number(candles[index]?.time || 0);
+    if (time > 0 && time + barMs <= now) return candles[index];
   }
-  const currentProbability=held?scoreProbability(Math.sign(held)*Math.max(45,Math.abs(live.score))):.5;
-  return {a:scoreProbability(live.score),b:currentProbability,regime:abRegime(series),meta:{ready:true,githubScore:live.score,currentHeld:held,confirmedAt}};
+  return candles.at(-1) || null;
 }
-function abProbabilityPair(series, horizon) {
-  const closes=series.map(row=>Number(row.close)), last=closes.at(-1), r1=last/closes.at(-2)-1, r4=last/closes[Math.max(0,closes.length-5)]-1, r12=last/closes[Math.max(0,closes.length-13)]-1, vol=abAtr(series,14)/Math.max(last,1);
-  // Frozen A mirrors the simple return/EMA heuristic. B is a bounded,
-  // volatility-normalised candidate, designed for calibration rather than a
-  // claim of sophistication; it is scored only after the same future close.
-  const a=clamp(sigmoid((r1*.7+r4*.35+r12*.18+(abEma(closes.slice(-80),20)/abEma(closes.slice(-160),50)-1)*.45)/Math.max(vol,.001)),.08,.92);
-  const b=clamp(sigmoid((r4/(Math.max(vol,.001)*Math.sqrt(Math.max(1,horizon)))*.42)+(r12/(Math.max(vol,.001)*.28))+(abRsi(closes)-50)/55*.18),.08,.92);
-  return { a,b,regime:abRegime(series),meta:{volatility:vol} };
+function forecastAnchor(candles, barMs, now = Date.now()) {
+  const candle = lastClosedCandle(candles, barMs, now);
+  const time = Number(candle?.time || 0);
+  return { candle, bucketAt: time > 0 ? time : Math.floor(now / barMs) * barMs, close:Number(candle?.close) || 0 };
 }
-function abResonancePair(series, horizon) { const closes=series.map(row=>Number(row.close)), last=closes.at(-1), spans=[4,16,48], votes=spans.map(span=>Math.sign(last/closes[Math.max(0,closes.length-1-span)]-1)), a=clamp(.5+votes.reduce((s,v)=>s+v,0)/12,.12,.88), atr=abAtr(series,14)/Math.max(last,1), weighted=spans.reduce((sum,span,index)=>sum+(last/closes[Math.max(0,closes.length-1-span)]-1)/(Math.max(atr*Math.sqrt(span),.001))*[.48,.32,.2][index],0);return {a,b:clamp(sigmoid(weighted*.38),.1,.9),regime:abRegime(series),meta:{votes}}; }
-function abPatternPair(series) { const closes=series.map(row=>Number(row.close)), last=closes.at(-1), prior=series.slice(-21,-1), high=Math.max(...prior.map(row=>row.high)), low=Math.min(...prior.map(row=>row.low)), atr=abAtr(series,14), volume=Number(series.at(-1)?.volume||0), avgVolume=prior.reduce((sum,row)=>sum+Number(row.volume||0),0)/prior.length, raw=last>high?1:last<low?-1:0, a=clamp(.5+raw*.3,.15,.85), confirmed=raw&&volume>=avgVolume*1.2&&Math.abs(last-(raw>0?high:low))>=atr*.12?raw:0;return {a,b:clamp(.5+confirmed*.34,.12,.88),regime:abRegime(series),meta:{breakout:raw,confirmed:!!confirmed}}; }
-function recordAbPair(experimentKey, source, interval, series, horizon, calculator, now=Date.now()) {
-  if(series.length<201)return;const closed=series.slice(0,-1), entry=closed.at(-1);if(!entry)return;const values=calculator(closed,horizon), bucketAt=Number(entry.time), unit=({ '1m':60_000,'5m':300_000,'15m':900_000,'30m':1_800_000,'1h':3_600_000,'3h':10_800_000 })[interval]||900_000, targetAt=bucketAt+horizon*unit;
-  safelyStore(()=>storeAbShadowPair.run(experimentKey,bucketAt,source,interval,`${interval}:${horizon}`,targetAt,Number(entry.close),values.regime,values.a,abDirection(values.a),values.b,abDirection(values.b,.055),JSON.stringify(values.meta||{}),now));
+// The anchor bar closes one interval after its own timestamp, so the horizon starts at
+// bucketAt + barMs and ends at bucketAt + (horizon + 1) * barMs.  Using
+// bucketAt + horizon * barMs made the realised window one bar short — measured on live rows,
+// the 15 minute horizon collapsed to a nominal 0 minutes and settled against a bar that had
+// only just opened.  Both the forecast and the settlement must share this definition.
+// 锚定 K 线的收盘发生在其时间戳之后一个周期，因此持有期应自 bucketAt + barMs 起算，
+// 到 bucketAt + (horizon + 1) * barMs 结算。用 bucketAt + horizon * barMs 会让实际窗口
+// 少一整根 K 线——实测 15 分钟周期的名义持有塌缩为 0，且拿刚开盘那根当结算价。
+// 预测与结算必须共用这一个定义。
+function horizonTargetAt(bucketAt, horizon, barMs) {
+  return Number(bucketAt) + (Number(horizon) + 1) * barMs;
 }
-function recordAbExternalPair(experimentKey, source, series, horizon, probabilities, metadata, now=Date.now()) {
-  const closed=series.slice(0,-1), entry=closed.at(-1);if(!entry||!Number.isFinite(probabilities?.a)||!Number.isFinite(probabilities?.b))return;const bucketAt=Number(entry.time), targetAt=bucketAt+horizon*900_000;
-  safelyStore(()=>storeAbShadowPair.run(experimentKey,bucketAt,source,'15m',`15m:${horizon}`,targetAt,Number(entry.close),abRegime(closed),clamp(probabilities.a,.08,.92),abDirection(probabilities.a),clamp(probabilities.b,.08,.92),abDirection(probabilities.b,.055),JSON.stringify(metadata||{}),now));
+// Settlement reads the point-in-time price at the target instant: the close of the last bar
+// that has fully closed by then.  Matching the first bar *starting* at or after the target
+// picked a bar closing one interval later — and, while it was still forming, an intra-bar
+// price — so settlement fired immediately on a bar that had barely opened.
+// 结算读「结算时刻的时点价格」：在 target_at 之前已收盘的最后一根的收盘价。改为匹配
+// 「起点 >= target_at」的第一根，会取到晚一个周期才收盘的 K 线；它尚未收盘时更是残价，
+// 于是刚开盘就立刻结算。
+function settlementBar(candles, barMs, targetAt) {
+  let match = null;
+  for (const candle of candles) {
+    const time = Number(candle?.time || 0);
+    if (time <= 0) continue;
+    if (time + barMs <= targetAt) match = candle;
+    else break;
+  }
+  return match;
 }
-function captureAbExperiments(source, interval, candles, now=Date.now()) {
-  if(interval==='15m') { for(const horizon of [4,16,96])recordAbPair('rule-signal',source,interval,candles,horizon,abRuleProbabilities,now);for(const horizon of [4,16,96])recordAbPair('github-rule-signal-walk-forward',source,interval,candles,horizon,abGithubCurrentRuleProbabilities,now);for(const horizon of [1,4,16])recordAbPair('multi-period-probability',source,interval,candles,horizon,abProbabilityPair,now);for(const horizon of [4,16])recordAbPair('multi-period-resonance',source,interval,candles,horizon,abResonancePair,now);for(const horizon of [4,16])recordAbPair('pattern-key-levels',source,interval,candles,horizon,abPatternPair,now); }
-  if(['5m','15m','1h','3h'].includes(interval)) for(const horizon of [4,16,96])recordAbPair('rule-signal-v2',source,interval,candles,horizon,abStrictRuleProbabilities,now);
-  if(interval==='1m') for(const horizon of [1,5])recordAbPair('short-horizon-heuristic',source,interval,candles,horizon,abProbabilityPair,now);
+// Three-class verdict: a move only counts as directional once it clears a volatility-scaled
+// band.  Anything inside the band is genuine chop, not a small up or a small down.
+// 三分类判定：只有越过波动缩放阈值才算有方向；阈值带以内是真正的震荡，不是小幅上涨或下跌。
+function outcomeLabel(actualReturn, theta) {
+  const move = Number(actualReturn), band = Number(theta);
+  if (!Number.isFinite(move)) return null;
+  if (!Number.isFinite(band) || band <= 0) return move > 0 ? 'up' : 'down';
+  if (Math.abs(move) <= band) return 'flat';
+  return move > 0 ? 'up' : 'down';
 }
+function multiclassBrier(probabilities, label) {
+  const keys = ['up', 'flat', 'down'];
+  const raw = keys.map(key => Math.max(0, Number(probabilities?.[key]) || 0));
+  const total = raw.reduce((sum, value) => sum + value, 0) || 1;
+  return raw.reduce((sum, value, index) => sum + (value / total - (label === keys[index] ? 1 : 0)) ** 2, 0);
+}
+// ---- Shared A/B shadow experiments ---------------------------------------
+// 仅保留结算逻辑：历史遗留的 ab_shadow_pairs 未结算行仍按同一真实价格补结算，
+// 不再采集任何新实验配对（不建议升级的实验已于 2026-09-19 移除）。
 function settleAbExperiments(histories, now=Date.now()) { for(const row of pendingAbShadowPairs.all(now)){const candles=histories[row.candle_interval]||[],target=candles.find(candle=>Number(candle.time)>=Number(row.target_at));if(!target)continue;const settled=Number(target.close), entry=Number(row.entry_price);if(!Number.isFinite(settled)||!entry)continue;const actualReturn=settled/entry-1;settleAbShadowPair.run(now,settled,actualReturn,actualReturn>0?1:0,row.id); } }
 function abComparison(experimentKey, minSamples=100) {
-  const rows=database.prepare('SELECT horizon_key AS horizonKey, regime, a_probability AS aProbability, b_probability AS bProbability, actual_return AS actualReturn, is_up AS isUp FROM ab_shadow_pairs WHERE experiment_key=? AND settled_at IS NOT NULL ORDER BY target_at ASC').all(experimentKey).map(row=>({...row,aProbability:Number(row.aProbability),bProbability:Number(row.bProbability),actualReturn:Number(row.actualReturn),isUp:Number(row.isUp)}));
+  const rows=stmt('SELECT horizon_key AS horizonKey, regime, a_probability AS aProbability, b_probability AS bProbability, actual_return AS actualReturn, is_up AS isUp FROM ab_shadow_pairs WHERE experiment_key=? AND settled_at IS NOT NULL ORDER BY target_at ASC').all(experimentKey).map(row=>({...row,aProbability:Number(row.aProbability),bProbability:Number(row.bProbability),actualReturn:Number(row.actualReturn),isUp:Number(row.isUp)}));
   const horizons=[...new Set(rows.map(row=>row.horizonKey))];
   const perHorizon=Object.fromEntries(horizons.map(key=>{const subset=rows.filter(row=>row.horizonKey===key);return [key,{samples:subset.length,baseline:pairedPredictionMetrics(subset,'aProbability'),candidate:pairedPredictionMetrics(subset,'bProbability')}]}));
   const regimes=Object.fromEntries(['bull','bear','range'].map(key=>{const subset=rows.filter(row=>row.regime===key);return [key,{samples:subset.length,baseline:pairedPredictionMetrics(subset,'aProbability'),candidate:pairedPredictionMetrics(subset,'bProbability')}]}));
@@ -2104,15 +2855,6 @@ function abComparison(experimentKey, minSamples=100) {
   const verdict=!enough?{tone:'yellow',label:'继续影子评估',reason:`每个周期及已覆盖市场状态均需 ${minSamples} 个已结算配对样本。`}:better?{tone:'green',label:'建议人工复核',reason:'候选在严格对照、概率质量、校准、成本后正收益和市场状态稳健性门槛均达标；不会自动切换。'}:{tone:'red',label:'不建议升级',reason:'样本量已达到最低门槛，但候选尚未同时达到正 Brier Skill、成本后正收益与市场状态稳健性要求。'};return {experimentKey,paired:rows.length,minSamples,perHorizon,regimes,overall,criteria:{quality:'Brier 与 Log Loss 均至少优于基线 3%',calibration:'Brier Skill ≥ 0，且 ECE 不恶化超过 5%',economics:'固定 0.08% 往返成本后净收益为正，且不低于基线',robustness:'每个已覆盖市场状态均有足量样本、成本后正收益且 Brier 至少优于基线 3%'},verdict};
 }
 const abExperimentCatalog=[
-  {key:'rule-signal',name:'当前规则信号（旧口径）',kind:'prediction',candidate:'旧版近似基线；仅保留历史参照，不作为升级依据',minSamples:100,status:'active'},
-  {key:'github-rule-signal-walk-forward',name:'GitHub 规则信号对照（Walk-forward）',kind:'prediction',candidate:'A：GitHub v2.4.0 即时分数；B：当前 ±45 / ±28 稳定化核心与连续收盘确认。相同 15m 已收盘 K 线、相同 1h / 4h / 24h 结算与 0.08% 往返成本。',minSamples:100,status:'active'},
-  {key:'rule-signal-v2',name:'当前规则信号（严格对照）',kind:'prediction',candidate:'线上同分数基线 + 连续 3 根收盘确认 + EMA 排列 / RSI / 成交量确认',minSamples:100,status:'active'},
-  {key:'short-horizon-heuristic',name:'短线机器预测',kind:'prediction',candidate:'仅已收盘 K 线的波动归一化候选',minSamples:100,status:'active'},
-  {key:'multi-period-probability',name:'多周期概率预测',kind:'prediction',candidate:'时间顺序、波动归一化的校准候选',minSamples:30,status:'active'},
-  {key:'multi-period-resonance',name:'多周期共振',kind:'prediction',candidate:'按趋势强度与波动率加权的一致性',minSamples:30,status:'active'},
-  {key:'pattern-key-levels',name:'形态与关键位',kind:'prediction',candidate:'突破需成交量、ATR 与收盘确认',minSamples:30,status:'active'},
-  {key:'okx-microstructure',name:'OKX 微观结构',kind:'prediction',candidate:'OFI、流动性质量与点差过滤',minSamples:100,status:'active',note:'先以当前可用 OFI 快照记录；深度历史成熟前不作升级结论'},
-  {key:'news-fear-greed',name:'恐惧贪婪 / 新闻',kind:'prediction',candidate:'事件分类、时间衰减、价格吸收标记',minSamples:30,status:'active'},
   {key:'cross-market',name:'美股联动',kind:'prediction',candidate:'滚动相关、正则化与市场状态过滤',minSamples:30,status:'collecting',note:'等待 BTC、SPY、QQQ 的同步日线快照'},
   {key:'leverage-buffer',name:'强平缓冲',kind:'validation',candidate:'分位数波动与状态自适应缓冲',status:'collecting',note:'按实际触及率验证风险覆盖率，不用方向准确率'},
   {key:'macro-calendar',name:'宏观日历',kind:'validation',candidate:'事件前后波动区间模型',status:'collecting',note:'按波动覆盖率验证，不用涨跌准确率'},
@@ -2121,73 +2863,442 @@ const abExperimentCatalog=[
 function abExperimentStatus() { return abExperimentCatalog.map(item=>{if(item.status!=='active'||item.kind!=='prediction')return {...item,comparison:null};return {...item,comparison:abComparison(item.key,item.minSamples)};}); }
 // Time-ordered lightweight fusion model: price features are trained on earlier rows and validated on later unseen rows.
 // 时间顺序轻量融合模型：价格特征仅用较早样本训练、较晚未见样本验证，避免随机切分泄漏。
-function trainFusionModel(candles,horizon) {
-  const series=candles.filter(validCandle), closes=series.map(candle=>Number(candle.close)), width=8;
-  if(series.length<260)return null;
-  const mean=values=>values.reduce((sum,value)=>sum+value,0)/Math.max(values.length,1);
-  const deviation=values=>Math.sqrt(mean(values.map(value=>(value-mean(values))**2)))||.000001;
-  const featureAt=index=>{
-    const change=span=>percentChange(closes,index,span), returns=[];
-    for(let point=Math.max(1,index-19);point<=index;point++)returns.push(Math.log(closes[point]/closes[point-1]));
-    const volatility=deviation(returns), volumes=series.slice(index-20,index).map(row=>Math.log1p(row.volume));
-    const high=Math.max(...series.slice(index-20,index+1).map(row=>row.high)), low=Math.min(...series.slice(index-20,index+1).map(row=>row.low));
-    return [change(1),change(4),change(12),volatility,change(12)/(volatility*Math.sqrt(12)+.000001),(series[index].high-series[index].low)/closes[index],(series[index].close-series[index].open)/closes[index],(Math.log1p(series[index].volume)-mean(volumes))/deviation(volumes)];
-  };
-  const tripleBarrier=(index)=>{
-    const history=[];for(let point=Math.max(1,index-19);point<=index;point++)history.push(Math.log(closes[point]/closes[point-1]));
-    const entry=closes[index], unit=Math.max(deviation(history)*Math.sqrt(horizon)*1.15,.001), upper=entry*Math.exp(unit), lower=entry*Math.exp(-unit), end=Math.min(series.length-1,index+horizon);
-    for(let point=index+1;point<=end;point++){const up=series[point].high>=upper, down=series[point].low<=lower;if(up!==down)return { y:up?1:0,end:point,event:up?'upper':'lower' };if(up&&down)return null;}
-    return { y:closes[end]>=entry?1:0,end,event:'vertical' };
-  };
-  const rows=[];for(let index=24;index<series.length-horizon;index++){const label=tripleBarrier(index);if(label)rows.push({x:featureAt(index),y:label.y,end:label.end,futureReturn:closes[label.end]/closes[index]-1});}
-  if(rows.length<180)return null;
-  const trainEnd=Math.floor(rows.length*.6), calibrationEnd=Math.floor(rows.length*.8), embargo=horizon;
-  const train=rows.slice(0,trainEnd), calibration=rows.slice(trainEnd+embargo,calibrationEnd), test=rows.slice(calibrationEnd+embargo);
-  if(calibration.length<30||test.length<30)return null;
-  const means=Array.from({length:width},(_,column)=>mean(train.map(row=>row.x[column]))), scales=Array.from({length:width},(_,column)=>deviation(train.map(row=>row.x[column]))), standardize=x=>x.map((value,column)=>clamp((value-means[column])/scales[column],-6,6));
-  const weights=Array(width).fill(0);let bias=0;
-  for(let epoch=0;epoch<180;epoch++)for(const row of train){const x=standardize(row.x), probability=sigmoid(bias+x.reduce((sum,value,column)=>sum+value*weights[column],0)), error=row.y-probability, rate=.012/(1+epoch/90);bias+=rate*error/train.length;x.forEach((value,column)=>weights[column]+=rate*error*value/train.length)}
-  const logistic=x=>sigmoid(bias+standardize(x).reduce((sum,value,column)=>sum+value*weights[column],0));
-  // A shallow boosted-stump comparator supplies nonlinear interactions without
-  // claiming a LightGBM dependency is present in this zero-dependency service.
-  const scores=train.map(()=>logit(mean(train.map(row=>row.y)))), trees=[];
-  for(let round=0;round<24;round++){const residual=train.map((row,index)=>row.y-sigmoid(scores[index]));let best=null;for(let column=0;column<width;column++){const values=train.map(row=>row.x[column]).sort((a,b)=>a-b);for(const fraction of [.2,.4,.6,.8]){const threshold=values[Math.floor((values.length-1)*fraction)],left=[],right=[];train.forEach((row,index)=>(row.x[column]<=threshold?left:right).push(index));if(left.length<20||right.length<20)continue;const leftValue=clamp(mean(left.map(index=>residual[index]))*2,-1,1),rightValue=clamp(mean(right.map(index=>residual[index]))*2,-1,1),loss=left.reduce((sum,index)=>sum+(residual[index]-leftValue)**2,0)+right.reduce((sum,index)=>sum+(residual[index]-rightValue)**2,0);if(!best||loss<best.loss)best={column,threshold,leftValue,rightValue,loss};}}if(!best)break;trees.push(best);train.forEach((row,index)=>{scores[index]+=.14*(row.x[best.column]<=best.threshold?best.leftValue:best.rightValue)})}
-  const tree=x=>sigmoid(logit(mean(train.map(row=>row.y)))+trees.reduce((sum,item)=>sum+.14*(x[item.column]<=item.threshold?item.leftValue:item.rightValue),0));
-  const raw=x=>{const trend=Math.abs(x[4]),volatile=x[3]>.006,treeWeight=(trend>1.1||volatile)?.62:.5;return treeWeight*tree(x)+(1-treeWeight)*logistic(x)};
-  let slope=1,intercept=0;for(let epoch=0;epoch<220;epoch++)for(const row of calibration){const probability=sigmoid(slope*logit(raw(row.x))+intercept),error=row.y-probability,rate=.018/(1+epoch/100);slope+=rate*error*logit(raw(row.x))/calibration.length;intercept+=rate*error/calibration.length}
-  const calibrated=x=>sigmoid(slope*logit(raw(x))+intercept), baseRate=mean(train.map(row=>row.y)), predicted=test.map(row=>({...row,probability:calibrated(row.x)})), samples=predicted.length;
-  const brier=mean(predicted.map(row=>(row.probability-row.y)**2)), baselineBrier=mean(predicted.map(row=>(baseRate-row.y)**2)), logLoss=mean(predicted.map(row=>-(row.y*Math.log(clamp(row.probability,.000001,.999999))+(1-row.y)*Math.log(clamp(1-row.probability,.000001,.999999))))), accuracy=mean(predicted.map(row=>+(+(row.probability>=.5)===+row.y))), bins=Array.from({length:10},()=>[]);
-  predicted.forEach(row=>bins[Math.min(9,Math.floor(row.probability*10))].push(row));const reliability=bins.map((bin,index)=>bin.length?{label:`${index*10}–${index*10+10}%`,samples:bin.length,predicted:mean(bin.map(row=>row.probability)),observed:mean(bin.map(row=>row.y))}:null).filter(Boolean), ece=reliability.reduce((sum,bin)=>sum+Math.abs(bin.predicted-bin.observed)*bin.samples/samples,0);
-  const ranked=[...predicted].sort((a,b)=>a.probability-b.probability), positives=ranked.filter(row=>row.y).length, negatives=samples-positives, auc=positives&&negatives?(ranked.reduce((sum,row,index)=>sum+(row.y?(index+1):0),0)-positives*(positives+1)/2)/(positives*negatives):null;
-  return { probability:calibrated(featureAt(series.length-1)), validation:{accuracy,brier,logLoss,brierSkill:baselineBrier?1-brier/baselineBrier:null,ece,auc,samples,reliability,label:'triple-barrier',split:'chronological 60/20/20 + embargo',embargo,models:['logistic','local boosted-stump baseline'],calibration:'Platt on independent chronological window'}, calibration:{slope,intercept} };
+// Walk-forward replay turns the stored candle history into graded three-class samples instead of
+// waiting for the market to hand them over one bucket at a time. Live sampling is rate-limited by
+// physics: a daily horizon can only ever produce one independent outcome per day, so a 30-sample
+// threshold costs 30 days of wall time. The history already holds ~1000 daily bars, and a replay
+// can grade all of them today.
+// 历史回放把已存的 K 线历史直接变成已评分的三分类样本，不必再等市场一根一根地交付。实时采样的
+// 速率由物理决定 —— 日线周期一天只能产生一个独立结果，30 条门槛就要花 30 天真实时间。历史里已有
+// 约 1000 根日线，回放今天就能把它们全部评分。
+// No bucket is ever scored by a model that has already seen its own future: each segment trains on
+// rows fully realised at the cut, and only then predicts the buckets that follow it.
+// 任何桶都不会被「已经看过它未来」的模型评分：每段只用在 cut 处已完全结算的行训练，之后才预测它
+// 后面的桶。
+// An escape hatch for verification only: with this set, each arm recomputes the analogue projection
+// it would otherwise share. Keeping it makes the equivalence of the shared-cache refactor testable
+// on demand - both settings must produce byte-identical payloads - instead of resting on an argument.
+// 仅供验证的逃生开关：打开后每个臂会重新计算本来共享的近邻投影。留着它，是为了让「共享缓存」这次
+// 重构的等价性可以随时被检验 —— 两种设置必须产出逐字节相同的载荷 —— 而不是只靠推理断言。
+const RESEARCH_ANALOGUE_CACHE_DISABLED = process.env.BTC_RESEARCH_NO_ANALOGUE_CACHE === '1';
+// The replay's warm-up is per horizon for the same reason the promotion gate is: the cost of one bar
+// is measured in minutes on one tape and in days on another, so a single number either wastes most
+// of the daily history or gives the intraday model almost nothing to learn from.
+// 回放的预热长度与升级门槛同理，也是按周期配置的：一根 K 线在一种粒度上是几分钟、在另一种上是几天，
+// 所以一个单一数字要么浪费掉大部分日线历史，要么让日内模型几乎没有可学的东西。
+function replayMinTrain(key) {
+  const overrides = RESEARCH_TUNING.replay.perHorizonMinTrain;
+  return Number(overrides?.[key]) || RESEARCH_TUNING.replay.minTrain;
 }
+async function walkForwardBackfill(horizonKey, horizon, interval, candles, options = {}) {
+  const barMs = interval === '1d' ? 86_400_000 : 900_000;
+  const series = candles.filter(validCandle);
+  const replayCfg=RESEARCH_TUNING.replay, minTrain = Math.max(replayCfg.minTrainFloor, Number(options.minTrain) || replayMinTrain(horizonKey)), segmentLength = Math.max(60, Number(options.segmentLength) || replayCfg.segmentLength), maxSamples = Number(options.maxSamples) || replayCfg.maxSamples;
+  const mean = values => values.reduce((sum, value) => sum + value, 0) / Math.max(values.length, 1);
+  const deviation = values => Math.sqrt(mean(values.map(value => (value - mean(values)) ** 2))) || .000001;
+  const samples = [];
+  let cut = minTrain, segments = 0, skippedSegments = 0, featureWidth = null, volatilityColumns = null, headDiagnostics = null, directionDiagnostics = null;
+  while (cut + horizon < series.length && samples.length < maxSamples) {
+    const to = Math.min(cut + segmentLength, series.length - 1);
+    // The calendar is passed for tagging even when it is not used as a feature: conditional
+    // reporting needs the baseline arm to know which samples sat inside an event window, and the
+    // only way to compare the two arms on that subset is for both to carry the same tag.
+    // 即便日历不被当特征用，也要传进来打标记：条件统计需要基线臂知道哪些样本落在事件窗口内，而要在
+    // 那个子集上比较两臂，唯一办法就是两臂带同一个标记。
+    const model = await trainFusionModel(series.slice(0, to + 1), horizon, { trainThrough: cut, minDirectional: options.minDirectional, volatilityHead: options.volatilityHead, macroCalendar: options.useCalendarFeatures ? options.macroCalendar : undefined, fundingFeatures: options.useFundingFeatures ? options.fundingFeatures : undefined });
+    if (!model || typeof model.predictAt !== 'function') { skippedSegments += 1; cut += segmentLength; continue; }
+    segments += 1;
+    featureWidth = Number(model.featureWidth) || featureWidth;
+    volatilityColumns = Number(model.volatilityHead?.columns) || volatilityColumns;
+    // The head's diagnostics describe the instrument, not the treatment, and the instrument is the
+    // same object in every segment - so the most recent fit is the honest thing to report. They travel
+    // to the payload because "the head over-predicts big moves" is only actionable once you can see
+    // whether the level moved between the slices or the head simply shrank toward 0.5.
+    // 这个头的诊断描述的是量具而不是被处理的变量，而量具在每一段里都是同一个对象 —— 所以报最近一次
+    // 拟合是诚实的。它们要传到载荷里，因为「这个头会高估大动」只有在能看到「到底是切片之间水位移动了、
+    // 还是这个头只是朝 0.5 收缩了」之后才是可行动的。
+    if (model.volatilityHead) headDiagnostics = { columns: model.volatilityHead.columns, trainSamples: model.volatilityHead.trainSamples,
+      calibrationSamples: model.volatilityHead.calibrationSamples, bigSamples: model.volatilityHead.bigSamples,
+      bigRate: model.volatilityHead.bigRate, calibrationBigRate: model.volatilityHead.calibrationBigRate,
+      rawTrainRate: model.volatilityHead.rawTrainRate, trainPredictedRate: model.volatilityHead.trainPredictedRate,
+      calibrationPredictedRate: model.volatilityHead.calibrationPredictedRate };
+    if (model.directionDiagnostics) directionDiagnostics = model.directionDiagnostics;
+    for (let index = cut + 1; index <= to; index++) {
+      const end = index + horizon;
+      if (end >= series.length) break;
+      // Yielding keeps this single-threaded service responsive: the replay is pure CPU work and
+      // would otherwise freeze every other request for its full duration.
+      // 让出事件循环，保证单线程服务的响应性：回放是纯 CPU 计算，否则会在整个运行期间冻结其他请求。
+      if ((index - cut) % RESEARCH_TUNING.replay.yieldEvery === 0) await new Promise(resolve => setImmediate(resolve));
+      const entry = Number(series[index].close), exitPrice = Number(series[end].close);
+      if (!Number.isFinite(entry) || !Number.isFinite(exitPrice) || !entry) continue;
+      const actualReturn = exitPrice / entry - 1, returns = [];
+      for (let point = Math.max(1, index - 19); point <= index; point++) returns.push(Math.log(Number(series[point].close) / Number(series[point - 1].close)));
+      const fallbackTheta = chopThreshold(deviation(returns), horizon);
+      // The live path takes its chop probability from the analogue pool, not from the price model:
+      // the learned model answers "which way, given that it moves at all". A replay that skipped the
+      // analogue step could only ever predict up or down, and would score near zero against a tape
+      // that is flat most of the time — measured at 12% before this step was reinstated.
+      // 实时路径的震荡概率来自近邻池，而不是价格模型：学习模型回答的是「若真动了，往哪边」。回放若
+      // 跳过近邻这一步，就只能预测涨或跌，而行情大部分时间在震荡——实测准确率仅 12%。
+      // The analogue projection depends only on the candles, the horizon and the bucket - never on
+      // the model, and never on which feature block that model was handed. Every ablation arm
+      // therefore computes a bit-identical projection for the same bucket, so a caller that runs
+      // several arms over one horizon can hand in a single cache and let them share it. The numbers
+      // are identical by construction; what disappears is only the repeated O(n^2) work, which is
+      // what made a third factor arm cost as much as the first two together.
+      // 近邻投影只取决于 K 线、周期与桶，与模型无关，也与该模型拿到的是哪一块特征无关。因此每个消融臂
+      // 在同一个桶上算出的投影逐位相同 —— 调用方只要为同一周期传一份缓存，各臂就能共享。数值在构造上
+      // 完全相同，消失的只是被重复执行的 O(n²) 计算，而那正是「加第三个因子臂等于再加前两臂成本」的原因。
+      let projection = null;
+      const cache = RESEARCH_ANALOGUE_CACHE_DISABLED ? null : options.projectionCache;
+      if (cache instanceof Map && cache.has(index)) projection = cache.get(index);
+      else {
+        try { projection = historicalProjection(series.slice(0, index + 1), horizon); } catch (error) { projection = null; }
+        if (cache instanceof Map) cache.set(index, projection);
+      }
+      const learnedProbability = clamp(model.predictAt(index), .000001, .999999);
+      const classProbabilities = projection?.classProbabilities || { up: 0, flat: 0, down: 0 };
+      const flatProbability = clamp(Number(classProbabilities.flat) || 0, 0, 1);
+      const spread = Number(classProbabilities.up) + Number(classProbabilities.down);
+      const analogueProbability = spread > 0 ? Number(classProbabilities.up) / spread : learnedProbability;
+      const analogueWeight = projection?.regime === 'range' ? .62 : (Number(projection?.volatility) || 0) > .006 ? .42 : .48;
+      const baseProbability = analogueWeight * analogueProbability + (1 - analogueWeight) * learnedProbability;
+      const directionalProbability = clamp(sigmoid(logit(baseProbability)), .05, .95);
+      const directionalMass = clamp(1 - flatProbability, 0, 1);
+      const upProbability = clamp(directionalMass * directionalProbability, .02, .95);
+      const downProbability = clamp(Math.max(0, directionalMass - upProbability), .02, .95);
+      const theta = Number(projection?.theta) || fallbackTheta, label = Math.abs(actualReturn) <= theta ? 'flat' : (actualReturn > 0 ? 'up' : 'down');
+      // The funding vector is read unconditionally, not only when the funding arm is active. That
+      // keeps the tag identical across arms, which is the only way the factor can be evaluated on
+      // the same subset of buckets it would be compared on.
+      // 资金费率向量无条件读取，而不是只在资金费率臂激活时读。这样标记在各臂之间完全一致 —— 只有
+      // 这样，因子才能在「它将被比较的那同一批桶」上被评估。
+      const bucketAt=Number(series[index].time), fundingVector=fundingFeaturesAt(options.fundingFeatures,bucketAt);
+      // The volatility head is scored on the same bucket as the direction head, off the same feature
+      // row, so the two readings differ only in what they were asked to predict.
+      // 波动头与方向头在同一条桶上、同一行特征上打分，因此两个读数唯一的差别就是它们被要求预测什么。
+      const bigProbability = typeof model.predictBigAt === 'function' ? clamp(model.predictBigAt(index), .000001, .999999) : null;
+      samples.push({ bucketAt, targetAt: bucketAt + (horizon + 1) * barMs, entry, exitPrice,
+        probability: directionalProbability, upProbability, flatProbability, downProbability, theta, actualReturn,
+        isUp: actualReturn > 0 ? 1 : 0, direction: dominantDirection({ up: upProbability, flat: flatProbability, down: downProbability }),
+        outcomeLabel: label, regime: projection?.regime || null, sinceEventHours: hoursSinceEvent(options.macroCalendar, bucketAt),
+        fundingZ: fundingVector?.[0] ?? null, fundingLevel: fundingVector?.[2] ?? null, bigProbability });
+    }
+    cut += segmentLength;
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  return { horizonKey, samples, segments, skippedSegments, candles: series.length, featureWidth, volatilityColumns, minTrain, volatilityHead: headDiagnostics, directionHead: directionDiagnostics,
+    macroCalendarEvents: Array.isArray(options.macroCalendar) ? options.macroCalendar.length : 0,
+    fundingSeries: Array.isArray(options.fundingFeatures) ? options.fundingFeatures.length : 0 };
+}
+// Live buckets overlap by horizon when the sampling grid is finer than the holding period, so a
+// headline count overstates how much independent evidence it holds. Greedily take the earliest
+// bucket, then skip everything that opens before that pick would have closed.
+// 当采样网格比持有期更细时，实时桶之间会重叠，于是统计条数会高估它实际持有的独立证据量。做法是
+// 贪心取最早的一个桶，然后跳过所有在该笔尚未平仓之前就开仓的桶。
+function independentSubset(rows, barMs) {
+  const sorted = [...rows].sort((a, b) => a.bucketAt - b.bucketAt), picked = [];
+  let lastTarget = -Infinity;
+  for (const row of sorted) {
+    if (Number(row.bucketAt) >= lastTarget) { picked.push(row); lastTarget = Number(row.bucketAt) + barMs; }
+  }
+  return picked;
+}
+// The promotion chain is gated per horizon. Configuration carries the overrides; the scalar stays
+// as the fallback so a horizon that wants the default never has to be written twice.
+// 升级链按周期分别把关。覆盖值写在配置里，标量作为兜底，采用默认值的周期不必重复声明。
+function requiredIndependentFor(key) {
+  const overrides = RESEARCH_TUNING.gates.perHorizonRequirement;
+  return Number(overrides?.[key]) || RESEARCH_TUNING.gates.requiredIndependentPerHorizon;
+}
+// The same gate expressed in wall-clock terms, which is what a person actually waits for: one
+// independent sample per holding period. Without this, "20" looks identical across four horizons
+// that cost 5 hours and 20 days respectively.
+// 同一个门槛折算成真实等待时间 —— 这才是人实际要等的东西：每个持有期只产一个独立样本。没有这层
+// 折算，「20」在分别要花 5 小时与 20 天的两个周期上看起来一模一样。
+function horizonGateDays(key) { return requiredIndependentFor(key) * horizonBarMs(key) / 86_400_000; }
+// Replay refreshes on demand rather than on every page load: it retrains a dozen small models and
+// would otherwise dominate the request budget of a research panel nobody is watching.
+// 回放按需刷新，而不是每次打开页面都跑：它会重训十几个小模型，否则会占满一个没人盯着的研究面板的
+// 请求预算。
+const RESEARCH_BACKFILL_TTL = 30 * 60_000;
+let researchBackfillCache = null;
+async function researchBackfill({ refresh = false } = {}) {
+  const now = Date.now();
+  if (!refresh && researchBackfillCache && now - researchBackfillCache.time < RESEARCH_BACKFILL_TTL) return { ...researchBackfillCache.payload, cached: true };
+  const calendar = macroHighImpactCalendar();
+  const intraday = storedCandleRange('15m', 0, now), daily = storedCandleRange('1d', 0, now);
+  const definitions = researchHorizonDefinitions({ '15m': intraday, '1d': daily });
+  const mean = values => values.reduce((sum, value) => sum + value, 0) / Math.max(values.length, 1);
+  const brierOf = values => values.length ? mean(values.map(sample => multiclassBrier({ up: Number(sample.upProbability), flat: Number(sample.flatProbability), down: Number(sample.downProbability) }, sample.outcomeLabel))) : null;
+  const rows = {};
+  for (const definition of definitions) {
+    const barMs = definition.barMs;
+    // The calendar is attached for tagging only; whether it is also fed to the model is a separate
+    // switch, so the headline replay keeps its published definition while samples still know how
+    // close they sat to a print.
+    // 日历只用于打标记；它是否同时喂给模型由另一个开关控制，这样主口径回放保持既有定义不变，而样本
+    // 仍然知道它们距一次发布有多近。
+    const replay = await walkForwardBackfill(definition.key, definition.horizon, definition.interval, definition.candles, { minDirectional: definition.minDirectional, macroCalendar: calendar });
+    const independent = independentSubset(replay.samples, barMs);
+    rows[definition.key] = {
+      candles: replay.candles, segments: replay.segments, skippedSegments: replay.skippedSegments,
+      samples: replay.samples.length, independent: independent.length,
+      calendarEvents: calendar.length, featureWidth: replay.featureWidth ?? null,
+      eventWindowSamples: independent.filter(sample => Number.isFinite(Number(sample.sinceEventHours)) && Number(sample.sinceEventHours) <= 24).length,
+      from: replay.samples.length ? replay.samples[0].bucketAt : null,
+      to: replay.samples.length ? replay.samples[replay.samples.length - 1].bucketAt : null,
+      brier: brierOf(replay.samples), independentBrier: brierOf(independent),
+      threeClass: threeClassSummary(replay.samples),
+      independentThreeClass: threeClassSummary(independent),
+    };
+  }
+  const payload = { rows, generatedAt: now, windowVersion: RESEARCH_WINDOW_VERSION, tuningFingerprint: tuningFingerprint(),
+    note: 'Walk-forward replay over stored candles. Each segment trains only on buckets already settled at its cut, so no bucket is graded by a model that has seen its own future.' };
+  researchBackfillCache = { time: now, payload };
+  return { ...payload, cached: false };
+}
+// Ablation answers the only question that matters for a new factor: does it buy anything? Both arms
+// run the identical replay pipeline over the identical candles and differ solely by the three
+// calendar columns, so any gap between them is attributable to those columns and nothing else. The
+// headline is deltaVsMajority rather than accuracy: on a tape that is flat most of the time, a high
+// accuracy score is reachable by never predicting a direction at all.
+// 消融实验回答一个新因子唯一重要的问题：它到底买到了什么？两臂跑完全相同的回放流程、相同的 K 线，
+// 唯一差别就是那三列日历特征，因此两者的差距只能归因于这三列。头条指标是 deltaVsMajority 而不是
+// accuracy：在大部分时间震荡的行情里，「永不预测方向」就能拿到很高的准确率。
+let researchAblationCache = null;
+// Every ablation arm differs from the baseline by exactly one block of columns, so a verdict of "no
+// difference" is always attributable to that block and to nothing else. Each factor also carries the
+// condition that splits its samples into exposed and unexposed: a global average can hide a factor
+// that only acts in a narrow regime, and those buckets are a minority of the tape.
+// 每个消融臂与基线臂只差正好一块列，因此任何「无差异」结论都只能归因于那一块。每个因子还带着把
+// 样本切成「暴露」与「未暴露」的条件：全局均值会掩盖一个只在窄区间起作用的因子，而那些桶只占全部
+// 样本的少数。
+const ABLATION_FACTORS = [
+  { key: 'macro', label: '宏观日程', labelEn: 'macro calendar', columns: 3,
+    context: 'macroCalendar', switchOn: { useCalendarFeatures: true },
+    note: '距上次事件小时数、距下次事件小时数、是否在事件后 24h 内',
+    noteEn: 'hours since the last print, hours until the next, and whether the bucket sits within 24h of one',
+    condition: { label: '事件窗口内（24h）', labelEn: 'inside an event window (24h)',
+      test: sample => Number.isFinite(Number(sample.sinceEventHours)) && Number(sample.sinceEventHours) <= 24 } },
+  { key: 'funding', label: '合约资金费率', labelEn: 'perp funding rate', columns: FUNDING_FEATURE_COLUMNS,
+    context: 'fundingFeatures', switchOn: { useFundingFeatures: true },
+    note: '资金费率 z 分数、费率斜率、费率绝对水平、距下次结算的位置',
+    noteEn: 'funding z-score, rate tilt, absolute rate level, and position within the settlement cycle',
+    condition: { label: '费率拥挤极端（|z| > 1）', labelEn: 'crowding extreme (|z| > 1)',
+      test: sample => Math.abs(Number(sample.fundingZ) || 0) > 1 } },
+];
+async function researchAblation({ refresh = false } = {}) {
+  const now = Date.now();
+  if (!refresh && researchAblationCache && now - researchAblationCache.time < RESEARCH_BACKFILL_TTL) return { ...researchAblationCache.payload, cached: true };
+  // Every context is handed to every arm so the per-sample tags come out identical across arms; only
+  // the switch decides which block reaches the model. Without that, a factor could not be measured on
+  // the same subset of buckets it is about to be compared on.
+  // 每个上下文都交给每个臂，使各臂的逐样本标记完全一致；只有开关决定哪一块进入模型。否则因子就无法
+  // 在「它将被比较的那同一批桶」上被测量。
+  const contexts = { macroCalendar: macroHighImpactCalendar(), fundingFeatures: fundingFeatureSeries() };
+  const intraday = storedCandleRange('15m', 0, now), daily = storedCandleRange('1d', 0, now);
+  const definitions = researchHorizonDefinitions({ '15m': intraday, '1d': daily });
+  const mean = values => values.reduce((sum, value) => sum + value, 0) / Math.max(values.length, 1);
+  const brierOf = values => values.length ? mean(values.map(sample => multiclassBrier({ up: Number(sample.upProbability), flat: Number(sample.flatProbability), down: Number(sample.downProbability) }, sample.outcomeLabel))) : null;
+  const shift = (factor, base) => Number.isFinite(factor) && Number.isFinite(base) ? factor - base : null;
+  const directionalCalls = summary => summary ? summary.samples - summary.predictedCounts.flat : null;
+  const factorDelta = (factor, base) => factor && base ? {
+    deltaVsMajority: shift(factor.threeClass?.deltaVsMajority, base.threeClass?.deltaVsMajority),
+    deltaVsFrequency: shift(factor.threeClass?.deltaVsFrequency, base.threeClass?.deltaVsFrequency),
+    directionalAccuracy: shift(factor.threeClass?.directionalAccuracy, base.threeClass?.directionalAccuracy),
+    missedBreakout: shift(factor.threeClass?.missedBreakout, base.threeClass?.missedBreakout),
+    brier: shift(factor.brier, base.brier),
+    directionalCalls: shift(directionalCalls(factor.threeClass), directionalCalls(base.threeClass)),
+    // The volatility question gets its own block rather than being folded into the numbers above:
+    // both are ratios but they answer different questions, and a factor that moves one without the
+    // other is exactly the case this module keeps running into.
+    // 波动这个问题单独成块，而不是混进上面的数字里：两者都是比例，但回答的是不同问题，而「动了一个、
+    // 不动另一个」恰恰是本模块反复遇到的情形。
+    volatility: { brierSkill: shift(factor.volatility?.brierSkill, base.volatility?.brierSkill),
+      auc: shift(factor.volatility?.auc, base.volatility?.auc),
+      brier: shift(factor.volatility?.brier, base.volatility?.brier) },
+  } : null;
+  // Only a factor that actually carries data earns an arm: an empty calendar would run a second
+  // identical pass and report a "no difference" that means nothing.
+  // 只有真正带数据的因子才会得到一个臂：空日历会跑出一次完全相同的流程，并报出一个毫无意义的
+  // 「无差异」。
+  const factors = ABLATION_FACTORS.filter(factor => Array.isArray(contexts[factor.context]) && contexts[factor.context].length);
+  const rows = {};
+  for (const definition of definitions) {
+    // The volatility head is switched on for every arm including the baseline: it is part of the
+    // measuring instrument, not part of the treatment. Only the factor's own column block differs
+    // between arms, which is what keeps a delta attributable.
+    // 波动头对每个臂都打开、包括基线臂：它是量具的一部分，不是被处理的变量。各臂之间唯一的差别仍然是
+    // 因子自己那一块列，这才让差值可归因。
+    const barMs = definition.barMs, base = { minDirectional: definition.minDirectional, volatilityHead: true, ...contexts };
+    // Every arm over this horizon sees the same candles and the same buckets, so they would all
+    // compute the identical analogue projection from scratch. One cache per horizon removes that
+    // duplication without touching a single number.
+    // 同一周期上的每个臂看到的是同一批 K 线与同一批桶，因此会各自从头算一遍完全相同的近邻投影。
+    // 每个周期一份缓存即可消除这份重复，且不改变任何一个数值。
+    const projectionCache = new Map(), arms = {};
+    for (const factor of [{ key: 'baseline', switchOn: {} }, ...factors]) {
+      const replay = await walkForwardBackfill(definition.key, definition.horizon, definition.interval, definition.candles, { ...base, ...factor.switchOn, projectionCache });
+      const picked = independentSubset(replay.samples, barMs);
+      arms[factor.key] = { picked, replay, summary: { samples: picked.length, featureWidth: replay.featureWidth ?? null, volatilityColumns: replay.volatilityColumns ?? null,
+        // A skipped segment is a training window the model could not fit at all. It is reported
+        // rather than dropped: it is the first thing that moves when a warm-up or a sample floor is
+        // lowered, and a silent skip would look like coverage that was never there.
+        // 被跳过的段是模型完全拟合不出来的训练窗口。它必须报出来而不是丢掉：只要下调预热长度或样本
+        // 下限，它就会第一个变化；静默跳过则会看起来像赢得了从未有过的覆盖。
+        minTrain: replay.minTrain ?? null, segments: replay.segments ?? null, skippedSegments: replay.skippedSegments ?? null,
+        // The head's own diagnostics ride along: the training rate, the calibration slice's rate and the
+        // realised rate side by side are what turn "this head over-predicts" into a diagnosis.
+        // 波动头自己的诊断随行下发：训练基率、校准切片基率、实际基率三者并排，才是把「这个头会高估大动」
+        // 变成一次诊断的关键。
+        volatilityHead: replay.volatilityHead ?? null,
+        directionHead: replay.directionHead ?? null,
+        brier: brierOf(picked), threeClass: threeClassSummary(picked), volatility: volatilitySummary(picked) } };
+    }
+    const baseline = arms.baseline.summary, row = { candles: arms.baseline.replay.candles, baseline, factors: {}, deltas: {}, conditions: {} };
+    // A delta that holds in one half of the independent samples and reverses in the other is not a
+    // finding, it is a coin. Sample count alone cannot tell those two apart, and this module has already
+    // been bitten by exactly that: the daily volatility reading flipped direction when its sample grew
+    // from 620 to 720. Two summaries per half are O(n) reductions on top of a replay that already
+    // refit the model several times, so the cost is not the reason to leave this out.
+    // 一个差值如果在独立样本的前半段成立、后半段反向，那它不是一个发现，而是一枚硬币。样本量本身分不出
+    // 这两种情况，而本模块已经恰好被这一点咬过一次：日线的波动读数在样本从 620 涨到 720 时就翻了向。
+    // 每个半段两次汇总是叠加在「已经重拟合过若干次模型」的回放之上的 O(n) 归约，所以成本不是省掉它的理由。
+    const directionBand = RESEARCH_TUNING.ablation.deltaThresholdPp / 100;
+    const volatilityBand = RESEARCH_TUNING.ablation.volatilityThresholdPp / 100;
+    const aucBand = RESEARCH_TUNING.ablation.volatilityAucThreshold;
+    const stabilityOf = (baseRows, armRows, score, band) => {
+      // Below this there is no half worth reading; reporting a verdict on 19 samples per half would be
+      // the same crying-wolf the band itself exists to prevent. 低于这个数，每一半都没有可读性；对每半
+      // 19 个样本给出判定，正是阈值带本身要防的那种虚报。
+      if (baseRows.length < 40 || armRows.length !== baseRows.length) return null;
+      const mid = Math.floor(baseRows.length / 2);
+      const halves = [[0, mid], [mid, baseRows.length]].map(([from, to]) => shift(score(armRows.slice(from, to)), score(baseRows.slice(from, to))));
+      if (!halves.every(value => Number.isFinite(value))) return null;
+      const [first, second] = halves, loud = value => Math.abs(value) > band;
+      return { first, second, band,
+        // Both halves must clear the same band that the headline verdict uses. Two sub-band wiggles of
+        // opposite sign are noise twice over, not a contradiction worth flagging.
+        // 两个半段都必须越过与总结论同一条带。两个都在带内、方向相反的小抖动是双重的噪声，不值得报警。
+        sameDirection: loud(first) && loud(second) && Math.sign(first) === Math.sign(second),
+        flipped: loud(first) && loud(second) && Math.sign(first) !== Math.sign(second) };
+    };
+    const scoreDirection = rows => threeClassSummary(rows)?.deltaVsMajority ?? null;
+    const scoreSkill = rows => volatilitySummary(rows)?.brierSkill ?? null;
+    const scoreAuc = rows => volatilitySummary(rows)?.auc ?? null;
+    for (const factor of factors) {
+      const arm = arms[factor.key];
+      if (!arm) continue;
+      row.factors[factor.key] = arm.summary;
+      row.deltas[factor.key] = factorDelta(arm.summary, baseline);
+      // Same two arms, restricted to the buckets the factor is supposed to act on versus the rest.
+      // 同样的两臂，但分别只看「该因子本该起作用的桶」与「其余桶」。
+      // Compare the two arms on the same buckets, on both questions at once. `pair` takes two
+      // three-class summaries directly and `volatilityPair` takes two volatility summaries - an
+      // earlier revision handed `pair` the *wrapped* arm objects, so every delta came out null and
+      // the condition split silently reported nothing at all.
+      // 在同一批桶上比较两臂，方向与波动两个问题各比一遍。pair 直接接收两份三分类汇总，volatilityPair
+      // 接收两份波动汇总 —— 早先的版本把**包装过的**臂对象传了进来，于是所有差值都成了 null，条件分组
+      // 静默地什么都没报出来。
+      const partitioned = (samples, exposed) => samples.filter(sample => Boolean(factor.condition.test(sample)) === exposed);
+      const pair = (baseSummary, factorSummary) => ({ baseline: baseSummary, factor: factorSummary,
+        deltaVsMajority: shift(factorSummary?.deltaVsMajority, baseSummary?.deltaVsMajority),
+        accuracy: shift(factorSummary?.accuracy, baseSummary?.accuracy),
+        directionalAccuracy: shift(factorSummary?.directionalAccuracy, baseSummary?.directionalAccuracy) });
+      const volatilityPair = (baseSummary, factorSummary) => ({ baseline: baseSummary, factor: factorSummary,
+        brierSkill: shift(factorSummary?.brierSkill, baseSummary?.brierSkill),
+        auc: shift(factorSummary?.auc, baseSummary?.auc) });
+      const side = exposed => {
+        const baseRows = partitioned(arms.baseline.picked, exposed), armRows = partitioned(arm.picked, exposed);
+        return { ...pair(threeClassSummary(baseRows), threeClassSummary(armRows)),
+          volatility: volatilityPair(volatilitySummary(baseRows), volatilitySummary(armRows)) };
+      };
+      row.conditions[factor.key] = { label: factor.condition.label, labelEn: factor.condition.labelEn,
+        all: { ...pair(baseline.threeClass, arm.summary.threeClass), volatility: volatilityPair(baseline.volatility, arm.summary.volatility) },
+        inside: side(true), outside: side(false) };
+      // The stability evidence is attached to the delta it is about, in the same units, so a reader never
+      // has to consult a second table to find out whether the headline number is a finding or a coin.
+      // 稳定性证据挂在它所属的那个差值上、用同样的单位，读者不必再翻第二张表去查这个头条数字到底是发现
+      // 还是一枚硬币。
+      if (row.deltas[factor.key]) row.deltas[factor.key].stability = {
+        direction: stabilityOf(arms.baseline.picked, arm.picked, scoreDirection, directionBand),
+        brierSkill: stabilityOf(arms.baseline.picked, arm.picked, scoreSkill, volatilityBand),
+        auc: stabilityOf(arms.baseline.picked, arm.picked, scoreAuc, aucBand) };
+    }
+    rows[definition.key] = row;
+  }
+  const payload = { rows, generatedAt: now,
+    factorMeta: factors.map(factor => ({ key: factor.key, label: factor.label, labelEn: factor.labelEn, columns: factor.columns,
+      note: factor.note, noteEn: factor.noteEn, condition: { label: factor.condition.label, labelEn: factor.condition.labelEn } })),
+    contexts: { calendarEvents: contexts.macroCalendar.length, fundingSettlements: contexts.fundingFeatures.length },
+    tuningFingerprint: tuningFingerprint(),
+    // The verdict thresholds travel with the payload so the client cannot disagree with the service
+    // about what counts as a difference. Three of them now, and deliberately not one: direction and the
+    // volatility level are both read in percentage points, but the AUC gain is not a percentage of
+    // anything - it is a bare increment on a 0-to-1 statistic. Sharing one number across the three
+    // happened to land on workable values, which is exactly why it had to be split before anyone tried
+    // to retune one of them.
+    // 判定阈值随载荷下发，客户端与服务端不会各持一套标准。现在是三个，而且是刻意不合成一个：方向与波动
+    // 水平都以百分点读，但 AUC 增量不是任何东西的百分比 —— 它是 0 到 1 之间的统计量上的裸增量。三者共用
+    // 一个数字恰好落在了可用的数值上，这恰恰是必须在有人想单独调其中一个之前就把它拆开的原因。
+    deltaThresholdPp: RESEARCH_TUNING.ablation.deltaThresholdPp,
+    volatilityThresholdPp: RESEARCH_TUNING.ablation.volatilityThresholdPp,
+    volatilityAucThreshold: RESEARCH_TUNING.ablation.volatilityAucThreshold,
+    methodology: [
+      '每个因子臂跑完全相同的回放流程与同一批 K 线，唯一差别是它自己那一块特征列。',
+      '判定标准是 deltaVsMajority（相对「永远猜多数类」的增量）与方向类指标，不是 accuracy —— 震荡占多数时永远猜震荡就有 75% 以上。',
+      '波动口径回答另一个问题：这里有没有东西知道「要动」。为此每个臂额外训练一个波动头 —— 同一批特征列、同样的规则，标签改成「是否离开震荡带」。缺了它这个口子，特征列对波动的影响在架构上不可能被观测到：实时融合的震荡概率完全取自近邻池，任何列都到不了那一侧。',
+      '波动口径同时报 Brier 技巧与 AUC：前者看尺度、后者看排序且与阈值无关。二者背离即「排序里有信号、但数值标定不对」，这与「没有信号」是两件事。基准是常数基率，因此一个从不变化的预测其技巧恰好为 0、AUC 恰好为 0.5。',
+      '指标基于「互不重叠」的独立样本子集，避免重叠桶把显著性撑大。',
+      '每个差值都沿独立样本对半切开重算一次：两半若方向相反，该行会标出「前后段反向」。样本量只说明有多少观察，不说明它们是否指向同一件事 —— 本模块已经栽过一次（日线的波动读数在样本从 620 涨到 720 时翻了向）。标着反向的格子应当读作「还没有结论」，而不是「结论相反」。',
+      `判定阈值：方向 ±${RESEARCH_TUNING.ablation.deltaThresholdPp}pp（准确率差）、波动水平 ±${RESEARCH_TUNING.ablation.volatilityThresholdPp}pp（Brier 技巧；这两个都是百分点，前端会先换算成比例再比较）、波动排序 ±${RESEARCH_TUNING.ablation.volatilityAucThreshold}（AUC 增量，无量纲）。低于该幅度在这批样本上与噪声不可区分。无增量只说明在当前的样本、模型与列块下测不出增量，不等于该因子没有信息。`,
+      '每个因子另外报告它的「暴露」条件分组：全局均值会掩盖一个只在窄区间起作用的因子。',
+      '日历特征只用事件的公布日期（Fed / BLS 提前数月公布）；发布值被有意排除，因为 FRED 按「所描述的时间段」打戳而非「公开时刻」。资金费率在结算瞬间即公开，按 funding_at ≤ 桶时刻 对齐，同样不含前视。',
+    ] };
+  researchAblationCache = { time: now, payload };
+  return { ...payload, cached: false };
+}
+function horizonBarMs(key) { return key === '1d' ? 86_400_000 : key === '4h' ? 14_400_000 : key === '1h' ? 3_600_000 : 900_000; }
 function pairedPredictionMetrics(rows, probabilityKey) {
   if(!rows.length)return null;
   const probabilities=rows.map(row=>Number(row[probabilityKey])), labels=rows.map(row=>Number(row.isUp)), mean=values=>values.reduce((sum,value)=>sum+value,0)/Math.max(values.length,1), baseRate=mean(labels), brier=mean(probabilities.map((probability,index)=>(probability-labels[index])**2)), baselineBrier=mean(labels.map(label=>(baseRate-label)**2)), logLoss=mean(probabilities.map((probability,index)=>-(labels[index]*Math.log(clamp(probability,.000001,.999999))+(1-labels[index])*Math.log(clamp(1-probability,.000001,.999999))))), accuracy=mean(probabilities.map((probability,index)=>+(+(probability>=.5)===+labels[index]))), bins=Array.from({length:10},()=>[]);
   probabilities.forEach((probability,index)=>bins[Math.min(9,Math.floor(probability*10))].push({ probability,label:labels[index] }));
-  const ece=bins.reduce((sum,bin)=>sum+(bin.length?Math.abs(mean(bin.map(item=>item.probability))-mean(bin.map(item=>item.label)))*bin.length/rows.length:0),0), signals=rows.filter(row=>Math.abs(Number(row[probabilityKey])-.5)>=.06), directionalAccuracy=signals.length?mean(signals.map(row=>+(+(Number(row[probabilityKey])>=.5)===+Number(row.isUp)))):null, coverage=signals.length/rows.length, returns=signals.map(row=>Number(row.actualReturn)*(Number(row[probabilityKey])>=.5?1:-1)-.0008);let equity=1,peak=1,maxDrawdown=0;for(const value of returns){equity*=1+value;peak=Math.max(peak,equity);maxDrawdown=Math.min(maxDrawdown,equity/peak-1)}const average=mean(returns), deviation=Math.sqrt(mean(returns.map(value=>(value-average)**2)))||0;
+  const ece=bins.reduce((sum,bin)=>sum+(bin.length?Math.abs(mean(bin.map(item=>item.probability))-mean(bin.map(item=>item.label)))*bin.length/rows.length:0),0), signals=rows.filter(row=>Math.abs(Number(row[probabilityKey])-.5)>=RESEARCH_TUNING.economics.signalEdge), directionalAccuracy=signals.length?mean(signals.map(row=>+(+(Number(row[probabilityKey])>=.5)===+Number(row.isUp)))):null, coverage=signals.length/rows.length, returns=signals.map(row=>Number(row.actualReturn)*(Number(row[probabilityKey])>=.5?1:-1)-RESEARCH_TUNING.economics.roundTripCost);let equity=1,peak=1,maxDrawdown=0;for(const value of returns){equity*=1+value;peak=Math.max(peak,equity);maxDrawdown=Math.min(maxDrawdown,equity/peak-1)}const average=mean(returns), deviation=Math.sqrt(mean(returns.map(value=>(value-average)**2)))||0;
   return { samples:rows.length, accuracy, directionalAccuracy, coverage, brier, logLoss, brierSkill:baselineBrier?1-brier/baselineBrier:null, ece, economic:{ trades:signals.length, netReturn:equity-1, maxDrawdown, sharpe:deviation?average/deviation*Math.sqrt(returns.length):null } };
 }
 function compareCandidateToBaseline(trainingRunId) {
-  const pairs=database.prepare(`SELECT candidate.horizon_key AS horizonKey, candidate.probability AS candidateProbability, candidate.is_up AS isUp, candidate.actual_return AS actualReturn, baseline.calibrated_probability AS baselineProbability, baseline.regime AS regime
+  const pairs=stmt(`SELECT candidate.horizon_key AS horizonKey, candidate.bucket_at AS bucketAt, candidate.probability AS candidateProbability, candidate.is_up AS isUp, candidate.actual_return AS actualReturn, baseline.calibrated_probability AS baselineProbability, baseline.regime AS regime
     FROM research_candidate_forecasts AS candidate
     INNER JOIN research_predictions AS baseline ON baseline.horizon_key=candidate.horizon_key AND baseline.bucket_at=candidate.bucket_at
     WHERE candidate.training_run_id=? AND candidate.settled_at IS NOT NULL AND baseline.settled_at IS NOT NULL
-    ORDER BY candidate.target_at ASC`).all(trainingRunId).map(row=>({ ...row, isUp:Number(row.isUp), actualReturn:Number(row.actualReturn), candidateProbability:Number(row.candidateProbability), baselineProbability:Number(row.baselineProbability) }));
-  const horizons=['15m','1h','4h','1d'], byHorizon=Object.fromEntries(horizons.map(key=>{const rows=pairs.filter(row=>row.horizonKey===key);return [key,{ samples:rows.length, baseline:pairedPredictionMetrics(rows,'baselineProbability'), candidate:pairedPredictionMetrics(rows,'candidateProbability') }]}));
+    ORDER BY candidate.target_at ASC`).all(trainingRunId).map(row=>({ ...row, bucketAt:Number(row.bucketAt), isUp:Number(row.isUp), actualReturn:Number(row.actualReturn), candidateProbability:Number(row.candidateProbability), baselineProbability:Number(row.baselineProbability) }));
+  // Each horizon carries its own gate and reports it next to the count, so the UI never has to
+  // guess the requirement and a per-horizon override is visible rather than implied.
+  // 每个周期带上自己的门槛，并与计数并列返回 —— 这样界面不必去猜要求是多少，按周期的覆盖值也是
+  // 显式可见的，而不是隐含的。
+  const horizons=['15m','1h','4h','1d'], byHorizon=Object.fromEntries(horizons.map(key=>{const rows=pairs.filter(row=>row.horizonKey===key), independent=independentSubset(rows,horizonBarMs(key)).length, required=requiredIndependentFor(key);return [key,{ samples:rows.length, independent, required, gateDays:horizonGateDays(key), ready:independent>=required, baseline:pairedPredictionMetrics(rows,'baselineProbability'), candidate:pairedPredictionMetrics(rows,'candidateProbability') }]}));
   const overall={ samples:pairs.length, baseline:pairedPredictionMetrics(pairs,'baselineProbability'), candidate:pairedPredictionMetrics(pairs,'candidateProbability') }, regimes=Object.fromEntries(['bull','bear','range'].map(regime=>{const rows=pairs.filter(row=>row.regime===regime);return [regime,{ samples:rows.length, baseline:pairedPredictionMetrics(rows,'baselineProbability'), candidate:pairedPredictionMetrics(rows,'candidateProbability') }]}));
-  const requiredPerHorizon=30, enough=horizons.every(key=>byHorizon[key].samples>=requiredPerHorizon), quality=overall.baseline&&overall.candidate&&overall.candidate.brier<=overall.baseline.brier*.97&&overall.candidate.logLoss<=overall.baseline.logLoss*.97, calibration=overall.candidate&&Number(overall.candidate.brierSkill)>=0&&overall.candidate.ece<=overall.baseline.ece*1.05, economics=overall.candidate&&overall.candidate.economic.netReturn>=overall.baseline.economic.netReturn&&overall.candidate.economic.maxDrawdown>=overall.baseline.economic.maxDrawdown-.02, robust=Object.values(regimes).filter(row=>row.samples>=10).every(row=>row.candidate.brier<=row.baseline.brier*1.05);
-  const verdict=!enough?{ tone:'yellow', label:'继续影子评估', reason:`每个周期需 ${requiredPerHorizon} 个已配对结算样本；当前样本不足。` }:quality&&calibration&&economics&&robust?{ tone:'green', label:'建议人工复核', reason:'候选在配对样本的概率质量、校准、成本化表现和已验证市场状态中均达到升级门槛；仍不会自动切换。' }:{ tone:'red', label:'不建议升级', reason:'样本已足够，但候选未同时达到预设的概率质量、校准、成本化表现和稳健性门槛。' };
-  return { paired:overall.samples, requiredPerHorizon, byHorizon, overall, regimes, criteria:{ quality:'Brier 与 Log Loss 均至少优于现役 3%', calibration:'BSS ≥ 0 且 ECE 不恶化超过 5%', economics:'固定 0.08% 往返成本后净收益不低于现役，最大回撤最多恶化 2%', robustness:'任何样本 ≥10 的市场状态中，Brier 不劣于现役超过 5%' }, verdict, readyForNext:enough, promotionEligible:verdict.tone==='green' };
+  // Promotion used to demand 30 nominal samples in all four horizons at once, which handed the
+  // daily horizon veto power over the entire chain: it yields one independent outcome per day, so
+  // 30 meant 30 days of wall clock — while 4h's overlapping buckets padded its own count without
+  // adding evidence. Each horizon is now judged on its own non-overlapping count.
+  // 升级原先要求四个周期同时攒够 30 条名义样本，等于把否决权交给日线：它一天只产生一个独立结果，
+  // 30 条就是 30 天真实时间；而 4h 的重叠桶只是把计数撑大、并未增加证据。现在每个周期按自己的不
+  // 重叠计数独立判定。
+  const gateCfg=RESEARCH_TUNING.gates, readyHorizons=horizons.filter(key=>byHorizon[key].ready), allReady=readyHorizons.length===horizons.length, enough=readyHorizons.length>0, headroom=horizons.map(key=>`${key} ${byHorizon[key].independent}/${byHorizon[key].required}`).join('、'), quality=overall.baseline&&overall.candidate&&overall.candidate.brier<=overall.baseline.brier*gateCfg.quality.brierFactor&&overall.candidate.logLoss<=overall.baseline.logLoss*gateCfg.quality.logLossFactor, calibration=overall.candidate&&Number(overall.candidate.brierSkill)>=gateCfg.calibration.minBrierSkill&&overall.candidate.ece<=overall.baseline.ece*gateCfg.calibration.eceFactor, economics=overall.candidate&&overall.candidate.economic.netReturn>=overall.baseline.economic.netReturn&&overall.candidate.economic.maxDrawdown>=overall.baseline.economic.maxDrawdown-gateCfg.economics.maxDrawdownSlack, robust=Object.values(regimes).filter(row=>row.samples>=gateCfg.robustness.minSamples).every(row=>row.candidate.brier<=row.baseline.brier*gateCfg.robustness.brierFactor);
+  const verdict=!enough?{ tone:'yellow', label:'继续影子评估', reason:`尚无周期攒够各自的独立样本门槛（${headroom}）。` }:!allReady?{ tone:'yellow', label:'部分周期可评估', reason:`已达标：${readyHorizons.join('、')}；仍在累积：${horizons.filter(key=>!readyHorizons.includes(key)).join('、')}（${headroom}）。四周期全部达标前不会给出升级结论。` }:quality&&calibration&&economics&&robust?{ tone:'green', label:'建议人工复核', reason:'候选在配对样本的概率质量、校准、成本化表现和已验证市场状态中均达到升级门槛；仍不会自动切换。' }:{ tone:'red', label:'不建议升级', reason:'独立样本已足够，但候选未同时达到预设的概率质量、校准、成本化表现和稳健性门槛。' };
+  return { paired:overall.samples, requiredIndependentPerHorizon:gateCfg.requiredIndependentPerHorizon, requiredByHorizon:Object.fromEntries(horizons.map(key=>[key,byHorizon[key].required])), readyHorizons, allHorizonsReady:allReady, byHorizon, overall, regimes, criteria:{ independentPerHorizon:`各周期独立样本门槛：${horizons.map(key=>`${key} ${byHorizon[key].required}（≈${horizonGateDays(key).toFixed(1)} 天）`).join('，')}`, quality:'Brier 与 Log Loss 均至少优于现役 3%', calibration:'BSS ≥ 0 且 ECE 不恶化超过 5%', economics:`固定 ${(RESEARCH_TUNING.economics.roundTripCost*100).toFixed(2)}% 往返成本后净收益不低于现役，最大回撤最多恶化 ${(RESEARCH_TUNING.gates.economics.maxDrawdownSlack*100).toFixed(0)}%`, robustness:'任何样本 ≥10 的市场状态中，Brier 不劣于现役超过 5%' }, verdict, readyForNext:enough, promotionEligible:verdict.tone==='green' };
 }
 function candidateTrainingStatus() {
-  const latest=database.prepare('SELECT id, started_at, completed_at, status, model_name, metrics_json, samples_json, error FROM research_training_runs ORDER BY id DESC LIMIT 1').get();
-  if(!latest)return { inProgress:researchTrainingInProgress, latest:null, shadow:{ totalSettled:0, requiredPerHorizon:30, promotionEligible:false, reason:'尚未训练候选模型' } };
-  const settled=database.prepare('SELECT horizon_key, probability, is_up AS isUp, brier FROM research_candidate_forecasts WHERE training_run_id=? AND settled_at IS NOT NULL').all(latest.id), pending=database.prepare('SELECT COUNT(*) AS total FROM research_candidate_forecasts WHERE training_run_id=? AND settled_at IS NULL').get(latest.id);
+  const latest=stmt('SELECT id, started_at, completed_at, status, model_name, metrics_json, samples_json, error FROM research_training_runs ORDER BY id DESC LIMIT 1').get();
+  if(!latest)return { inProgress:researchTrainingInProgress, latest:null, shadow:{ totalSettled:0, requiredIndependentPerHorizon:RESEARCH_TUNING.gates.requiredIndependentPerHorizon, requiredByHorizon:Object.fromEntries(['15m','1h','4h','1d'].map(key=>[key,requiredIndependentFor(key)])), promotionEligible:false, reason:'尚未训练候选模型' } };
+  const settled=stmt('SELECT horizon_key, probability, is_up AS isUp, brier FROM research_candidate_forecasts WHERE training_run_id=? AND settled_at IS NOT NULL').all(latest.id), pending=stmt('SELECT COUNT(*) AS total FROM research_candidate_forecasts WHERE training_run_id=? AND settled_at IS NULL').get(latest.id);
   const byHorizon={};for(const row of settled)(byHorizon[row.horizon_key] ||= []).push(row);
   const horizonSummary=Object.fromEntries(Object.entries(byHorizon).map(([key,rows])=>[key,{ settled:rows.length, hitRate:rows.reduce((sum,row)=>sum+((Number(row.probability)>=.5)===Boolean(row.isUp)?1:0),0)/rows.length, brier:rows.reduce((sum,row)=>sum+Number(row.brier),0)/rows.length }]));
   const comparison=compareCandidateToBaseline(latest.id), totalSettled=settled.length;
-  return { inProgress:researchTrainingInProgress, latest:{ id:latest.id, startedAt:latest.started_at, completedAt:latest.completed_at, status:latest.status, modelName:latest.model_name, metrics:latest.metrics_json?JSON.parse(latest.metrics_json):null, samples:latest.samples_json?JSON.parse(latest.samples_json):null, error:latest.error||null }, shadow:{ totalSettled, pending:Number(pending?.total)||0, byHorizon:horizonSummary, requiredPerHorizon:comparison.requiredPerHorizon, readyForNext:comparison.readyForNext, promotionEligible:comparison.promotionEligible, reason:comparison.verdict.reason }, comparison };
+  return { inProgress:researchTrainingInProgress, latest:{ id:latest.id, startedAt:latest.started_at, completedAt:latest.completed_at, status:latest.status, modelName:latest.model_name, metrics:latest.metrics_json?JSON.parse(latest.metrics_json):null, samples:latest.samples_json?JSON.parse(latest.samples_json):null, error:latest.error||null }, shadow:{ totalSettled, pending:Number(pending?.total)||0, byHorizon:horizonSummary, requiredIndependentPerHorizon:comparison.requiredIndependentPerHorizon, requiredByHorizon:comparison.requiredByHorizon, readyForNext:comparison.readyForNext, promotionEligible:comparison.promotionEligible, reason:comparison.verdict.reason }, comparison };
 }
 async function trainResearchCandidate() {
   if(researchTrainingInProgress)throw Object.assign(new Error('candidate training is already running'),{ statusCode:409 });
@@ -2196,10 +3307,15 @@ async function trainResearchCandidate() {
   researchTrainingInProgress=true;const startedAt=Date.now(), run=storeResearchTrainingRun.run(startedAt,'running','triple-barrier logistic + local tree candidate');
   try {
     const [intraday,daily]=await Promise.all([forecastHistory('15m'),forecastHistory('1d')]);
-    const definitions=[{key:'15m',candles:intraday.candles,horizon:1,interval:'15m'},{key:'1h',candles:intraday.candles,horizon:4,interval:'15m'},{key:'4h',candles:intraday.candles,horizon:16,interval:'15m'},{key:'1d',candles:daily.candles,horizon:1,interval:'1d'}];
-    const trained=definitions.map(definition=>({ ...definition, fusion:trainFusionModel(definition.candles,definition.horizon) })).filter(row=>row.fusion);
+    const definitions=researchHorizonDefinitions({ '15m':intraday.candles, '1d':daily.candles });
+    const trained=(await Promise.all(definitions.map(async definition=>({ ...definition, fusion:await trainFusionModelAsync(definition.candles,definition.horizon) })))).filter(row=>row.fusion);
     if(trained.length!==definitions.length)throw new Error('insufficient chronological samples for one or more candidate horizons');
-    for(const row of trained){const entry=Number(row.candles.at(-1)?.close), targetAt=Number(row.candles.at(-1)?.time||startedAt)+(row.interval==='1d'?86_400_000:row.horizon*900_000), probability=row.fusion.probability;storeCandidateForecast.run(run.lastInsertRowid,startedAt,startedAt,row.key,row.interval,targetAt,entry,probability,probability>=.5?'up':'down');}
+    // Snapshot rows must share the baseline's anchor and horizon definition, and must pass the
+    // full argument list: bucket_at stamped at the training instant never paired with a baseline
+    // row, and the two missing arguments wrote the direction string into flat_probability.
+    // 快照行必须与现役共用锚定与持有期定义，且要传全参数：bucket_at 原先盖的是训练时刻，
+    // 永远配不上现役行；少传两个参数还把方向字符串写进了 flat_probability。
+    for(const row of trained){const barMs=row.interval==='1d'?86_400_000:900_000, anchor=forecastAnchor(row.candles,barMs,startedAt), probability=row.fusion.probability;storeCandidateForecast.run(run.lastInsertRowid,anchor.bucketAt,startedAt,row.key,row.interval,horizonTargetAt(anchor.bucketAt,row.horizon,barMs),anchor.close,probability,null,probability>=.5?'up':'down',Number(row.fusion.theta)||null,RESEARCH_WINDOW_VERSION);}
     const metrics=Object.fromEntries(trained.map(row=>[row.key,{ brier:row.fusion.validation.brier, logLoss:row.fusion.validation.logLoss, brierSkill:row.fusion.validation.brierSkill, ece:row.fusion.validation.ece, auc:row.fusion.validation.auc }]));
     const samples=Object.fromEntries(trained.map(row=>[row.key,row.fusion.validation.samples]));
     completeResearchTrainingRun.run(Date.now(),'shadow',JSON.stringify(metrics),JSON.stringify(samples),null,run.lastInsertRowid);
@@ -2207,80 +3323,268 @@ async function trainResearchCandidate() {
   } catch(error) { completeResearchTrainingRun.run(Date.now(),'failed',null,null,error.message,run.lastInsertRowid);throw error; }
   finally { researchTrainingInProgress=false; }
 }
-function settleResearchPredictions(histories, now) { const rows=pendingResearchPredictions.all(now);for(const row of rows){const candles=histories[row.candle_interval]||[], target=candles.find(candle=>Number(candle.time)>=row.target_at);if(!target)continue;const settledPrice=Number(target.close);if(!Number.isFinite(settledPrice)||!row.entry_price)continue;const actualReturn=settledPrice/row.entry_price-1,isUp=actualReturn>0?1:0,stored=database.prepare('SELECT calibrated_probability FROM research_predictions WHERE id=?').get(row.id),brier=(Number(stored?.calibrated_probability)-isUp)**2;settleResearchPrediction.run(now,settledPrice,actualReturn,isUp,brier,row.id)}for(const row of pendingCandidateForecasts.all(now)){const candles=histories[row.candle_interval]||[],target=candles.find(candle=>Number(candle.time)>=row.target_at);if(!target)continue;const settledPrice=Number(target.close);if(!Number.isFinite(settledPrice)||!row.entry_price)continue;const actualReturn=settledPrice/row.entry_price-1,isUp=actualReturn>0?1:0,brier=(Number(row.probability)-isUp)**2;settleCandidateForecast.run(now,settledPrice,actualReturn,isUp,brier,row.id)}}
+function settleResearchPredictions(histories, now) {
+  for (const row of pendingResearchPredictions.all(now)) {
+    const barMs = row.candle_interval === '1d' ? 86_400_000 : 900_000, candles = histories[row.candle_interval] || [], target = settlementBar(candles, barMs, Number(row.target_at));
+    if (!target) continue;
+    const settledPrice = Number(target.close);
+    if (!Number.isFinite(settledPrice) || !row.entry_price) continue;
+    const actualReturn = settledPrice / row.entry_price - 1, isUp = actualReturn > 0 ? 1 : 0, label = outcomeLabel(actualReturn, row.theta);
+    const stored = stmt('SELECT calibrated_probability, flat_probability FROM research_predictions WHERE id=?').get(row.id);
+    const upProbability = Number(stored?.calibrated_probability), flatProbability = Number(stored?.flat_probability);
+    // Older rows predate the three-class threshold and keep their two-class Brier; newer
+    // rows are scored against all three outcomes and are the only ones a scorecard uses.
+    // 早于三分类阈值的旧行保留二分类 Brier；新行按三类评分，记分卡只采用新行。
+    const brier = Number.isFinite(flatProbability)
+      ? multiclassBrier({ up:upProbability, flat:flatProbability, down:Math.max(0, 1 - upProbability - flatProbability) }, label)
+      : (upProbability - isUp) ** 2;
+    settleResearchPrediction.run(now, settledPrice, actualReturn, isUp, label, brier, row.id);
+  }
+  for (const row of pendingCandidateForecasts.all(now)) {
+    const barMs = row.candle_interval === '1d' ? 86_400_000 : 900_000, candles = histories[row.candle_interval] || [], target = settlementBar(candles, barMs, Number(row.target_at));
+    if (!target) continue;
+    const settledPrice = Number(target.close);
+    if (!Number.isFinite(settledPrice) || !row.entry_price) continue;
+    const actualReturn = settledPrice / row.entry_price - 1, isUp = actualReturn > 0 ? 1 : 0, label = outcomeLabel(actualReturn, row.theta);
+    const upProbability = Number(row.probability), flatProbability = Number(row.flat_probability);
+    const brier = Number.isFinite(flatProbability)
+      ? multiclassBrier({ up:upProbability, flat:flatProbability, down:Math.max(0, 1 - upProbability - flatProbability) }, label)
+      : (upProbability - isUp) ** 2;
+    settleCandidateForecast.run(now, settledPrice, actualReturn, isUp, label, brier, row.id);
+  }
+}
+const RESEARCH_CLASSES=['up','flat','down'];
+// Three-class grading.  A model that says "chop" every single time already scores very high,
+// so the scorecard has to publish that baseline next to the model or the number means nothing.
+// 三分类评分。一个永远说「震荡」的模型本来就能拿高分，所以记分卡必须把这个基线并列展示，否则数字没有意义。
+function threeClassSummary(rows) {
+  const scored=rows.filter(row=>row.outcomeLabel && row.direction);
+  if(!scored.length)return null;
+  const confusion=Object.fromEntries(RESEARCH_CLASSES.map(predicted=>[predicted,Object.fromEntries(RESEARCH_CLASSES.map(actual=>[actual,0]))]));
+  for(const row of scored){
+    if(!confusion[row.direction])continue;
+    if(!(row.outcomeLabel in confusion[row.direction]))continue;
+    confusion[row.direction][row.outcomeLabel]+=1;
+  }
+  const counts=Object.fromEntries(RESEARCH_CLASSES.map(key=>[key,scored.filter(row=>row.outcomeLabel===key).length]));
+  const predictedCounts=Object.fromEntries(RESEARCH_CLASSES.map(key=>[key,scored.filter(row=>row.direction===key).length]));
+  const accuracy=scored.filter(row=>row.direction===row.outcomeLabel).length/scored.length;
+  const majority=RESEARCH_CLASSES.reduce((best,key)=>counts[key]>counts[best]?key:best,'flat');
+  const majorityAccuracy=counts[majority]/scored.length;
+  const frequencyAccuracy=RESEARCH_CLASSES.reduce((sum,key)=>sum+(counts[key]/scored.length)**2,0);
+  const perClass=Object.fromEntries(RESEARCH_CLASSES.map(key=>{
+    const predicted=predictedCounts[key], actual=counts[key], hit=confusion[key][key]||0;
+    return [key,{ predicted, actual, hit, precision:predicted?hit/predicted:null, recall:actual?hit/actual:null }];
+  }));
+  const flatPredictions=scored.filter(row=>row.direction==='flat');
+  const directionalPredictions=scored.filter(row=>row.direction!=='flat');
+  return { samples:scored.length, accuracy, majorityLabel:majority, majorityAccuracy, frequencyAccuracy, deltaVsMajority:accuracy-majorityAccuracy, deltaVsFrequency:accuracy-frequencyAccuracy, counts, predictedCounts, confusion, perClass,
+    missedBreakout:flatPredictions.length?flatPredictions.filter(row=>row.outcomeLabel!=='flat').length/flatPredictions.length:null,
+    directionalAccuracy:directionalPredictions.length?directionalPredictions.filter(row=>row.direction===row.outcomeLabel).length/directionalPredictions.length:null };
+}
+// The direction summary answers "which way, given that it moves". This one answers the question the
+// event studies raised instead, and which nothing in the module could measure before: does any of
+// this know that a move is coming at all? Both are read off the same predicted distribution - the
+// flat class is already the model's own statement that price stays inside the band, so
+// P(move) = 1 - P(flat) needs neither a second model nor a second chop band.
+// Two properties make it honest: the baseline is a constant base rate (not 50%), and AUC is
+// reported next to the Brier skill because it is threshold-free - a factor can rank big moves
+// correctly while being badly scaled, and that distinction is the difference between "no signal" and
+// "signal in the wrong units".
+// 方向汇总回答的是「若真动了，往哪边」。这个汇总回答的是事件研究提出、而此前模块里没有任何口径能测的
+// 另一个问题：这里有东西知道「要动」吗？两者读的是同一个预测分布 —— flat 类本身就是模型对「价格留在
+// 带内」的判断，所以 P(动) = 1 - P(flat) 既不需要第二个模型，也不需要第二条震荡带。
+// 两点让它诚实：基准是常数基率（不是 50%），以及把 AUC 与 Brier 技巧并列报出 —— 前者与阈值无关，
+// 一个因子完全可能把「大动」排序排对、但数值尺度很差，这正是「没有信号」与「信号存在但单位不对」的区别。
+function volatilitySummary(rows) {
+  // Where the movement probability comes from matters, so it is reported rather than implied. With a
+  // head present it is that head's calibrated output; without one the only thing left is the analogue
+  // pool's own complement, 1 - P(chop) - which the feature columns cannot influence at all, so every
+  // delta computed from it is zero by construction rather than by measurement.
+  // 这个「要动」的概率来自哪里必须显式报出，而不是隐含。有波动头时用它校准后的输出；没有头时只剩下
+  // 近邻池自己的补集 1 − P(震荡) —— 而特征列根本影响不到它，于是由它算出的任何增量都是「构造上为零」
+  // 而不是「测出来为零」。
+  const bigScored = rows.filter(row => Number.isFinite(Number(row.bigProbability)));
+  const useHead = rows.length > 0 && bigScored.length === rows.length;
+  const scored = (useHead ? bigScored : rows).filter(row => Number.isFinite(Number(row.flatProbability)) && Number.isFinite(Number(row.actualReturn)) && Number.isFinite(Number(row.theta)));
+  if (!scored.length) return null;
+  const mean = values => values.reduce((sum, value) => sum + value, 0) / Math.max(values.length, 1);
+  const probabilityOf = row => clamp(useHead ? Number(row.bigProbability) : 1 - Number(row.flatProbability), .000001, .999999);
+  const labelled = scored.map(row => ({ probability: probabilityOf(row), big: Math.abs(Number(row.actualReturn)) > Number(row.theta) ? 1 : 0 }));
+  const bigRate = mean(labelled.map(row => row.big));
+  const brier = mean(labelled.map(row => (row.probability - row.big) ** 2));
+  // A forecast that never varies scores exactly the base rate's Brier, so this is the honest zero
+  // line for "did anything here predict movement".
+  // 一条从不变化的预测，其 Brier 恰好等于基率的 Brier，所以这就是「这里有没有东西预测了波动」的零点。
+  const baseBrier = bigRate * (1 - bigRate);
+  const positives = labelled.filter(row => row.big), negatives = labelled.filter(row => !row.big);
+  let auc = null;
+  if (positives.length && negatives.length) {
+    // Rank-based AUC with ties counted at half, so a model that emits a constant scores exactly 0.5
+    // rather than being flattered by whatever order the buckets happened to arrive in.
+    // 基于排名的 AUC，同分按半数计，这样输出常数的模型恰好得 0.5，而不会因为桶的到达顺序而被抬高。
+    const sorted = [...labelled].sort((a, b) => a.probability - b.probability), ranks = new Map();
+    for (let index = 0; index < sorted.length;) {
+      let end = index;
+      while (end + 1 < sorted.length && sorted[end + 1].probability === sorted[index].probability) end += 1;
+      const averageRank = (index + end) / 2 + 1;
+      for (let point = index; point <= end; point++) ranks.set(sorted[point], averageRank);
+      index = end + 1;
+    }
+    const rankSum = positives.reduce((sum, row) => sum + ranks.get(row), 0);
+    auc = (rankSum - positives.length * (positives.length + 1) / 2) / (positives.length * negatives.length);
+  }
+  const predictedRate = mean(labelled.map(row => row.probability));
+  return { samples: labelled.length, source: useHead ? 'model-head' : 'analogue-complement',
+    bigRate, bigSamples: positives.length, predictedRate,
+    // `predictedRate / bigRate` is the quickest read on scale: far above 1 means the model calls for
+    // movement that does not arrive, far below 1 means it misses most of it.
+    // predictedRate / bigRate 是判断尺度最快的方式：远大于 1 说明模型喊动而没动，远小于 1 说明大量漏报。
+    rateRatio: bigRate ? predictedRate / bigRate : null, brier, baseBrier,
+    brierSkill: baseBrier ? 1 - brier / baseBrier : null, auc,
+    logLoss: mean(labelled.map(row => -(row.big * Math.log(row.probability) + (1 - row.big) * Math.log(1 - row.probability)))) };
+}
 function researchScorecard() {
-  const settled=database.prepare('SELECT horizon_key, calibrated_probability AS probability, is_up AS isUp, actual_return AS actualReturn, brier FROM research_predictions WHERE settled_at IS NOT NULL ORDER BY settled_at ASC').all(), pending=database.prepare('SELECT horizon_key, COUNT(*) AS total FROM research_predictions WHERE settled_at IS NULL GROUP BY horizon_key').all(), byKey={};
-  for(const row of settled)(byKey[row.horizon_key] ||= []).push({probability:Number(row.probability),y:Number(row.isUp),actualReturn:Number(row.actualReturn),brier:Number(row.brier)});
+  const settled=stmt('SELECT horizon_key, bucket_at AS bucketAt, calibrated_probability AS probability, flat_probability AS flatProbability, is_up AS isUp, outcome_label AS outcomeLabel, direction, actual_return AS actualReturn, brier, window_version AS windowVersion FROM research_predictions WHERE settled_at IS NOT NULL ORDER BY settled_at ASC').all(), pending=stmt('SELECT horizon_key, COUNT(*) AS total FROM research_predictions WHERE settled_at IS NULL GROUP BY horizon_key').all(), byKey={};
+  for(const row of settled)(byKey[row.horizon_key] ||= []).push({ bucketAt:Number(row.bucketAt), probability:Number(row.probability), flatProbability:Number(row.flatProbability), y:Number(row.isUp), outcomeLabel:row.outcomeLabel||null, direction:row.direction||null, actualReturn:Number(row.actualReturn), brier:Number(row.brier), windowVersion:Number(row.windowVersion)||1 });
   const mean=values=>values.reduce((sum,value)=>sum+value,0)/Math.max(values.length,1), result={};
   for(const [key,rows] of Object.entries(byKey)){
-    const baseRate=mean(rows.map(row=>row.y)), baseline=mean(rows.map(row=>(baseRate-row.y)**2)), brier=mean(rows.map(row=>row.brier)), logLoss=mean(rows.map(row=>-(row.y*Math.log(clamp(row.probability,.000001,.999999))+(1-row.y)*Math.log(clamp(1-row.probability,.000001,.999999))))), bins=Array.from({length:10},()=>[]);rows.forEach(row=>bins[Math.min(9,Math.floor(row.probability*10))].push(row));const ece=bins.reduce((sum,bin)=>sum+(bin.length?Math.abs(mean(bin.map(row=>row.probability))-mean(bin.map(row=>row.y)))*bin.length/rows.length:0),0), signals=rows.filter(row=>Math.abs(row.probability-.5)>=.06), returns=signals.map(row=>row.actualReturn*(row.probability>=.5?1:-1)-.0008);let equity=1,peak=1,maxDrawdown=0;returns.forEach(value=>{equity*=1+value;peak=Math.max(peak,equity);maxDrawdown=Math.min(maxDrawdown,equity/peak-1)});const average=mean(returns), deviation=Math.sqrt(mean(returns.map(value=>(value-average)**2)))||0, downside=Math.sqrt(mean(returns.filter(value=>value<0).map(value=>value**2)))||0;
-    result[key]={settled:rows.length,hitRate:mean(rows.map(row=>+(+(row.probability>=.5)===+row.y))),brier,logLoss,brierSkill:baseline?1-brier/baseline:null,ece,meanReturn:mean(rows.map(row=>row.actualReturn)),economic:{assumptions:'0.08% round-trip cost; ±6% probability edge threshold',trades:signals.length,turnover:signals.length/rows.length,netReturn:equity-1,maxDrawdown,sharpe:deviation?average/deviation*Math.sqrt(returns.length):null,sortino:downside?average/downside*Math.sqrt(returns.length):null}};
+    // Probability quality is only meaningful on rows that actually stored three classes.
+    // 概率质量只在真正存了三类概率的行上才有意义。
+    // Only rows graded on the current window definition count. Rows settled before the window
+    // was pinned to a closed anchor bar were graded against whichever bar happened to be
+    // available at the time, so their realised horizon length varies; mixing them in would make
+    // the headline accuracy uninterpretable. They are reported separately instead of dropped.
+    // 只统计当前窗口定义下行情的样本。窗口固定到「已收盘锚定 K 线」之前结算的行，用的是当时
+    // 恰好可用的那根 K 线，实际持有长度不固定；混进来会让准确率无法解释。因此单独报出，不静默丢弃。
+    const authoritative=rows.filter(row=>row.windowVersion>=RESEARCH_WINDOW_VERSION), legacy=rows.filter(row=>row.windowVersion<RESEARCH_WINDOW_VERSION);
+    const scored=authoritative.filter(row=>row.outcomeLabel&&Number.isFinite(row.flatProbability));
+    const pool=scored, baseRate=mean(pool.map(row=>row.y)), baseline=mean(pool.map(row=>(baseRate-row.y)**2)), brier=mean(pool.map(row=>row.brier)), logLoss=mean(pool.map(row=>-(row.y*Math.log(clamp(row.probability,.000001,.999999))+(1-row.y)*Math.log(clamp(1-row.probability,.000001,.999999))))), bins=Array.from({length:10},()=>[]);pool.forEach(row=>bins[Math.min(9,Math.floor(row.probability*10))].push(row));const ece=bins.reduce((sum,bin)=>sum+(bin.length?Math.abs(mean(bin.map(row=>row.probability))-mean(bin.map(row=>row.y)))*bin.length/pool.length:0),0), signals=authoritative.filter(row=>Math.abs(row.probability-.5)>=RESEARCH_TUNING.economics.signalEdge), returns=signals.map(row=>row.actualReturn*(row.probability>=.5?1:-1)-RESEARCH_TUNING.economics.roundTripCost);let equity=1,peak=1,maxDrawdown=0;returns.forEach(value=>{equity*=1+value;peak=Math.max(peak,equity);maxDrawdown=Math.min(maxDrawdown,equity/peak-1)});const average=mean(returns), deviation=Math.sqrt(mean(returns.map(value=>(value-average)**2)))||0, downside=Math.sqrt(mean(returns.filter(value=>value<0).map(value=>value**2)))||0;
+    // The headline count is nominal. Buckets sampled every 15 minutes overlap whenever the horizon
+    // runs longer than one bar, so 30 "samples" can be two independent outcomes wearing a costume.
+    // 统计条数是名义值。只要持有期长于一根 K 线，每 15 分钟采样的桶就会互相重叠，于是 30 条「样本」
+    // 可能只是两个独立结果换了身衣服。
+    const independent=independentSubset(authoritative,horizonBarMs(key));
+    result[key]={ settled:rows.length, authoritative:authoritative.length, legacy:legacy.length, scored:scored.length, independent:{ samples:independent.length, threeClass:threeClassSummary(independent) }, threeClass:threeClassSummary(authoritative), hitRate:pool.length?mean(pool.map(row=>+(+(row.probability>=.5)===+row.y))):null,brier:pool.length?brier:null,logLoss:pool.length?logLoss:null,brierSkill:pool.length&&baseline?1-brier/baseline:null,ece:pool.length?ece:null,meanReturn:mean(rows.map(row=>row.actualReturn)),economic:{assumptions:`${(RESEARCH_TUNING.economics.roundTripCost*100).toFixed(2)}% round-trip cost charged once per signal; ±${(RESEARCH_TUNING.economics.signalEdge*100).toFixed(0)}% probability edge threshold`,trades:signals.length,turnover:rows.length?signals.length/rows.length:null,netReturn:equity-1,maxDrawdown,sharpe:deviation?average/deviation*Math.sqrt(returns.length):null,sortino:downside?average/downside*Math.sqrt(returns.length):null}};
   }
   return { rows:result, pending:Object.fromEntries(pending.map(row=>[row.horizon_key,Number(row.total)])) };
 }
 function researchFeatureStatus() {
-  const row=database.prepare('SELECT COUNT(*) AS total, MIN(observed_at) AS firstAt, MAX(observed_at) AS lastAt, COUNT(ofi_pct) AS ofiSnapshots FROM derivative_snapshots WHERE source=?').get('okx');
+  const row=stmt('SELECT COUNT(*) AS total, MIN(observed_at) AS firstAt, MAX(observed_at) AS lastAt, COUNT(ofi_pct) AS ofiSnapshots FROM derivative_snapshots WHERE source=?').get('okx');
   return { ofiSnapshots:Number(row?.ofiSnapshots)||0, derivativeSnapshots:Number(row?.total)||0, firstAt:Number(row?.firstAt)||null, lastAt:Number(row?.lastAt)||null, readyForTraining:(Number(row?.ofiSnapshots)||0)>=7_200 };
 }
+function dominantDirection(probabilities) {
+  const entries=[['up',Number(probabilities?.up)||0],['flat',Number(probabilities?.flat)||0],['down',Number(probabilities?.down)||0]].sort((a,b)=>b[1]-a[1]);
+  return entries[0][1] > 0 ? entries[0][0] : 'flat';
+}
+// Re-rate the open bucket instead of dropping it: the newest model output is the one the
+// page will be graded on, and a settled row must never be rewritten.
+// 让未结算的桶重新定价而不是丢弃：页面上要被评分的是最新模型输出，而已结算行永不被改写。
+function writeResearchPrediction(window, now) {
+  const write=()=>{
+    const updated=updateResearchPrediction.run(now,window.targetAt,window.entryPrice,window.rawProbability,window.upProbability,window.flatProbability,window.direction,window.regime,window.theta,RESEARCH_WINDOW_VERSION,window.bucketAt,window.key);
+    if(Number(updated?.changes))return;
+    storeResearchPrediction.run(window.bucketAt,now,window.key,window.candleInterval,window.targetAt,window.entryPrice,window.rawProbability,window.upProbability,window.flatProbability,window.direction,window.regime,window.theta,RESEARCH_WINDOW_VERSION);
+  };
+  safelyStore(write);
+}
 function recordCandidateShadowForecasts(windows, now) {
-  const active=database.prepare("SELECT id FROM research_training_runs WHERE status='shadow' ORDER BY id DESC LIMIT 1").get();
+  const active=stmt("SELECT id FROM research_training_runs WHERE status='shadow' ORDER BY id DESC LIMIT 1").get();
   if(!active)return;
-  for(const window of windows){const bucketAt=Math.floor((Number(window.targetAt)-(window.candleInterval==='1d'?86_400_000:window.horizon*900_000))/900_000)*900_000, probability=Number(window.candidateProbability);if(!Number.isFinite(probability))continue;safelyStore(()=>storeCandidateForecast.run(active.id,bucketAt,now,window.key,window.candleInterval,window.targetAt,window.entryPrice,probability,probability>=.5?'up':'down'));}
+  for(const window of windows){const probability=Number(window.candidateProbability);if(!Number.isFinite(probability))continue;safelyStore(()=>storeCandidateForecast.run(active.id,window.bucketAt,now,window.key,window.candleInterval,window.targetAt,window.entryPrice,probability,Number(window.flatProbability)||null,window.direction,window.theta,RESEARCH_WINDOW_VERSION));}
 }
 async function researchOutlook({ refresh = false } = {}) {
-  const key='research-outlook', hit=cache.get(key), now=Date.now();
+  const key = coinKey('research-outlook'), hit=cache.get(key), now=Date.now();
   if (!refresh && hit && now-hit.time<NEWS_TTL) return { ...cacheResult(hit, now), stale:false };
   return coalesce(key, async () => {
     const [intraday,daily,news,sentiment,derivatives,calendar,macro]=await Promise.all([forecastHistory('15m'),forecastHistory('1d'),bitcoinNews({ refresh }),fearGreedSentiment({ refresh }).catch(()=>null),marketContext('okx').catch(()=>null),fedCalendar().catch(()=>null),fedMarketSignals().catch(()=>null)]);
+    // Read the blend configuration once, before anything that uses it. An earlier version declared
+    // these aliases further down the function and the whole outlook path died on a temporal dead
+    // zone error - a class of fault `node --check` cannot see, because it is not a syntax error.
+    // 融合配置只读一次，且放在所有使用点之前。早先的版本把别名声明在函数靠后的位置，整个 outlook
+    // 路径因暂时性死区报错而挂掉 —— 这类错误 `node --check` 看不见，因为它不是语法错误。
+    const blendCfg=RESEARCH_TUNING.blend, consistencyCfg=blendCfg.consistency, clampCfg=blendCfg.probabilityClamp, tiltCfg=blendCfg.tilt;
     const newsItems=news.items || [], bullish=newsItems.filter(item=>item.sentiment>0).length, bearish=newsItems.filter(item=>item.sentiment<0).length;
     const newsScore=newsItems.length ? clamp(newsItems.reduce((sum,item)=>{const ageHours=Number.isFinite(item.publishedAt)?Math.max(0,(now-item.publishedAt)/3_600_000):6, timeWeight=Math.exp(-ageHours/4);return sum+item.sentiment*(item.sourceWeight||.7)*(item.eventWeight||.7)*timeWeight},0)/Math.max(1,newsItems.reduce((sum,item)=>sum+(item.sourceWeight||.7),0)),-1,1) : 0;
     const sentimentScore=Number.isFinite(sentiment?.value) ? clamp((sentiment.value-50)/50,-1,1) : 0;
-    const microstructureScore=derivatives ? clamp((Number(derivatives.orderBook?.imbalancePct)||0)/30*.32 + (Number(derivatives.takerFlow?.imbalancePct)||0)/35*.38 + (Number(derivatives.oiChangePct)||0)/.8*(Number(derivatives.priceChangePct)||0>=0?1:-1)*.18 - (Number(derivatives.fundingRate)||0)/.001*.08 - (Number(derivatives.basisPct)||0)/.25*.04,-1,1) : 0;
-    const eventRisk=(calendar?.events||[]).filter(event=>event.at-now>=0&&event.at-now<=24*3_600_000).map(event=>event.name), eventRangeMultiplier=eventRisk.length?1.35:1;
-    const last=intraday.candles.at(-1)?.close || daily.candles.at(-1)?.close;
+    // Open interest only means something together with the direction of price: rising OI on
+    // a rising price is trend confirmation, the same OI on a falling price is not.
+    // 未平仓合约只有结合价格方向才有意义：价涨量增是趋势确认，价跌量增不是。
+    const priceDirection=(Number(derivatives?.priceChangePct)||0)>=0?1:-1;
+    const microstructureScore=derivatives ? clamp((Number(derivatives.orderBook?.imbalancePct)||0)/30*.32 + (Number(derivatives.takerFlow?.imbalancePct)||0)/35*.38 + (Number(derivatives.oiChangePct)||0)/.8*priceDirection*.18 - (Number(derivatives.fundingRate)||0)/.001*.08 - (Number(derivatives.basisPct)||0)/.25*.04,-1,1) : 0;
+    const eventRisk=(calendar?.events||[]).filter(event=>event.at-now>=0&&event.at-now<=blendCfg.eventRisk.lookaheadHours*3_600_000).map(event=>event.name), eventRangeMultiplier=eventRisk.length?blendCfg.eventRisk.rangeMultiplier:1;
+    const intradayAnchor=forecastAnchor(intraday.candles,forecastIntervalMs('15m'),now), dailyAnchor=forecastAnchor(daily.candles,forecastIntervalMs('1d'),now);
+    const last=intradayAnchor.close || dailyAnchor.close;
     settleResearchPredictions({'15m':intraday.candles,'1d':daily.candles},now);
-    captureAbExperiments(intraday.source || 'okx','15m',intraday.candles,now);
-    // These two candidates are external-feature experiments.  The frozen A
-    // uses the simple displayed aggregate; B adds only the stated feature
-    // change and is still settled against the very same 15m future close.
-    const ofi=Number(derivatives?.orderBook?.ofiPct)||0, book=Number(derivatives?.orderBook?.imbalancePct)||0, taker=Number(derivatives?.takerFlow?.imbalancePct)||0;
-    for(const horizon of [1,4])recordAbExternalPair('okx-microstructure',intraday.source || 'okx',intraday.candles,horizon,{a:sigmoid((book*.45+taker*.55)/28),b:sigmoid((ofi*.55+book*.25+taker*.2)/24)},{ofi,book,taker,coverage:derivatives?'snapshot':'missing'},now);
-    const recentReturn=Number(intraday.candles.at(-2)?.close)/Math.max(Number(intraday.candles.at(-6)?.close)||1,1)-1, simpleNews=(bullish-bearish)/Math.max(newsItems.length,1), absorbed=Math.abs(recentReturn)>.012&&Math.sign(recentReturn)===Math.sign(newsScore);
-    for(const horizon of [4,16])recordAbExternalPair('news-fear-greed',intraday.source || 'okx',intraday.candles,horizon,{a:sigmoid(simpleNews*.75),b:sigmoid(newsScore*(absorbed ? .35 : .82)+sentimentScore*.12)},{newsScore,simpleNews,absorbed,items:newsItems.length},now);
+
     settleAbExperiments({'15m':intraday.candles,'1d':daily.candles},now);
     // Four horizons share the same historical-feature model; the 15m/1h/4h paths use intraday candles, while 1d uses daily candles.
     // 四个周期共用同一历史特征模型；15 分钟/1 小时/4 小时使用日内 K 线，1 天使用日线。
-    const definitions=[{ key:'15m', label:'约 15 分钟', candles:intraday.candles, horizon:1, cap:.015 },{ key:'1h', label:'约 1 小时', candles:intraday.candles, horizon:4, cap:.03 },{ key:'4h', label:'约 4 小时', candles:intraday.candles, horizon:16, cap:.05 },{ key:'1d', label:'约 1 天', candles:daily.candles, horizon:1, cap:.12 }];
-    const windows=definitions.map(definition => {
+    const definitions=researchHorizonDefinitions({ '15m':intraday.candles, '1d':daily.candles });
+    const windows=await Promise.all(definitions.map(async definition => {
+      const anchor=definition.key==='1d'?dailyAnchor:intradayAnchor;
+      const bucketAt=anchor.bucketAt, entryPrice=anchor.close, targetAt=horizonTargetAt(bucketAt,definition.horizon,definition.barMs);
+      // Yield once before the (synchronous, CPU-heavy) analogue projection so the four horizon
+      // windows don't run their projections back-to-back as one ~10s non-yielding block that
+      // would freeze the event loop. Each window's projection still runs to completion; we only
+      // let other work (in-flight GET / requests) through first.
+      // 在（同步、吃 CPU 的）近邻投影前先让出一次事件循环，避免四个周期的投影首尾相接成一段约 10s
+      // 不释放主线程的块把事件循环冻住。每个周期的投影仍会跑完，只是先放其它在途请求（GET /）通过。
+      await new Promise(resolve => setImmediate(resolve));
       const history=historicalProjection(definition.candles,definition.horizon);
-      const fusion=trainFusionModel(definition.candles,definition.horizon);
-      const newsWeight=definition.key==='1d'?.25:.12, sentimentWeight=definition.key==='1d'?.08:.04, microWeight=definition.key==='15m'?.14:definition.key==='1h'?.12:definition.key==='4h'?.09:.025;
-      const adjustment=(newsScore*newsWeight + sentimentScore*sentimentWeight + microstructureScore*microWeight)*Math.max(history.volatility,.002);
-      const adjustedReturn=clamp(history.expectedReturn + adjustment,-definition.cap,definition.cap), volatilityUnit=Math.max(history.volatility*Math.sqrt(definition.horizon),.001);
-      const analogueProbability=history.upProbability, learnedProbability=fusion?.probability ?? analogueProbability;
+      const fusion=await trainFusionModelAsync(definition.candles,definition.horizon);
+      const horizonWeights=blendCfg.horizonWeight[definition.key] || blendCfg.horizonWeight['15m'];
+      const newsWeight=horizonWeights.news, sentimentWeight=horizonWeights.sentiment, microWeight=horizonWeights.microstructure;
+      const adjustment=(newsScore*newsWeight + sentimentScore*sentimentWeight + microstructureScore*microWeight)*Math.max(history.volatility,consistencyCfg.volatilityFloor);
+      const adjustedReturn=clamp(history.expectedReturn + adjustment,-definition.cap,definition.cap), volatilityUnit=Math.max(history.volatility*Math.sqrt(definition.horizon),consistencyCfg.volatilityUnitFloor);
+      const classProbabilities=history.classProbabilities || { up:history.upProbability, flat:0, down:1-history.upProbability };
+      const flatProbability=clamp(Number(classProbabilities.flat)||0,0,1);
+      const analogueSpread=Number(classProbabilities.up)+Number(classProbabilities.down);
+      const analogueProbability=analogueSpread>0?Number(classProbabilities.up)/analogueSpread:history.upProbability;
+      const learnedProbability=fusion?.probability ?? analogueProbability;
       // Dynamic, rule-based blending avoids fitting a meta-model before there
       // is enough out-of-fold history. Range states favor analogues; stronger
       // trend/volatility states give the nonlinear price model more weight.
-      const analogueWeight=history.regime==='range'?.62:history.volatility>.006?.42:.48;
+      const analogueWeightCfg=blendCfg.analogueWeight;
+      const analogueWeight=history.regime==='range'?analogueWeightCfg.range:history.volatility>analogueWeightCfg.volatileThreshold?analogueWeightCfg.volatile:analogueWeightCfg.normal;
       const baseProbability=analogueWeight*analogueProbability+(1-analogueWeight)*learnedProbability;
-      const rawProbability=sigmoid(logit(baseProbability) + newsScore*.22 + sentimentScore*.12 + microstructureScore*(definition.key==='1d'?.07:.18));
-      const upProbability=clamp(rawProbability,.05,.95);
-      // A slim probability band is deliberately neutral: a 50%-plus reading is not directional evidence.
-      // 概率落在窄幅中性带时刻意显示中性：仅 50% 多并不构成方向证据。
-      const direction=upProbability>=.56?'up':upProbability<=.44?'down':'flat';
+      // Headlines and microstructure can tilt which way a move breaks, but only the
+      // analogue spread decides whether the move breaks out of the chop band at all.
+      // 新闻与微观结构能影响走势往哪边破，但能否突破震荡带只由近邻分布决定。
+      const microstructureTilt=definition.key==='1d'?tiltCfg.microstructureDaily:tiltCfg.microstructure;
+      const directionalProbability=clamp(sigmoid(logit(baseProbability) + newsScore*tiltCfg.news + sentimentScore*tiltCfg.sentiment + microstructureScore*microstructureTilt),clampCfg.low,clampCfg.high);
+      const directionalMass=clamp(1-flatProbability,0,1);
+      const upProbability=clamp(directionalMass*directionalProbability,clampCfg.classLow,clampCfg.classHigh);
+      const downProbability=clamp(Math.max(0,directionalMass-upProbability),clampCfg.classLow,clampCfg.classHigh);
+      const rawProbability=directionalProbability;
+      const direction=dominantDirection({ up:upProbability, flat:flatProbability, down:downProbability });
       const distribution=Object.fromEntries(Object.entries(history.distribution).map(([key,value])=>[key,clamp(value+adjustment,-definition.cap,definition.cap)]));
       const center=distribution.p50, widened={p10:center+(distribution.p10-center)*eventRangeMultiplier,p50:center,p90:center+(distribution.p90-center)*eventRangeMultiplier};
-      return { ...definition, upProbability, rawProbability, candidateProbability:learnedProbability, entryPrice:last, expectedReturn:adjustedReturn, expectedMove:last*adjustedReturn, expectedPrice:last*(1+adjustedReturn), direction, samples:history.samples, candidateCount:history.candidateCount, matchQuality:history.matchQuality, regime:history.regime, blend:{analogueWeight,modelWeight:1-analogueWeight}, volatilityUnit, distribution, priceRange:{p10:last*(1+widened.p10),p50:last*(1+widened.p50),p90:last*(1+widened.p90)}, eventRangeMultiplier, candleInterval:definition.key==='1d'?'1d':'15m', targetAt:Number(definition.candles.at(-1)?.time||now)+(definition.key==='1d'?86_400_000:definition.horizon*900_000), validation:fusion?.validation || null };
-    });
+      return { ...definition, upProbability, downProbability, flatProbability, directionalProbability, rawProbability, candidateProbability:learnedProbability, entryPrice, bucketAt, targetAt, theta:Number(history.theta)||null, expectedReturn:adjustedReturn, expectedMove:last*adjustedReturn, expectedPrice:last*(1+adjustedReturn), direction, samples:history.samples, candidateCount:history.candidateCount, matchQuality:history.matchQuality, regime:history.regime, blend:{analogueWeight,modelWeight:1-analogueWeight}, volatilityUnit, distribution, priceRange:{p10:last*(1+widened.p10),p50:last*(1+widened.p50),p90:last*(1+widened.p90)}, eventRangeMultiplier, candleInterval:definition.interval, validation:fusion?.validation || null };
+    }));
     // Damp a lone outlier horizon toward neutral; this is a consistency guard, not an attempt to force one direction.
     // 将孤立周期向中性轻微收缩；这是跨周期一致性保护，不会强行统一方向。
-    windows.forEach((window,index)=>{const neighbors=windows.filter((_,other)=>Math.abs(other-index)===1).map(item=>item.upProbability);if(neighbors.length&&Math.abs(window.upProbability-neighbors.reduce((sum,value)=>sum+value,0)/neighbors.length)>.18)window.upProbability=.5+(window.upProbability-.5)*.65;window.direction=window.upProbability>=.56?'up':window.upProbability<=.44?'down':'flat'});
-    for(const window of windows)safelyStore(()=>storeResearchPrediction.run(Math.floor((Number(window.targetAt)-(window.candleInterval==='1d'?86_400_000:window.horizon*900_000))/900_000)*900_000,now,window.key,window.candleInterval,window.targetAt,last,window.rawProbability,window.upProbability,window.direction,window.regime));
+    windows.forEach((window,index)=>{
+      const neighbors=windows.filter((_,other)=>Math.abs(other-index)===1).map(item=>item.directionalProbability);
+      if(neighbors.length&&Math.abs(window.directionalProbability-neighbors.reduce((sum,value)=>sum+value,0)/neighbors.length)>consistencyCfg.neighbourDelta){
+        window.directionalProbability=.5+(window.directionalProbability-.5)*consistencyCfg.dampFactor;
+        window.rawProbability=window.directionalProbability;
+        const mass=clamp(1-window.flatProbability,0,1);
+        window.upProbability=clamp(mass*window.directionalProbability,clampCfg.classLow,clampCfg.classHigh);
+        window.downProbability=clamp(Math.max(0,mass-window.upProbability),clampCfg.classLow,clampCfg.classHigh);
+      }
+      window.direction=dominantDirection({ up:window.upProbability, flat:window.flatProbability, down:window.downProbability });
+    });
+    for(const window of windows)writeResearchPrediction(window,now);
     recordCandidateShadowForecasts(windows,now);
     const primary=windows[2];
     const rankedNews=[...newsItems].map(item=>{const ageHours=Number.isFinite(item.publishedAt)?Math.max(0,(now-item.publishedAt)/3_600_000):6;return {...item,impact:Math.abs(item.sentiment)*(item.sourceWeight||.7)*(item.eventWeight||.7)*Math.exp(-ageHours/4)}}).sort((a,b)=>b.impact-a.impact || (b.publishedAt||0)-(a.publishedAt||0));
     const dxy=macro?.market?.find(row=>row.key==='dxy');
-    const result={ price:last, windows, scorecard:researchScorecard(), training:candidateTrainingStatus(), features:researchFeatureStatus(), news:{ source:news.source, fetchedAt:news.fetchedAt, bullish, bearish, neutral:newsItems.length-bullish-bearish, score:newsScore, halfLifeHours:4, items:rankedNews.slice(0,6) }, sentiment:sentiment?{ value:sentiment.value, source:sentiment.source || 'Alternative.me' }:null, derivatives:derivatives?{ source:derivatives.source, score:microstructureScore, fundingRate:derivatives.fundingRate, oiChangePct:derivatives.oiChangePct, bookImbalancePct:derivatives.orderBook?.imbalancePct, ofiPct:derivatives.orderBook?.ofiPct, takerImbalancePct:derivatives.takerFlow?.imbalancePct, cvdSessionNotional:derivatives.takerFlow?.cvdSessionNotional, coverage:['funding','oi-change','order-book','taker-flow','cvd','basis'], collecting:['OFI / top-5 displayed-liquidity changes'], unavailable:['funding term structure / long-short ratio','options PCR / 25Δ skew / IV term structure','liquidation heatmap','spot ETF net flows','on-chain exchange / whale flows','Coinbase and Kimchi premiums'] }:null, macro:{ dxy:dxy?.available?{value:dxy.value,changePct:dxy.changePct,source:dxy.source}:null, status:'DXY is displayed for context only until time-aligned history is validated.' }, eventRisk, historical:{ intradaySource:intraday.source, dailySource:daily.source, intradaySamples:intraday.candles.length, dailySamples:daily.candles.length }, primary, fetchedAt:now, refreshMs:NEWS_TTL, cached:false, disclaimer:'Calibrated historical-model research only; not investment advice.' };
+    // The payload carries the tuning fingerprint so a stored snapshot can be traced back to the
+    // exact thresholds that produced it. Only the overrides are inlined, to keep the payload small.
+    // 载荷带上调参指纹，使一份存档能追溯回产出它的那套阈值。只内联覆盖项，避免载荷过大。
+    const tuning={ fingerprint:tuningFingerprint(), overrides:researchTuningReport().overrides, error:RESEARCH_TUNING_ERROR };
+    const result={ price:last, windows, tuning, scorecard:researchScorecard(), training:candidateTrainingStatus(), features:researchFeatureStatus(), news:{ source:news.source, fetchedAt:news.fetchedAt, bullish, bearish, neutral:newsItems.length-bullish-bearish, score:newsScore, halfLifeHours:4, items:rankedNews.slice(0,6) }, sentiment:sentiment?{ value:sentiment.value, source:sentiment.source || 'Alternative.me' }:null, derivatives:derivatives?{ source:derivatives.source, score:microstructureScore, fundingRate:derivatives.fundingRate, oiChangePct:derivatives.oiChangePct, bookImbalancePct:derivatives.orderBook?.imbalancePct, ofiPct:derivatives.orderBook?.ofiPct, takerImbalancePct:derivatives.takerFlow?.imbalancePct, cvdSessionNotional:derivatives.takerFlow?.cvdSessionNotional, coverage:['funding','oi-change','order-book','taker-flow','cvd','basis'], collecting:['OFI / top-5 displayed-liquidity changes'], unavailable:['funding term structure / long-short ratio','options PCR / 25Δ skew / IV term structure','liquidation heatmap','spot ETF net flows','on-chain exchange / whale flows','Coinbase and Kimchi premiums'] }:null, macro:{ dxy:dxy?.available?{value:dxy.value,changePct:dxy.changePct,source:dxy.source}:null, status:'DXY is displayed for context only until time-aligned history is validated.' }, eventRisk, historical:{ intradaySource:intraday.source, dailySource:daily.source, intradaySamples:intraday.candles.length, dailySamples:daily.candles.length }, primary, fetchedAt:now, refreshMs:NEWS_TTL, cached:false, disclaimer:'Calibrated historical-model research only; not investment advice.' };
     remember(key,result); return result;
   });
 }
@@ -2337,13 +3641,28 @@ async function usEquityQuotes() {
   }
 }
 async function market(interval, limit, preferred) {
-  const key = `${interval}:${limit}:${preferred || 'auto'}`; const hit = cache.get(key);
+  const key = coinKey(`${interval}:${limit}:${preferred || 'auto'}`); const hit = cache.get(key);
   const ttl = isSyntheticOkxInterval(interval) ? 1_000 : MARKET_TTL;
   if (hit && Date.now() - hit.time < ttl) return { ...cacheResult(hit), stale:false };
+  // Stale-while-revalidate: when a usable (not-too-old) snapshot exists but its TTL has
+  // lapsed, serve it IMMEDIATELY and refresh in the background. A slow upstream REST fetch
+  // (OKX/Gate can take many seconds through the proxy) must never make the dashboard's chart
+  // spin — it simply shows slightly aged candles for one cycle. This also keeps /api/market
+  // from piling up behind the research retrain, which would otherwise freeze every tab.
+  // 陈旧即重新验证：当存在可用（不算太旧）的快照但 TTL 已过期时，立即返回它并在后台刷新。
+  // 缓慢的上游 REST 拉取（经代理时 OKX/Gate 可能要数秒）绝不应让仪表盘图表转圈 —— 它只是
+  // 在一个周期内显示略旧的 K 线。这也让 /api/market 不会在研究会重训时排起长队、冻住所有标签页。
+  if (hit && Date.now() - hit.time <= STALE_QUOTE_MAX_AGE) {
+    refreshMarket(key, interval, limit, preferred).catch(() => {});
+    return { ...cacheResult(hit), stale:true, staleServed:true };
+  }
+  return refreshMarket(key, interval, limit, preferred);
+}
+function refreshMarket(key, interval, limit, preferred) {
   // 用户选择的数据源需要锁定：上游暂时失败时，报价和图表不能静默切换交易所。
   // A user-selected source is intentionally locked: displayed price and chart
   // must not silently switch exchanges during a temporary upstream failure.
-  try { return await coalesce(key, async () => {
+  return coalesce(key, async () => {
     const order = preferred && loaders[preferred] ? [preferred] : sources;
     const failures = {};
     const jobs = order.map(source => loaders[source](interval, limit).then(value => ({ source, value })).catch(e => { failures[source] = e.name === 'AbortError' ? 'timeout (1.2s)' : e.message; throw e; }));
@@ -2357,9 +3676,10 @@ async function market(interval, limit, preferred) {
       // Synthetic candles are already persisted per trade; writing the entire
       // window again on each short refresh would inflate their volume.
       if (!isSyntheticOkxInterval(interval)) persistMarket(result, interval);
-      captureAbExperiments(source, interval, candles, result.fetchedAt); settleAbExperiments({[interval]:candles},result.fetchedAt); return result;
+      settleAbExperiments({[interval]:candles},result.fetchedAt); return result;
     } catch { throw Object.assign(new Error('All data sources failed'), { failures }); }
-  }, MARKET_REQUEST_TIMEOUT); } catch (error) {
+  }, MARKET_REQUEST_TIMEOUT).catch(error => {
+    const hit = cache.get(key);
     if (hit && Date.now() - hit.time <= STALE_QUOTE_MAX_AGE) return { ...cacheResult(hit), stale:true, fallbackReason:error.message };
     // Keep the chosen exchange's identity intact.  A stale OKX chart is more
     // honest than silently drawing a Coinbase or Gate chart under an OKX label.
@@ -2369,12 +3689,13 @@ async function market(interval, limit, preferred) {
       if (fallback) return fallback;
     }
     throw error;
-  }
+  });
 }
 // AI 助手复用本文件已经写好的数据函数，不另起一套采集逻辑。
 // The AI assistant reuses the data functions above instead of duplicating them.
 const aiChat = createAiChat({
   market, liveQuote, marketContext, fearGreedSentiment, fedMonitor, investmentCalendar,
+  currentCoin,
   getCredential: (provider) => (provider === 'qwen' ? qwenCredential() : null),
   getVerification: (provider) => Boolean(apiCredentials._verification?.[provider]?.valid),
   setModel: (model) => setQwenModel(model)
@@ -2403,9 +3724,17 @@ async function edgeTtsAudio(text, voice='zh-CN-XiaoxiaoNeural', attempts=2) {
   }
   throw lastError;
 }
-http.createServer((req, res) => requestTiming.run({ started:performance.now(), upstreamStarted:null, upstreamEnded:null, upstreamCalls:0 }, async () => {
+http.createServer((req, res) => {
+ // 币种先于一切解析：?symbol=ETH 就把整条请求链路（缓存键、SQLite、交易所合约）
+ // 都切到 ETH。缺省为 BTC，因此不带该参数的老请求与「比特币模式」完全等价。
+ // Resolve the coin first: ?symbol=ETH switches the whole request path (cache
+ // keys, SQLite file, exchange instrument) to ETH.  Defaulting to BTC keeps
+ // every existing request byte-identical to the pre-multi-coin behaviour.
+ const requestUrl = new URL(req.url, `http://${req.headers.host}`);
+ return coinScope.run({ coin:normalizeCoin(requestUrl.searchParams.get('symbol')) }, () =>
+ requestTiming.run({ started:performance.now(), upstreamStarted:null, upstreamEnded:null, upstreamCalls:0 }, async () => {
  try {
- const url = new URL(req.url, `http://${req.headers.host}`);
+ const url = requestUrl;
   if (await aiChat.handle({ req, res, url, readJsonBody:readJson, json, clientKey:req.socket.remoteAddress || 'local' })) return;
   if (url.pathname === '/api/api-center/verify' && req.method === 'POST') {
     let provider=null;
@@ -2461,6 +3790,8 @@ http.createServer((req, res) => requestTiming.run({ started:performance.now(), u
       const settingsIn = body && body.settings;
       const entriesIn = Array.isArray(body && body.personalEntries) ? body.personalEntries : [];
       const rulesIn = Array.isArray(body && body.rules) ? body.rules : [];
+      // 多币种：记录该次同步属于哪个币种（接力播报关闭，仅状态镜像，但状态本身不再混淆币种）
+      if (typeof body?.symbol === 'string' && body.symbol) voiceState.symbol = body.symbol;
       if (settingsIn && typeof settingsIn === 'object') voiceState.settings = settingsIn;
       voiceState.personalEntries = entriesIn.slice(0, 2).flatMap(entry => {
         const price = Number(entry?.price);
@@ -2547,9 +3878,53 @@ http.createServer((req, res) => requestTiming.run({ started:performance.now(), u
     const user=await requireAlertUser(req,res); if(!user)return;
     try { await alertStore.deleteRule(user.id,url.pathname.slice('/api/alerts/rules/'.length)); json(res,204,{}); } catch(error) { json(res,error.statusCode||500,{error:error.message}); } return;
   }
+  // ---- 多渠道推送（v2.10.52）：渠道 CRUD / 验证 / 推送设置 ----
+  if (url.pathname === '/api/alerts/channels') {
+    const user=await requireAlertUser(req,res); if(!user)return;
+    try {
+      if(req.method==='GET'){ if(!alertStore.enabled){json(res,503,{error:'Cloud alerts unavailable',detail:alertStore.reason});return;} json(res,200,{channels:await alertStore.listChannels(user.id)});return; }
+      if(req.method==='POST'){ if(!alertStore.enabled){json(res,503,{error:'Cloud alerts unavailable',detail:alertStore.reason});return;} const id=await alertStore.saveChannel(user.id,await readJson(req)); json(res,201,{id});return; }
+      json(res,405,{error:'GET or POST required'});
+    } catch(error) { json(res,error.statusCode||500,{error:error.message}); } return;
+  }
+  if (url.pathname.startsWith('/api/alerts/channels/')) {
+    const user=await requireAlertUser(req,res); if(!user)return;
+    const segments=url.pathname.slice('/api/alerts/channels/'.length).split('/');
+    const id=decodeURIComponent(segments[0]);
+    const action=segments[1] || '';
+    try {
+      if(action==='verify'&&req.method==='POST'){ if(!alertStore.enabled){json(res,503,{error:'Cloud alerts unavailable',detail:alertStore.reason});return;} json(res,200,await alertStore.verifyChannelById(user.id,id));return; }
+      if(!action&&req.method==='PUT'){ const body=await readJson(req); if(body.enabled!==undefined&&body.config===undefined&&body.name===undefined){await alertStore.setChannelEnabled(user.id,id,body.enabled);json(res,204,{});return;} await alertStore.saveChannel(user.id,{...body,id}); json(res,204,{});return; }
+      if(!action&&req.method==='DELETE'){ await alertStore.deleteChannel(user.id,id); json(res,204,{});return; }
+      json(res,405,{error:'PUT, DELETE or POST verify required'});
+    } catch(error) { json(res,error.statusCode||500,{error:error.message}); } return;
+  }
+  if (url.pathname === '/api/alerts/push-settings') {
+    const user=await requireAlertUser(req,res); if(!user)return;
+    try {
+      if(req.method==='GET'){ if(!alertStore.enabled){json(res,503,{error:'Cloud alerts unavailable',detail:alertStore.reason});return;} json(res,200,{settings:await alertStore.getPushSettings(user.id)});return; }
+      if(req.method==='PUT'){ if(!alertStore.enabled){json(res,503,{error:'Cloud alerts unavailable',detail:alertStore.reason});return;} json(res,200,{settings:await alertStore.setPushSettings(user.id,await readJson(req))});return; }
+      json(res,405,{error:'GET or PUT required'});
+    } catch(error) { json(res,error.statusCode||500,{error:error.message}); } return;
+  }
   if (url.pathname === '/api/account' && req.method==='DELETE') {
     const user=await requireAlertUser(req,res); if(!user)return;
     await alertStore.deleteAccount(user.id);clearSessionCookie(res);json(res,204,{});return;
+  }
+  // 币种注册表：前端据此渲染币种切换器，并保证前后端支持的币种永不脱节。
+  // Coin registry: the frontend renders its coin switcher from this, so the two
+  // sides can never drift apart.
+  if (url.pathname === '/api/coins') {
+    json(res, 200, {
+      base: BASE_COIN, current: currentCoin(), raw: url.searchParams.get('symbol'),
+      coins: COIN_KEYS.map(key => ({
+        key, label: COINS[key].label,
+        name: COINS[key].name.zh, nameEn: COINS[key].name.en,
+        usdt: COINS[key].okx.spot, swap: COINS[key].okx.swap,
+        pricePrecision: COINS[key].pricePrecision, qtyPrecision: COINS[key].qtyPrecision
+      }))
+    });
+    return;
   }
   if (url.pathname === '/api/market') {
     const interval = url.searchParams.get('interval') || '4h';
@@ -2565,8 +3940,8 @@ http.createServer((req, res) => requestTiming.run({ started:performance.now(), u
     const now = Date.now();
     json(res, 200, {
       sources, cacheEntries: cache.size, storage:storageStatus(), now,
-      refreshPolicy:{ quoteMs:1_000, marketMs:MARKET_TTL, contextMs:CONTEXT_TTL, historyMs:HISTORY_TTL, sentimentMs:SENTIMENT_TTL, fedCalendarMs:FED_CALENDAR_TTL },
-      websocket:{ provider:'OKX', status:okxStream.status, tickerAgeMs:streamAge(okxStream.tickerAt, now), messageAgeMs:streamAge(okxStream.lastMessageAt, now), contextAgeMs:streamAge(okxStream.contextAt, now), reconnects:okxStream.reconnects, lastError:okxStream.lastError }
+      refreshPolicy:{ quoteMs:250, marketMs:MARKET_TTL, contextMs:CONTEXT_TTL, historyMs:HISTORY_TTL, sentimentMs:SENTIMENT_TTL, fedCalendarMs:FED_CALENDAR_TTL },
+      websocket:{ provider:'OKX', coin:currentCoin(), status:okxStream.status, tickerAgeMs:streamAge(streamFor().tickerAt, now), messageAgeMs:streamAge(okxStream.lastMessageAt, now), contextAgeMs:streamAge(streamFor().contextAt, now), reconnects:okxStream.reconnects, lastError:okxStream.lastError }
     }); return;
   }
   if (url.pathname === '/api/market-context') {
@@ -2595,7 +3970,7 @@ http.createServer((req, res) => requestTiming.run({ started:performance.now(), u
     return;
   }
   if (url.pathname === '/api/forecast-history') {
-    const key = 'forecast-history', force = url.searchParams.get('refresh') === '1'; const hit = cache.get(key);
+    const key = coinKey('forecast-history'), force = url.searchParams.get('refresh') === '1'; const hit = cache.get(key);
     try {
       if (!force && hit && Date.now() - hit.time < HISTORY_TTL) { json(res, 200, cacheResult(hit)); return; }
       const [intradayResult, dailyResult] = await Promise.all([forecastHistory('15m'), forecastHistory('1d')]);
@@ -2607,6 +3982,46 @@ http.createServer((req, res) => requestTiming.run({ started:performance.now(), u
   if (url.pathname === '/api/research-outlook') {
     try { json(res, 200, await researchOutlook({ refresh:url.searchParams.get('refresh') === '1' })); }
     catch (e) { json(res, 503, { error:'Research outlook unavailable', detail:e.message }); }
+    return;
+  }
+  if (url.pathname === '/api/research-backfill') {
+    try { json(res, 200, await researchBackfill({ refresh:url.searchParams.get('refresh') === '1' })); }
+    catch (e) { json(res, 503, { error:'Research replay unavailable', detail:e.message }); }
+    return;
+  }
+  // 消融实验：两臂各跑一次完整回放，因此比回放本身慢一倍，只按需触发。
+  if (url.pathname === '/api/research-ablation') {
+    try { json(res, 200, await researchAblation({ refresh:url.searchParams.get('refresh') === '1' })); }
+    catch (e) { json(res, 503, { error:'Research ablation unavailable', detail:e.message }); }
+    return;
+  }
+  // Every research threshold and weight, plus a fingerprint that identifies this exact
+  // configuration. Two results may only be compared when their fingerprints match.
+  // 全部研究门槛与权重，外加一个标识这套配置的指纹。只有指纹相同的结果才可互相比较。
+  if (url.pathname === '/api/research-tuning') {
+    try { json(res, 200, researchTuningReport()); }
+    catch (e) { json(res, 500, { error:'Research tuning unavailable', detail:e.message }); }
+    return;
+  }
+  // 宏观事件样本：默认读库秒回；refresh=1 才去 FRED / Fed 取数并重算窗口收益。
+  if (url.pathname === '/api/macro-outcomes') {
+    try {
+      const backfill = url.searchParams.get('refresh') === '1' ? await backfillMacroEventOutcomes({ refresh:true }) : null;
+      json(res, 200, { ...macroEventStudy(), backfill });
+    } catch (e) { json(res, 503, { error:'Macro event study unavailable', detail:e.message }); }
+    return;
+  }
+  // 资金费率历史：默认只读库（秒回），refresh=1 才回交易所分页取数。
+  // Funding-rate history: reads the stored series by default and only hits the exchange on refresh.
+  if (url.pathname === '/api/funding-rates') {
+    try {
+      const backfill = url.searchParams.get('refresh') === '1' ? await backfillFundingRates() : null;
+      const rows = stmt('SELECT MIN(funding_at) AS firstAt, MAX(funding_at) AS lastAt, COUNT(*) AS total, AVG(rate) AS meanRate FROM funding_rate_history').get();
+      json(res, 200, { ...FUNDING_SOURCE, stored: fundingRateCount(), firstAt: Number(rows?.firstAt) || null, lastAt: Number(rows?.lastAt) || null,
+        meanRate: Number.isFinite(Number(rows?.meanRate)) ? Number(rows.meanRate) : null,
+        featureRows: fundingFeatureSeries().length, coverageDays: Number(rows?.firstAt) && Number(rows?.lastAt) ? (Number(rows.lastAt) - Number(rows.firstAt)) / 86_400_000 : null,
+        tuningFingerprint: tuningFingerprint(), backfill });
+    } catch (e) { json(res, 503, { error:'Funding-rate history unavailable', detail:e.message }); }
     return;
   }
   if (url.pathname === '/api/research-candidates/train') {
@@ -2633,6 +4048,62 @@ http.createServer((req, res) => requestTiming.run({ started:performance.now(), u
     json(res, 200, await usEquityQuotes());
     return;
   }
+  // 静态资源压缩：对文本类资源按客户端 Accept-Encoding 用 brotli/gzip 下发，
+  // 显著减少首屏传输体积（app.js 934KB → ~250KB）。图片等已压缩格式跳过。
+  // Static compression: serve text assets brotli/gzip per client Accept-Encoding,
+  // cutting first-paint transfer size. Already-compressed binaries are skipped.
+  const COMPRESSIBLE_TYPES = new Set([
+    'text/html', 'text/css', 'text/javascript', 'application/javascript',
+    'application/json', 'application/xml', 'image/svg+xml',
+  ]);
+  /* 压缩结果缓存 —— 没有它，brotliCompressSync(quality 11) 对 358KB 的 styles.css
+     实测要 ~450ms/次，而且每次请求都重压：首屏浏览器并发取 8 个 CSS 时，这些同步
+     压缩在 Node 主线程上串行排队，把首屏从几百毫秒拖到 1.7s+（实测 style.css
+     91ms 发起→1751ms 才下载完）。缓存键含文件 mtime，改文件自动失效。
+     同时把 brotli 质量从默认 11 降到 5：压缩耗时 ~450ms → ~30ms，体积几乎不变
+     （styles.css 55KB → 约 60KB），让"首次未命中"也不再卡顿主线程。 */
+  const COMPRESSED_CACHE_LIMIT = 96;
+  const compressedCache = new Map();
+  function cachedCompress(key, body, mode) {
+    const hit = compressedCache.get(key);
+    if (hit) return hit;
+    const out =
+      mode === 'br'
+        ? brotliCompressSync(body, {
+            params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 5 },
+          })
+        : gzipSync(body, { level: 6 });
+    if (compressedCache.size >= COMPRESSED_CACHE_LIMIT)
+      compressedCache.delete(compressedCache.keys().next().value);
+    compressedCache.set(key, out);
+    return out;
+  }
+  function sendCompressed(res, body, contentType, cacheControl, acceptEncoding, cacheKey) {
+    const baseType = String(contentType || '').split(';')[0].trim();
+    const headers = { 'content-type': contentType, 'cache-control': cacheControl };
+    const enc = String(acceptEncoding || '').toLowerCase();
+    if (COMPRESSIBLE_TYPES.has(baseType) && body.length > 1024) {
+      if (enc.includes('br')) {
+        const out = cachedCompress(`${cacheKey}|br`, body, 'br');
+        headers['content-encoding'] = 'br';
+        headers['content-length'] = out.length;
+        res.writeHead(200, headers); res.end(out); return;
+      }
+      if (enc.includes('gzip')) {
+        const out = cachedCompress(`${cacheKey}|gz`, body, 'gzip');
+        headers['content-encoding'] = 'gzip';
+        headers['content-length'] = out.length;
+        res.writeHead(200, headers); res.end(out); return;
+      }
+    }
+    headers['content-length'] = body.length;
+    res.writeHead(200, headers); res.end(body);
+  }
+  /* mtime 参与缓存键：静态文件更新后立即重新压缩，不会下发旧内容。 */
+  function compressionKey(file) {
+    try { return `${file}#${statSync(file).mtimeMs}`; } catch { return `${file}#nostat`; }
+  }
+
   // 显式服务根目录 shared/（前端 app.js 现以 ES Module 消费其中的指标实现，后端同样 import，
   // 保持单一事实来源）。单独路由以绕过 PUBLIC 目录隔离与穿越防护；自带 .. 与目录越界双重防护。
   if (url.pathname.startsWith('/shared/')) {
@@ -2643,8 +4114,7 @@ http.createServer((req, res) => requestTiming.run({ started:performance.now(), u
     if (file !== sharedRoot && !file.startsWith(sharedRoot + sep)) { res.writeHead(403); res.end(); return; }
     try {
       const body = await readFile(file);
-      res.writeHead(200, { 'content-type': mime[extname(file)] || 'application/octet-stream', 'cache-control': 'no-cache' });
-      res.end(body);
+      sendCompressed(res, body, mime[extname(file)] || 'application/octet-stream', 'no-cache', req.headers['accept-encoding'], compressionKey(file));
     } catch { res.writeHead(404); res.end('Not found'); }
     return;
   }
@@ -2665,8 +4135,7 @@ http.createServer((req, res) => requestTiming.run({ started:performance.now(), u
     // service restart can deliver feature updates without asking users to clear
     // a browser cache; fingerprinted images/fonts remain immutable.
     const immutable = (url.searchParams.has('v') || url.searchParams.has('t')) && !['app.js', 'styles.css'].includes(relative);
-    res.writeHead(200, { 'content-type': mime[extname(file)] || 'application/octet-stream', 'cache-control': immutable ? 'public, max-age=31536000, immutable' : 'no-cache' });
-    res.end(body);
+    sendCompressed(res, body, mime[extname(file)] || 'application/octet-stream', immutable ? 'public, max-age=31536000, immutable' : 'no-cache', req.headers['accept-encoding'], compressionKey(file));
   } catch (readError) {
     if (readError && readError.code !== 'ENOENT') console.error('[static]', readError.message);
     res.writeHead(404); res.end('Not found');
@@ -2676,4 +4145,105 @@ http.createServer((req, res) => requestTiming.run({ started:performance.now(), u
     if (!res.headersSent) res.writeHead(500, { 'content-type': 'application/json; charset=utf-8' });
     if (!res.writableEnded) res.end(JSON.stringify({ error: 'Internal server error' }));
   }
-})).listen(PORT, HOST, () => console.log(`BTC indicator: http://${HOST}:${PORT}`));
+})); }).listen(PORT, HOST, () => console.log(`BTC indicator: http://${HOST}:${PORT}`));
+
+// Pre-warm the market cache at startup so the first page load never waits on a slow
+// upstream REST fetch (which can take many seconds through the proxy).  Fired in the
+// background; failures are ignored and the normal on-demand path still applies.
+// 启动时预热市场缓存，让首次页面加载不必等缓慢的上游 REST 拉取（经代理时可能要数秒）。
+// 后台触发，失败忽略，按需路径仍兜底。
+const PREWARM_INTERVALS = ['15m', '1h', '4h', '1d'];
+setTimeout(() => {
+  for (const interval of PREWARM_INTERVALS) {
+    for (const limit of [180, 300]) {
+      for (const source of ['okx', 'gate']) market(interval, limit, source).catch(() => {});
+    }
+  }
+}, 1500).unref?.();
+
+// ---- Research sampling scheduler -----------------------------------------
+// Forecasts used to be written only while somebody had the page open, which turned the
+// sample into a convenience sample of "who visited".  Sampling and settlement now run on
+// their own clock, so every bucket exists and every bucket is graded when it expires.
+// 预测过去只在有人打开页面时才写入，样本因此变成「谁来过」的便利样本。
+// 采样与结算现在各走自己的时钟：每个桶都会存在，每个桶到期即结算。
+// Window definition revision.  2 = entry at the anchor bar close, settlement exactly one
+// horizon later on a fully closed bar.  Anything older is not comparable.
+// 窗口定义版本。2 = 入场取锚定 K 线收盘，结算恰好在一个持有期之后、且用已收盘的 K 线。
+// 更早的行与它不可比。
+const RESEARCH_WINDOW_VERSION = 2;
+const RESEARCH_CYCLE_MS = 900_000;
+const RESEARCH_SETTLE_MS = 60_000;
+const RESEARCH_SOURCES = ['coinbase', 'gate', 'binance'];
+function storedForecastHistories() {
+  const histories = {};
+  for (const interval of ['15m', '1d']) {
+    for (const source of RESEARCH_SOURCES) {
+      const candles = storedCandles(source, interval, 1000);
+      if (candles.length) { histories[interval] = candles; break; }
+    }
+  }
+  return histories;
+}
+function settleResearchFromStorage(now = Date.now()) {
+  const histories = storedForecastHistories();
+  if (!Object.keys(histories).length) return;
+  settleResearchPredictions(histories, now);
+}
+function runResearchCycle() {
+  researchOutlook({ refresh: true }).catch(error => console.warn('research cycle failed:', error && error.message));
+}
+// Rows that settled before the threshold existed still carry a direction and an actual
+// return, so their three-class verdict can be recomputed from stored candles.
+// 在阈值机制出现之前就已结算的行仍保留方向与真实收益，因此可以用库存 K 线重算三分类结论。
+// The in-memory window only carries the newest 1000 candles, so buckets older than that
+// never match an anchor and were silently left unlabelled. Read the stored range instead:
+// one query per interval, spanning every pending bucket plus the lookback the volatility
+// unit needs.
+// 内存窗口只保留最新 1000 根 K 线，早于该窗口的桶匹配不到锚点，会被静默跳过而缺失标签。
+// 改为按时间范围读库存 K 线：每个周期只查一次，覆盖全部待回填桶及其波动率回看窗口。
+function storedCandleRange(interval, fromTime, toTime) {
+  for (const source of RESEARCH_SOURCES) {
+    const rows = stmt('SELECT candle_time AS time, open, high, low, close, volume FROM candles WHERE source=? AND interval=? AND candle_time>=? AND candle_time<=? ORDER BY candle_time ASC').all(source, interval, fromTime, toTime);
+    const candles = rows.map(row => ({ time:+row.time, open:+row.open, high:+row.high, low:+row.low, close:+row.close, volume:+row.volume })).filter(validCandle);
+    if (candles.length) return candles;
+  }
+  return [];
+}
+function backfillResearchOutcomeLabels() {
+  const rows = stmt('SELECT id, bucket_at, horizon_key, candle_interval, actual_return FROM research_predictions WHERE settled_at IS NOT NULL AND outcome_label IS NULL ORDER BY bucket_at ASC').all();
+  if (!rows.length) return 0;
+  const statement = stmt('UPDATE research_predictions SET theta=?, outcome_label=? WHERE id=?'), ranges = new Map();
+  let updated = 0;
+  for (const row of rows) {
+    const interval = row.candle_interval, span = interval === '1d' ? 24 * 86_400_000 : 24 * 900_000, bucketAt = Number(row.bucket_at);
+    if (!ranges.has(interval)) {
+      const bounds = rows.filter(item => item.candle_interval === interval).map(item => Number(item.bucket_at));
+      ranges.set(interval, storedCandleRange(interval, Math.min(...bounds) - span, Math.max(...bounds) + 86_400_000));
+    }
+    const candles = ranges.get(interval) || [], actualReturn = Number(row.actual_return);
+    if (!Number.isFinite(actualReturn) || !candles.length) continue;
+    const horizon = row.horizon_key === '1d' ? 1 : row.horizon_key === '1h' ? 4 : row.horizon_key === '4h' ? 16 : 1;
+    const anchorIndex = candles.findIndex(candle => Number(candle.time) === bucketAt);
+    if (anchorIndex < 1) continue;
+    const logReturns = [];
+    for (let point = Math.max(1, anchorIndex - 19); point <= anchorIndex; point++) logReturns.push(Math.log(candles[point].close / candles[point - 1].close));
+    const average = logReturns.reduce((sum, value) => sum + value, 0) / Math.max(logReturns.length, 1);
+    const sigma = Math.sqrt(logReturns.reduce((sum, value) => sum + (value - average) ** 2, 0) / Math.max(logReturns.length, 1)) || 0.000001;
+    const theta = chopThreshold(sigma, horizon);
+    statement.run(theta, outcomeLabel(actualReturn, theta), row.id);
+    updated += 1;
+  }
+  return updated;
+}
+const researchSettleTimer = setInterval(() => { try { settleResearchFromStorage(); } catch (error) { console.warn('research settle failed:', error && error.message); } }, RESEARCH_SETTLE_MS);
+researchSettleTimer.unref?.();
+setTimeout(() => {
+  runResearchCycle();
+  const researchCycleTimer = setInterval(runResearchCycle, RESEARCH_CYCLE_MS);
+  researchCycleTimer.unref?.();
+}, Math.max(5_000, RESEARCH_CYCLE_MS - (Date.now() % RESEARCH_CYCLE_MS))).unref?.();
+try {
+  const backfilled = backfillResearchOutcomeLabels();
+  if (backfilled) console.log(`research: backfilled ${backfilled} three-class outcome labels`);
+} catch (error) { console.warn('research backfill skipped:', error && error.message); }
