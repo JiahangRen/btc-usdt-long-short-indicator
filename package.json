@@ -1,7 +1,7 @@
 {
   "name": "btc-indicator-rebuilt",
   "private": true,
-  "version": "2.12.5",
+  "version": "2.12.7",
   "type": "module",
   "scripts": {
     "start": "node server.mjs",

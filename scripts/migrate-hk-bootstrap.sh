@@ -60,7 +60,7 @@ PY
 # 5) .env
 if [ ! -f "$APP_DIR/.env" ]; then
   : "${POSTGRES_PASSWORD:=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 32)}"
-  : "${ALERT_ENCRYPTION_KEY:=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 32)}"
+  : "${ALERT_ENCRYPTION_KEY:=$(openssl rand -base64 32)}"
   cat > "$APP_DIR/.env" <<EOF
 POSTGRES_PASSWORD=$POSTGRES_PASSWORD
 ALERT_ENCRYPTION_KEY=$ALERT_ENCRYPTION_KEY

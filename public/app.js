@@ -23,13 +23,6 @@ const activeCoin = () => (isMultiCoinMode() ? selectedCoin : BASE_COIN);
 const coinMetaOf = (coin = activeCoin()) => COINS[normalizeCoin(coin)] || COINS[BASE_COIN];
 /** 「BTC / USDT」这类展示用交易对。 */
 const coinPair = (coin = activeCoin()) => `${normalizeCoin(coin)} / USDT`;
-/** 当前币种的中/英文全名（以太坊 / Ethereum）。 */
-// 这里直接读 localStorage 而不复用 uiLang：uiLang 在本文件中声明得更靠后，
-// 模块初始化早期若走到这里会撞上暂时性死区（TDZ），整页板块会消失。
-const coinNameOf = (coin = activeCoin()) => {
-  const name = coinMetaOf(coin).name;
-  return (localStorage.getItem('btc_lang') || 'zh') === 'en' ? name.en : name.zh;
-};
 const coinLabel = (coin = activeCoin()) => normalizeCoin(coin);
 /** 多币种本地存储键的币种后缀：BTC 用旧键（无后缀），其余币种 "_<COIN>"。
  *  放在文件最前，任何按币种隔离的 localStorage 键都复用它（避免 TDZ）。 */
@@ -1347,6 +1340,41 @@ function updateClocks() {
   apiCenter.textContent = tx("API 接入中心","API Center");
   apiCenter.title = tx("管理数据源 API 接入","Manage data-source API keys");
   controls.append(apiCenter, lang, fullscreen, theme);
+  /* 设置齿轮 + 下拉面板（v2.12.7）：把「账户 / API 接入中心 / 版本 / 连通性测试 /
+     数据源」从顶栏收进齿轮面板，顶栏只留 模式开关 · 语言 · 全屏 · 深色 · 齿轮。
+     面板是 .controls 的子节点 —— 上层用后代选择器（.controls label 等）的
+     i18n 与样式逻辑不受影响；各按钮的插入点在各自创建处改为「面板优先」。 */
+  const gear = document.createElement("button");
+  gear.id = "headerSettingsToggle";
+  gear.type = "button";
+  gear.title = tx("设置", "Settings");
+  gear.setAttribute("aria-haspopup", "true");
+  gear.setAttribute("aria-expanded", "false");
+  gear.innerHTML =
+    '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>';
+  controls.append(gear);
+  const panel = document.createElement("div");
+  panel.id = "headerSettingsPanel";
+  panel.hidden = true;
+  controls.append(panel);
+  // 静态「数据源」标签先搬进面板；账户/版本/连通性由各自创建时机插入面板。
+  const settingsSource = controls.querySelector("label");
+  if (settingsSource) panel.append(settingsSource);
+  panel.append(apiCenter);
+  gear.addEventListener("click", (event) => {
+    // 顶栏 document 级收起监听会把刚打开的浮层立刻关掉，必须阻断。
+    event.stopPropagation();
+    const open = panel.hidden;
+    panel.hidden = !open;
+    gear.setAttribute("aria-expanded", String(open));
+  });
+  panel.addEventListener("click", (event) => event.stopPropagation());
+  document.addEventListener("click", () => {
+    if (!panel.hidden) {
+      panel.hidden = true;
+      gear.setAttribute("aria-expanded", "false");
+    }
+  });
   const apiCenterModal=document.createElement("div");
   apiCenterModal.id="apiCenterModal";
   apiCenterModal.className="alert-composer api-center-modal";
@@ -7356,12 +7384,14 @@ renderRangeExtremaPoints = function () {
   const version = document.createElement("button");
   version.type = "button";
   version.id = "appVersion";
-  version.textContent = "v2.12.5";
+  version.textContent = "v2.12.7";
   version.title = "查看更新日志";
   version.setAttribute("aria-expanded", "false");
-  const sourceLabel = controls.querySelector("label");
-  if (sourceLabel) controls.insertBefore(version, sourceLabel);
-  else controls.prepend(version);
+  // v2.12.7：版本号随「账户 / API / 连通性 / 数据源」一起收进设置齿轮面板。
+  const settingsHost = $("headerSettingsPanel") || controls;
+  const sourceLabel = settingsHost.querySelector("label");
+  if (sourceLabel) settingsHost.insertBefore(version, sourceLabel);
+  else settingsHost.prepend(version);
   const log = document.createElement("section");
   log.id = "versionChangelog";
   log.hidden = true;
@@ -7599,6 +7629,12 @@ renderRangeExtremaPoints = function () {
   // v2.12.5：多币种隔离补全 —— 语音规则、持仓、记录簿与云端读写全部按币种独立。
   const v2125CoinScopedStorageChangelog = log.innerHTML;
   log.innerHTML = `<b>v2.12.5 更新日志</b><dl><dt>多币种：语音播报规则按币种独立</dt><dd>此前「语音播报」里的规则只有一份，切到 ETH / ZEC / BNB 看到的、播出来的仍是 BTC 下设置的内容。现在语音规则按币种分别存储：BTC 沿用原有数据；其余币种<b>默认是空的</b>，没设置过的币种不会再借用 BTC 的规则；在某币种下添加过，切走再切回依然保留。切换币种时播报引擎会重置价格基准与短窗历史 —— 跨币种价格量级差异巨大，沿用旧基准会把切换瞬间当成暴涨暴跌误触发。</dd><dt>多币种：「我的持仓」按币种独立</dt><dd>顶部两张持仓卡与「我的持仓与盈亏估算」表单改为每个币种各存一份：BNB 下看到的就是 BNB 自己的持仓（没填过就是空白），不再是 BTC 的数值；强平概率计算器的「历史持仓价」记录同步按币种分开。切换币种立即生效，各币种互不串台。</dd><dt>多币种：消息推送的本机数据读写按币种取</dt><dd>修复云端同步面板读写的仍是 BTC 本机数据的串台：现在「同步本机规则到云端」「一键同步全部」读写的是当前币种自己的本机规则存储。云端关页推送仍仅 BTC 专属（多币种下云端面板有明确提示）。</dd><dt>持仓云端同步明确为 BTC 专属</dt><dd>其它币种的持仓只存本机：不显示「同步／已同步」徽标，登录后也不会把 BTC 的云端持仓自动回填到其它币种，更不会把其它币种的持仓误写进 BTC 的云端档案；回到 BTC 后一切照旧。</dd></dl><hr>` + v2125CoinScopedStorageChangelog;
+  // v2.12.6：切换币种不再弹「已切换到 XX」提示。
+  const v2126NoSwitchDialogChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.6 更新日志</b><dl><dt>优化：切换币种不再弹出「已切换到 XX」提示</dt><dd>v2.12.5 在切换币种时会弹一个「已切换到 ETH（以太坊），正在重新加载该币种的全部数据」的提示框，需要手动点掉。实际上切换后顶部标签、币种 chip 高亮与各面板数据都在原地即时刷新，切换结果对用户已经可见，弹窗属于多余打扰 —— 现已移除，切换币种恢复静默原地刷新。</dd></dl><hr>` + v2126NoSwitchDialogChangelog;
+  // v2.12.7：顶栏「深色」旁新增设置齿轮，低频入口收进下拉面板。
+  const v2127SettingsGearChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.7 更新日志</b><dl><dt>顶栏新增设置齿轮，低频入口收进面板</dt><dd>「深色」按钮旁新增一个齿轮按钮，点击展开下拉面板；原先常驻顶栏的<b>账户、API 接入中心、版本号、连通性测试、数据源切换</b>五个入口全部收进面板内，点击页面其他位置自动收起。顶栏现在只留 模式开关 · 语言 · 全屏 · 深色 · 齿轮，清爽不少。面板内各项功能与原先完全一致：版本号仍可点开更新日志，连通性测试仍带独立详情面板，账户按钮仍展开登录／账户卡片。</dd></dl><hr>` + v2127SettingsGearChangelog;
 
 
   // 旧版本默认收起，确保用户打开日志时首先看到当前版本的完整变更。
@@ -14834,7 +14870,8 @@ $("appVersion")?.addEventListener("click", () => {
       log = $("versionChangelog");
     if (!version || !log || log.hidden) return;
     const rect = version.getBoundingClientRect(),
-      width = Math.min(340, innerWidth - 28);
+      // 实测宽度而非估算值：CSS 宽度是 min(480px, …)，按旧 340 钳制会溢出右边缘。
+      width = Math.min(log.offsetWidth || 480, innerWidth - 28);
     log.style.top = `${rect.bottom + 8}px`;
     log.style.left = `${Math.max(14, Math.min(innerWidth - width - 14, rect.left))}px`;
     log.style.right = "auto";
@@ -16601,12 +16638,9 @@ positionCalc = function () {
     setCoinMode(chip.dataset.mode);
   });
 
-  // 账号按钮由 cloud-alerts.js 稍后插入，顺序可能被改写；用观察器兜住位置。
+  // 账号按钮已由 v2.12.7 收进设置面板；模式开关固定插在顶栏最前（账户按钮左侧不再成立）。
   const placeModeButton = () => {
-    const account = $("accountLoginToggle");
-    if (account) {
-      if (account.previousElementSibling !== modeBtn) header.insertBefore(modeBtn, account);
-    } else if (header.firstElementChild !== modeBtn) {
+    if (header.firstElementChild !== modeBtn) {
       header.insertBefore(modeBtn, header.firstElementChild);
     }
   };
@@ -16698,10 +16732,9 @@ positionCalc = function () {
     notifyCoinChanged();
   }
   function notifyCoinChanged() {
-    const label = coinLabel() + "（" + coinNameOf() + "）";
+    /* v2.12.6：不再弹「已切换到 XX」提示 —— 切换后标签、chip 高亮与各面板
+       都在原地即时刷新，切换结果对用户已经可见，弹窗反而要手动点掉。 */
     window.dispatchEvent(new CustomEvent("btc:coin-changed", { detail: { coin: activeCoin(), mode: coinMode } }));
-    try { showAppDialog({ message: "已切换到 " + label + "，正在重新加载该币种的全部数据。", confirmText: "好" }); }
-    catch { /* 弹层未就绪时静默 */ }
   }
   /** 切换后逐个重拉与币种相关的面板；任一面板自身失败不该影响其它面板。 */
   function refreshCoinPanels() {

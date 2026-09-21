@@ -14521,3 +14521,69 @@ html[data-theme="light"] .controls #coinModeToggle button:hover { color: #1a1d23
   .coin-switcher .coin-chip { padding: 6px 10px; }
   .coin-switcher .coin-chip .coin-chip-name { display: none; }
 }
+
+/* ══ 顶栏设置齿轮 + 下拉面板（v2.12.7）══════════════════════════════════
+   「账户 / API 接入中心 / 版本 / 连通性测试 / 数据源」收进齿轮面板，
+   顶栏只留 模式开关 · 语言 · 全屏 · 深色 · 齿轮。 */
+main > header .controls {
+  position: relative;
+}
+#headerSettingsPanel {
+  position: absolute;
+  z-index: 210;
+  top: calc(100% + 10px);
+  right: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  width: max-content;
+  max-width: min(560px, calc(100vw - 28px));
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 16px;
+  background: linear-gradient(
+    145deg,
+    rgba(31, 38, 48, 0.98),
+    rgba(14, 18, 25, 0.98)
+  );
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    0 22px 60px rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(30px) saturate(160%);
+  -webkit-backdrop-filter: blur(30px) saturate(160%);
+}
+#headerSettingsPanel[hidden] {
+  display: none;
+}
+/* 面板里的按钮沿用顶栏紫色胶囊视觉（原先靠 .controls > button 直子代选择器，
+   收进面板后不再是 .controls 的直子代，这里补等价规则）。 */
+main > header .controls #headerSettingsPanel > button,
+main > header .controls #headerSettingsPanel > label > select {
+  box-sizing: border-box;
+  min-height: 36px;
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid rgba(176, 159, 223, 0.3);
+  border-radius: 999px;
+  background: rgba(111, 83, 159, 0.2);
+  color: #e7eafb;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+}
+main > header .controls #headerSettingsPanel > label {
+  display: inline-flex;
+  align-items: center;
+}
+main > header .controls #headerSettingsPanel #appVersion {
+  cursor: pointer;
+  min-width: 0;
+}
+@media (max-width: 640px) {
+  #headerSettingsPanel {
+    right: auto;
+    left: 0;
+    max-width: calc(100vw - 24px);
+  }
+}
