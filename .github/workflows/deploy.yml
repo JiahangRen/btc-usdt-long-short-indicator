@@ -15,15 +15,14 @@ on:
           - configure-env
           - deploy
 
-# One concurrency group per target so a deploy to one host never cancels a
-# deploy to the other. Both matrix jobs run in parallel on a single push.
-concurrency:
-  group: production-${{ matrix.target }}
-  cancel-in-progress: true
-
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # One concurrency group per target so a deploy to one host never cancels a
+    # deploy to the other. Both matrix jobs run in parallel on a single push.
+    concurrency:
+      group: production-${{ matrix.target }}
+      cancel-in-progress: true
     # Never abort the other target just because one fails its health check.
     strategy:
       fail-fast: false
@@ -31,14 +30,13 @@ jobs:
         include:
           - target: legacy
             verify_url: https://renjiahang1201.xyz/api/status
-            deploy_host: ${{ secrets.DEPLOY_HOST }}
-            deploy_user: ${{ secrets.DEPLOY_USER }}
-            deploy_key_b64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
           - target: hk
             verify_url: https://jeffereyreng.site/api/status
-            deploy_host: ${{ secrets.DEPLOY_HOST_HK }}
-            deploy_user: ${{ secrets.DEPLOY_USER_HK }}
-            deploy_key_b64: ${{ secrets.DEPLOY_SSH_KEY_HK_B64 }}
+    # Secrets can't be referenced inside matrix.include, so map them per target here.
+    env:
+      DEPLOY_HOST: ${{ matrix.target == 'hk' && secrets.DEPLOY_HOST_HK || secrets.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ matrix.target == 'hk' && secrets.DEPLOY_USER_HK || secrets.DEPLOY_USER }}
+      DEPLOY_KEY_B64: ${{ matrix.target == 'hk' && secrets.DEPLOY_SSH_KEY_HK_B64 || secrets.DEPLOY_SSH_KEY_B64 }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
@@ -46,9 +44,9 @@ jobs:
       - name: Configure SSH
         id: ssh
         env:
-          DEPLOY_HOST: ${{ matrix.deploy_host }}
-          DEPLOY_USER: ${{ matrix.deploy_user }}
-          DEPLOY_SSH_KEY_B64: ${{ matrix.deploy_key_b64 }}
+          DEPLOY_HOST: ${{ env.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ env.DEPLOY_USER }}
+          DEPLOY_SSH_KEY_B64: ${{ env.DEPLOY_KEY_B64 }}
         run: |
           if [ -z "$DEPLOY_HOST" ] || [ -z "$DEPLOY_USER" ] || [ -z "$DEPLOY_SSH_KEY_B64" ]; then
             echo "ready=false" >> "$GITHUB_OUTPUT"
@@ -70,8 +68,8 @@ jobs:
       - name: Preflight remote runtime
         if: steps.ssh.outputs.ready == 'true'
         env:
-          DEPLOY_HOST: ${{ matrix.deploy_host }}
-          DEPLOY_USER: ${{ matrix.deploy_user }}
+          DEPLOY_HOST: ${{ env.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ env.DEPLOY_USER }}
         run: |
           # This read-only check must pass before source synchronization. It is
           # also the default manual workflow mode for testing SSH credentials.
@@ -90,8 +88,8 @@ jobs:
       - name: Synchronize application
         if: steps.ssh.outputs.ready == 'true' && (github.event_name == 'push' || inputs.mode == 'deploy')
         env:
-          DEPLOY_HOST: ${{ matrix.deploy_host }}
-          DEPLOY_USER: ${{ matrix.deploy_user }}
+          DEPLOY_HOST: ${{ env.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ env.DEPLOY_USER }}
         run: |
           # Market history and training samples are a persistent server-side
           # SQLite, production secrets and the current release must never be
@@ -128,8 +126,8 @@ jobs:
       - name: Configure cloud alert secrets
         if: steps.ssh.outputs.ready == 'true' && inputs.mode == 'configure-env'
         env:
-          DEPLOY_HOST: ${{ matrix.deploy_host }}
-          DEPLOY_USER: ${{ matrix.deploy_user }}
+          DEPLOY_HOST: ${{ env.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ env.DEPLOY_USER }}
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
           ALERT_ENCRYPTION_KEY: ${{ secrets.ALERT_ENCRYPTION_KEY }}
         run: |
@@ -163,8 +161,8 @@ jobs:
         id: deploy_app
         if: steps.ssh.outputs.ready == 'true' && (github.event_name == 'push' || inputs.mode == 'deploy')
         env:
-          DEPLOY_HOST: ${{ matrix.deploy_host }}
-          DEPLOY_USER: ${{ matrix.deploy_user }}
+          DEPLOY_HOST: ${{ env.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ env.DEPLOY_USER }}
         run: |
           ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p 22 "$DEPLOY_USER@$DEPLOY_HOST" 'bash /opt/btc-usdt-long-short-indicator/scripts/deploy-production.sh'
 
@@ -181,8 +179,8 @@ jobs:
         # restores the same pre-deploy snapshot).
         if: always() && steps.ssh.outputs.ready == 'true' && (github.event_name == 'push' || inputs.mode == 'deploy') && (steps.deploy_app.outcome == 'failure' || steps.verify_production.outcome == 'failure')
         env:
-          DEPLOY_HOST: ${{ matrix.deploy_host }}
-          DEPLOY_USER: ${{ matrix.deploy_user }}
+          DEPLOY_HOST: ${{ env.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ env.DEPLOY_USER }}
         run: |
           ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p 22 "$DEPLOY_USER@$DEPLOY_HOST" 'bash /opt/btc-usdt-long-short-indicator/scripts/rollback-production.sh'
           exit 1
