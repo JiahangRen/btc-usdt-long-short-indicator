@@ -84,6 +84,8 @@ services:
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
+    environment:
+      SITE_DOMAIN: ${SITE_DOMAIN:-renjiahang1201.xyz}
     depends_on:
       - app
     ports:
