@@ -838,8 +838,10 @@ function flushSyntheticCandles() {
   const pending = [...syntheticCandleBuffer.values()];
   syntheticCandleBuffer.clear();
   // 每个币种写自己的库：必须显式进入该币种的上下文，否则会串写到 BTC。
+  // ⚠️ run() 的 store 必须是 { coin } 对象：currentCoin() 读 store.coin，
+  // 传裸字符串会解析成 undefined → 静默回落 BTC（2026-09-21 踩过）。
   for (const coin of new Set(pending.map(c => c.coin))) {
-    coinScope.run(coin, () => safelyStore(() => {
+    coinScope.run({ coin }, () => safelyStore(() => {
       for (const c of pending) if (c.coin === coin) upsertSyntheticOkxCandle.run(c.interval, c.bucketAt, c.open, c.high, c.low, c.close, c.volume, c.updatedAt);
     }));
   }
@@ -1008,7 +1010,8 @@ function okxDerivativeFeatures(now = Date.now(), coin = currentCoin()) {
 // 每个币种各存一份衍生品快照；必须进入对应币种上下文，否则会落到 BTC 库里。
 function persistOkxDerivativeSnapshot() {
   for (const { coin, state } of allOkxStreams()) {
-    coinScope.run(coin, () => {
+    // store 必须是 { coin } 对象（currentCoin() 读 store.coin），传裸字符串会回落 BTC。
+    coinScope.run({ coin }, () => {
       const takerFlow = recentTakerFlow(Date.now(), coin), book = state.orderBook;
       persistDerivativeSnapshot('okx', {
         fundingRate:state.fundingRate, oi:state.oi,
@@ -1051,7 +1054,9 @@ function updateOkxStream(message) {
   if (!coin) return;
   const st = streamFor(coin);
   // 写库操作必须在该币种上下文里跑，否则快照会串进 BTC 库。
-  const inCoin = (work) => coinScope.run(coin, work);
+  // ⚠️ store 必须是 { coin } 对象（currentCoin() 读 store.coin）；传裸字符串
+  // 会静默回落 BTC，把所有币的行情写进 BTC 库（2026-09-21 踩过）。
+  const inCoin = (work) => coinScope.run({ coin }, work);
   const isSpot = isOkxSpotInstId(instId);
   if (channel === 'tickers' && !isSpot) {
     const ticker = { last:+row.last, open24h:+row.open24h, changePct:(+row.last / +row.open24h - 1) * 100, high24:+row.high24h, low24:+row.low24h };
@@ -3620,20 +3625,47 @@ async function equityHistory(symbol) {
   }
   throw new Error(failures.join('; '));
 }
+async function usMarketState() {
+  // 按美东时间推算盘前/盘中/盘后（美股常规交易 09:30–16:00 ET，周一至周五）。
+  const et = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  const day = et.getDay();
+  if (day === 0 || day === 6) return 'CLOSED';
+  const mins = et.getHours() * 60 + et.getMinutes();
+  if (mins < 9 * 60 + 30) return 'PRE';
+  if (mins <= 16 * 60) return 'REGULAR';
+  return 'POST';
+}
+async function tencentLiveEquityQuote(symbol) {
+  // 腾讯财经实时美股（亚洲托管，从 HK 稳定可达）。返回 v_usSPY="...~当前价~昨收~今开~..."。
+  const sym = symbol.toUpperCase();
+  const raw = await requestText(`https://qt.gtimg.cn/q=us${sym}`, 5_000);
+  const m = raw.match(new RegExp(`v_us${sym}="([^"]*)"`));
+  if (!m) throw new Error(`${sym} live quote unavailable`);
+  const f = m[1].split('~');
+  const last = Number(f[3]), previous = Number(f[4]);
+  if (!Number.isFinite(last) || !Number.isFinite(previous) || previous <= 0) throw new Error(`${sym} live quote unavailable`);
+  const state = usMarketState();
+  return { symbol, last, previous, marketState: state, regularSession: state === 'REGULAR', source: 'Tencent (gtimg)' };
+}
 async function yahooLiveEquityQuote(symbol) {
   const raw = await request(`https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=1d&interval=1m&includePrePost=false`, 5_000);
   const meta = raw?.chart?.result?.[0]?.meta || {};
   const last = Number(meta.regularMarketPrice), previous = Number(meta.regularMarketPreviousClose ?? meta.previousClose);
   if (!Number.isFinite(last) || !Number.isFinite(previous) || previous <= 0) throw new Error(`${symbol} live quote unavailable`);
   const regular = meta.currentTradingPeriod?.regular, regularSession=Number(regular?.start) * 1000 <= Date.now() && Date.now() < Number(regular?.end) * 1000;
-  return { symbol, last, previous, marketState:String(meta.marketState || '').toUpperCase(), regularSession };
+  return { symbol, last, previous, marketState:String(meta.marketState || '').toUpperCase(), regularSession, source:'Yahoo Finance' };
+}
+async function liveEquityQuote(symbol) {
+  // 主源腾讯（亚洲托管，从 HK 稳定可达），失败回退 Yahoo（旧站稳定；新站美源不稳时也可能失败）。
+  try { return await tencentLiveEquityQuote(symbol); } catch { /* fall through to Yahoo */ }
+  return yahooLiveEquityQuote(symbol);
 }
 async function usEquityQuotes() {
   const key = 'us-equity-quotes', hit = cache.get(key);
   if (hit && Date.now() - hit.time < 10_000) return cacheResult(hit);
   try {
-    const quotes = await Promise.all(['SPY','QQQ'].map(yahooLiveEquityQuote));
-    const value = { open:quotes.every(quote => quote.marketState === 'REGULAR' || quote.regularSession), quotes, source:'Yahoo Finance', fetchedAt:Date.now(), cached:false };
+    const quotes = await Promise.all(['SPY','QQQ'].map(liveEquityQuote));
+    const value = { open:quotes.every(quote => quote.marketState === 'REGULAR' || quote.regularSession), quotes, source: quotes[0]?.source || 'Tencent (gtimg)', fetchedAt:Date.now(), cached:false };
     remember(key, value); return value;
   } catch {
     // A missing live quote must not be rendered as a stale or empty market row.
@@ -3706,6 +3738,58 @@ const mime = { '.html':'text/html; charset=utf-8', '.js':'text/javascript; chars
 // Whether the text contains anything pronounceable. Punctuation-, symbol- or
 // whitespace-only input carries no phonemes, so Edge returns zero audio.
 const hasSpeakableContent = value => /[\p{L}\p{N}]/u.test(value);
+// Edge 音色名 → Piper 音色（本地 sidecar，零网络依赖、无解地区问题）。
+// 键值是前端仍在用的 Edge 名（前端无需改动），值是 Piper 标准语音 ID。
+const EDGE_TO_PIPER = {
+  'zh-CN-XiaoxiaoNeural': 'zh_CN-huayan-medium',
+  'zh-CN-XiaoyiNeural': 'zh_CN-xiaoyi-medium',
+  'zh-CN-liaoning-XiaobeiNeural': 'zh_CN-liaoning-xiaobei-medium',
+  'zh-CN-shaanxi-XiaoniNeural': 'zh_CN-shaanxi-xiaoni-medium',
+  'zh-TW-HsiaoChenNeural': 'zh_TW-huayu-medium',
+  'zh-CN-YunxiNeural': 'zh_CN-yunxi-medium',
+  'zh-CN-YunyangNeural': 'zh_CN-yunyang-medium',
+  'en-US-AvaNeural': 'en_US-amy-medium',
+  'en-US-EmmaNeural': 'en_US-emma-medium',
+  'en-US-AnaNeural': 'en_US-ana-medium',
+  'en-US-AriaNeural': 'en_US-aria-medium',
+  'en-US-JennyNeural': 'en_US-jenny-medium',
+  'en-US-MichelleNeural': 'en_US-michelle-medium',
+  'en-US-AndrewNeural': 'en_US-andrew-medium',
+  'en-US-BrianNeural': 'en_US-brian-medium',
+  'en-US-ChristopherNeural': 'en_US-chris-medium',
+  'en-US-EricNeural': 'en_US-eric-medium',
+  'en-US-GuyNeural': 'en_US-guy-medium',
+  'en-US-RogerNeural': 'en_US-ryan-medium',
+  'en-US-SteffanNeural': 'en_US-steffan-medium',
+};
+async function piperTtsAudio(text, voice = 'zh-CN-XiaoxiaoNeural', attempts = 2) {
+  if (!hasSpeakableContent(text)) throw Object.assign(new Error('Voice text has no pronounceable content'), { code: 'EMPTY_TEXT' });
+  const piperUrl = process.env.PIPER_URL || 'http://piper:8080';
+  const piperVoice = EDGE_TO_PIPER[voice] || (voice.startsWith('en') ? 'en_US-lessac-medium' : 'zh_CN-huayan-medium');
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 15_000);
+      const r = await fetch(`${piperUrl}/api/tts`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ text, voice: piperVoice, outputFormat: 'mp3' }),
+        signal: ctrl.signal,
+      });
+      clearTimeout(timer);
+      if (!r.ok) throw new Error(`Piper HTTP ${r.status}`);
+      const audio = Buffer.from(await r.arrayBuffer());
+      if (!audio.length) throw new Error('Piper returned no audio');
+      return audio;
+    } catch (error) {
+      if (error.code === 'EMPTY_TEXT') throw error;
+      lastError = error;
+      if (attempt < attempts) await new Promise(resolve => setTimeout(resolve, 350 * attempt));
+    }
+  }
+  throw lastError;
+}
 async function edgeTtsAudio(text, voice='zh-CN-XiaoxiaoNeural', attempts=2) {
   if (!hasSpeakableContent(text)) throw Object.assign(new Error('Voice text has no pronounceable content'), { code:'EMPTY_TEXT' });
   let lastError;
@@ -3772,7 +3856,13 @@ http.createServer((req, res) => {
       // 长度校验属于请求问题，直接 400；不要落进下面的上游 catch 被报成 503。
       if(!safeText||safeText.length>240) { json(res,400,{error:'Voice text must be 1–240 characters',detail:'播报文本长度需在 1–240 个字符之间'}); return; }
       const safeVoice=['zh-CN-XiaoxiaoNeural','zh-CN-XiaoyiNeural','zh-CN-liaoning-XiaobeiNeural','zh-CN-shaanxi-XiaoniNeural','zh-TW-HsiaoChenNeural','zh-HK-HiuGaaiNeural','zh-CN-YunxiNeural','zh-CN-YunyangNeural','en-US-AvaNeural','en-US-EmmaNeural','en-US-AnaNeural','en-US-AriaNeural','en-US-JennyNeural','en-US-MichelleNeural','en-US-AndrewNeural','en-US-BrianNeural','en-US-ChristopherNeural','en-US-EricNeural','en-US-GuyNeural','en-US-RogerNeural','en-US-SteffanNeural'].includes(voice)?voice:'zh-CN-XiaoxiaoNeural';
-      const audio=await edgeTtsAudio(safeText,safeVoice);
+      let audio;
+      try {
+        audio = await piperTtsAudio(safeText, safeVoice); // 本地 Piper 优先（零网络、无解地区问题）
+      } catch (piperErr) {
+        if (piperErr.code === 'EMPTY_TEXT') throw piperErr;
+        audio = await edgeTtsAudio(safeText, safeVoice); // Piper 不可用时回退 Edge（旧站可用；新站美源不稳可能仍失败）
+      }
       res.writeHead(200,{'content-type':'audio/mpeg','cache-control':'no-store','content-length':audio.length});res.end(audio);
     } catch(error) {
       // 文本无可朗读内容属于请求本身的问题，返回 400 并说明原因；只有上游真的
