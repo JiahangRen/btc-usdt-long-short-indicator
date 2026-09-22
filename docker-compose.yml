@@ -12,6 +12,9 @@ services:
       REDIS_URL: redis://redis:6379
       ALERT_ENCRYPTION_KEY: ${ALERT_ENCRYPTION_KEY:?set ALERT_ENCRYPTION_KEY}
       ALERT_COOKIE_SECURE: "true"
+      # Azure AI Speech：语音播报的主链路。留空则回退 Edge TTS。
+      AZURE_SPEECH_KEY: ${AZURE_SPEECH_KEY:-}
+      AZURE_SPEECH_REGION: ${AZURE_SPEECH_REGION:-eastasia}
     expose:
       - "8787"
     ports:

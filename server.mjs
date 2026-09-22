@@ -873,7 +873,6 @@ const VOICE_STATE_FILE = join(DATA_DIR, 'voice_state.json');
 const VOICE_HEARTBEAT_TIMEOUT_MS = 60_000; // 保留会话状态读数；不触发服务端接力
 const VOICE_RELAY_INTERVAL_MS = 2_000;
 const SERVER_VOICE_RELAY_ENABLED = false;
-const RELAY_VOICE_ALLOWLIST = ['zh-CN-XiaoxiaoNeural','zh-CN-XiaoyiNeural','zh-CN-YunxiNeural','zh-CN-YunyangNeural','zh-CN-shaanxi-XiaoniNeural','zh-CN-liaoning-XiaobeiNeural','zh-HK-HiuGaaiNeural','zh-TW-HsiaoChenNeural'];
 let voiceState = { settings:null, personalEntries:[], rules:[], lastHeartbeatAt:0, lastSpokenAt:0, inFlightUntil:0 };
 const loadVoiceState = () => {
   try {
@@ -920,8 +919,12 @@ function describePersonalEntries(last) {
   return `BTC 当前价格 ${fmt(last)} 美元。${comparisons.join('')}`;
 }
 async function playVoiceOnServer(text, voice) {
-  const safeVoice = RELAY_VOICE_ALLOWLIST.includes(voice) ? voice : 'zh-CN-XiaoxiaoNeural';
-  const audio = await edgeTtsAudio(text.slice(0, 240), safeVoice);
+  // 音色来自前端下拉（Azure 音色表）：格式非法时这里**记一条告警再用默认音色** ——
+  // 这是无人值守的服务端接力播报，出声比沉默重要；但绝不静默，日志里必须留痕。
+  let safeVoice;
+  try { safeVoice = resolveAzureVoice(voice); }
+  catch (error) { console.warn(`[voice] relay ${error.message} → 回退默认音色`); safeVoice = 'zh-CN-XiaoxiaoNeural'; }
+  const { audio } = await speechAudio(text.slice(0, 240), safeVoice);
   const tmp = join(DATA_DIR, `voice-${Date.now()}-${Math.random().toString(36).slice(2, 7)}.mp3`);
   writeFileSync(tmp, audio);
   await new Promise(resolve => execFile('afplay', [tmp], error => { if (error) console.warn('[voice] afplay error:', error.message); resolve(); }))
@@ -1206,6 +1209,62 @@ async function requestText(url, timeout = 8_000) {
     clearTimeout(timer);
     if (scope) { scope.upstreamEnded = performance.now(); scope.upstreamCalls += 1; }
   }
+}
+// ── 连通性真延时探测 ────────────────────────────────────────────────────────
+// 面板过去显示的「上游 0 ms」是缓存短路造成的假象：业务端点命中缓存就直接返回，
+// 根本不会发起上游请求，upstreamMs 自然恒为 0（绿灯也因而是假的）。这里绕开所有
+// 业务缓存，由服务器直接向各服务商的真实端点发请求并计时，拿到的就是
+// 「服务器 → 服务商」的真实往返延时 —— 慢的会显示成秒级并转红。
+const CONNECTIVITY_PROBES = [
+  { group: 'exchange', name: 'OKX', host: 'www.okx.com', url: 'https://www.okx.com/api/v5/public/time' },
+  { group: 'exchange', name: 'Binance', host: 'api.binance.com', url: 'https://api.binance.com/api/v3/time' },
+  { group: 'exchange', name: 'Coinbase', host: 'api.exchange.coinbase.com', url: 'https://api.exchange.coinbase.com/time' },
+  { group: 'exchange', name: 'Gate.io', host: 'api.gateio.ws', url: 'https://api.gateio.ws/api/v4/spot/currencies?limit=1' },
+  { group: 'exchange', name: 'Deribit', host: 'api.deribit.com', url: 'https://api.deribit.com/api/v2/public/time' },
+  { group: 'macro', name: 'FRED 美联储经济数据', host: 'fred.stlouisfed.org', url: 'https://fred.stlouisfed.org/graph/fredgraph.csv?id=UNRATE' },
+  { group: 'macro', name: 'BLS 劳工统计局', host: 'api.bls.gov', url: 'https://api.bls.gov/publicAPI/v2/status' },
+  { group: 'macro', name: '美国财政部 Treasury', host: 'home.treasury.gov', url: 'https://home.treasury.gov/' },
+  { group: 'macro', name: '东方财富数据中心', host: 'datacenter-web.eastmoney.com', url: 'https://datacenter-web.eastmoney.com/api/data/v1/get' },
+  { group: 'sentiment', name: '恐惧&贪婪 Alternative.me', host: 'api.alternative.me', url: 'https://api.alternative.me/fng/' },
+  { group: 'sentiment', name: 'CoinGecko', host: 'api.coingecko.com', url: 'https://api.coingecko.com/api/v3/ping' },
+  { group: 'sentiment', name: 'mempool.space 链上', host: 'mempool.space', url: 'https://mempool.space/api/blocks/tip/height' },
+  { group: 'service', name: 'Google News', host: 'news.google.com', url: 'https://news.google.com/rss/search?q=bitcoin' },
+  { group: 'service', name: 'Yahoo Finance', host: 'query1.finance.yahoo.com', url: 'https://query1.finance.yahoo.com/v8/finance/chart/AAPL?range=1d&interval=1d' },
+  // DashScope 不带凭据会回 401、语音实际走的是下面的 WebSocket 网关：
+  // 非 2xx 同样说明服务端连得上，探测看的是「到服务端的往返」，不是这条路径有没有数据。
+  { group: 'service', name: '阿里云通义 DashScope', host: 'dashscope.aliyuncs.com', url: 'https://dashscope.aliyuncs.com/compatible-mode/v1/models' },
+  { group: 'service', name: 'Microsoft Azure AI Speech', host: 'eastasia.tts.speech.microsoft.com', url: 'https://eastasia.tts.speech.microsoft.com/tts/cognitiveservices/voices/list' },
+];
+const CONNECTIVITY_PROBE_TIMEOUT = 8_000;
+async function probeSingleConnectivity(probe) {
+  const started = performance.now();
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), CONNECTIVITY_PROBE_TIMEOUT);
+  try {
+    const r = await fetch(probe.url, {
+      signal: ctrl.signal,
+      redirect: 'follow',
+      headers: { accept: 'application/json,text/plain,*/*', 'user-agent': 'BTC-Indicator/ConnectivityProbe' },
+    });
+    const ms = Math.round(performance.now() - started);
+    // 延时算到「拿到响应头」为止：不要接着读 body，否则大文件会把下载时间也算进去，
+    // 探测出来的就不是网络往返了。
+    try { await r.arrayBuffer(); } catch { /* 只用于释放连接，不影响已记录的耗时 */ }
+    return { ...probe, ms, ok: true, status: r.status };
+  } catch (error) {
+    return {
+      ...probe,
+      ms: Math.round(performance.now() - started),
+      ok: false,
+      status: 0,
+      error: error?.name === 'AbortError' ? `timeout ${CONNECTIVITY_PROBE_TIMEOUT}ms` : String(error?.message || error),
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+async function runConnectivityProbe() {
+  return Promise.all(CONNECTIVITY_PROBES.map(probeSingleConnectivity));
 }
 async function fromGate(interval, limit) {
   const [ticker, rows] = await Promise.all([
@@ -3625,14 +3684,20 @@ async function equityHistory(symbol) {
   }
   throw new Error(failures.join('; '));
 }
-async function usMarketState() {
+function usMarketState() {
   // 按美东时间推算盘前/盘中/盘后（美股常规交易 09:30–16:00 ET，周一至周五）。
-  const et = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
-  const day = et.getDay();
-  if (day === 0 || day === 6) return 'CLOSED';
-  const mins = et.getHours() * 60 + et.getMinutes();
+  // ⚠️ 必须保持「同步」：调用方 tencentLiveEquityQuote 直接取返回值塞进 marketState。
+  // 这里若改成 async，漏掉 await 会把 Promise 序列化成 {}，使 marketState 永远不等于
+  // 'REGULAR'、open 恒为 false —— 顶部美股条在盘中永远不出现（2026-09-22 踩过这个坑）。
+  // 用 formatToParts + hourCycle:'h23' 取字段，避免 new Date(toLocaleString(...)) 对非 ISO 串的宽松解析。
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).formatToParts(new Date());
+  const get = type => parts.find(x => x.type === type)?.value;
+  if (['Sat', 'Sun'].includes(get('weekday'))) return 'CLOSED';
+  const mins = Number(get('hour')) * 60 + Number(get('minute'));
   if (mins < 9 * 60 + 30) return 'PRE';
-  if (mins <= 16 * 60) return 'REGULAR';
+  if (mins < 16 * 60) return 'REGULAR';
   return 'POST';
 }
 async function tencentLiveEquityQuote(symbol) {
@@ -3738,57 +3803,151 @@ const mime = { '.html':'text/html; charset=utf-8', '.js':'text/javascript; chars
 // Whether the text contains anything pronounceable. Punctuation-, symbol- or
 // whitespace-only input carries no phonemes, so Edge returns zero audio.
 const hasSpeakableContent = value => /[\p{L}\p{N}]/u.test(value);
-// Edge 音色名 → Piper 音色（本地 sidecar，零网络依赖、无解地区问题）。
-// 键值是前端仍在用的 Edge 名（前端无需改动），值是 Piper 标准语音 ID。
-const EDGE_TO_PIPER = {
-  'zh-CN-XiaoxiaoNeural': 'zh_CN-huayan-medium',
-  'zh-CN-XiaoyiNeural': 'zh_CN-xiaoyi-medium',
-  'zh-CN-liaoning-XiaobeiNeural': 'zh_CN-liaoning-xiaobei-medium',
-  'zh-CN-shaanxi-XiaoniNeural': 'zh_CN-shaanxi-xiaoni-medium',
-  'zh-TW-HsiaoChenNeural': 'zh_TW-huayu-medium',
-  'zh-CN-YunxiNeural': 'zh_CN-yunxi-medium',
-  'zh-CN-YunyangNeural': 'zh_CN-yunyang-medium',
-  'en-US-AvaNeural': 'en_US-amy-medium',
-  'en-US-EmmaNeural': 'en_US-emma-medium',
-  'en-US-AnaNeural': 'en_US-ana-medium',
-  'en-US-AriaNeural': 'en_US-aria-medium',
-  'en-US-JennyNeural': 'en_US-jenny-medium',
-  'en-US-MichelleNeural': 'en_US-michelle-medium',
-  'en-US-AndrewNeural': 'en_US-andrew-medium',
-  'en-US-BrianNeural': 'en_US-brian-medium',
-  'en-US-ChristopherNeural': 'en_US-chris-medium',
-  'en-US-EricNeural': 'en_US-eric-medium',
-  'en-US-GuyNeural': 'en_US-guy-medium',
-  'en-US-RogerNeural': 'en_US-ryan-medium',
-  'en-US-SteffanNeural': 'en_US-steffan-medium',
+// ---------------------------------------------------------------------------
+// 语音合成：Azure AI Speech Service（微软官方 REST 服务，主链路）
+// 兜底：Edge TTS（同为微软服务，无 key 或 Azure 失败时使用）
+// 本地 Piper 已彻底移除：它需要 sidecar 容器、音质差，而 compose 里从未部署过它，
+// 所以这条分支一直在打一个不存在的地址。
+// 凭据优先级：环境变量 AZURE_SPEECH_KEY / AZURE_SPEECH_REGION → 加密凭据文件（含 region）。
+// ---------------------------------------------------------------------------
+const AZURE_TTS_TIMEOUT_MS = 15_000;
+const AZURE_TTS_OUTPUT_FORMAT = 'audio-24khz-48kbitrate-mono-mp3';
+const AZURE_VOICES_TTL_MS = 24 * 60 * 60 * 1000;
+const AZURE_VOICES_CACHE_FILE = join(DATA_DIR, 'azure-voices.json');
+let azureVoicesCache = null;
+function azureSpeechCredential() {
+  const saved = apiCredentials.azureSpeech && typeof apiCredentials.azureSpeech === 'object' ? apiCredentials.azureSpeech : {};
+  const key = String(process.env.AZURE_SPEECH_KEY || saved.key || '').trim();
+  const region = String(process.env.AZURE_SPEECH_REGION || saved.region || '').trim();
+  return key && region ? { key, region } : null;
+}
+// 播报文本会被拼进 XML 节点、音色名拼进 XML 属性：文本必须转义、音色名必须格式校验。
+// 否则一段带尖括号的行情文案就能把整条 SSML 冲垮，或让 Azure 直接返回 400。
+const escapeSsml = value => String(value).replace(/[&<>"']/g, ch => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&apos;' }[ch]));
+const AZURE_VOICE_PATTERN = /^[a-z]{2}-[A-Za-z0-9-]{2,60}(?::[A-Za-z0-9-]{2,60})?$/;
+/* ⚠️ 白名单必须放行冒号：Azure 的 ShortName 有两种形态 —— 经典 `zh-CN-YunhaoNeural`，
+   以及带代次后缀的 `zh-CN-Yunhan:DragonHDLatestNeural`（HD 超清 / 极速 / MAI 二代中文音色
+   全是这种冒号写法）。旧表 /^[a-z]{2}-[A-Za-z0-9-]{2,60}$/ 把带代次的音色全判成非法，
+   再「静默替换成 zh-CN-XiaoxiaoNeural」—— 症状是「点任何 HD 男声都念同一个女声」，
+   与其它故障极难区分（2026-09-22 实测：云瀚 / 云泽 HD 与晓晓的音频字节长度完全相同，
+   而真正生效的经典音色长度各不相同）。校验只为挡 SSML 注入，故只须禁掉空白与引号尖括号。
+   Voice names for HD/MAI Chinese voices contain a colon; the old pattern silently downgraded
+   every one of them to Xiaoxiao (female), which is impossible to distinguish from other bugs. */
+/* 音色解析：**没给名字**才用默认；给了但格式非法一律报错，绝不悄悄换成另一个音色 ——
+   让用户听到的不是他选的音色，这类静默降级比直接失败危险得多。 */
+const resolveAzureVoice = voice => {
+  const name = String(voice || '').trim();
+  if (!name) return 'zh-CN-XiaoxiaoNeural';
+  if (!AZURE_VOICE_PATTERN.test(name))
+    throw Object.assign(new Error(`Invalid Azure voice name: ${name.slice(0, 60)}`), { code: 'INVALID_VOICE', statusCode: 400 });
+  return name;
 };
-async function piperTtsAudio(text, voice = 'zh-CN-XiaoxiaoNeural', attempts = 2) {
+// zh-CN → zh-CN、zh-CN-liaoning-XiaobeiNeural → zh-CN（locale 永远取前两段）。
+const azureVoiceLocale = voice => (/^[a-z]{2}-[A-Za-z]{2}/.exec(String(voice)) || ['en-US'])[0];
+async function azureTtsAudio(text, voice = 'zh-CN-XiaoxiaoNeural', attempts = 2) {
   if (!hasSpeakableContent(text)) throw Object.assign(new Error('Voice text has no pronounceable content'), { code: 'EMPTY_TEXT' });
-  const piperUrl = process.env.PIPER_URL || 'http://piper:8080';
-  const piperVoice = EDGE_TO_PIPER[voice] || (voice.startsWith('en') ? 'en_US-lessac-medium' : 'zh_CN-huayan-medium');
+  const credential = azureSpeechCredential();
+  if (!credential) throw Object.assign(new Error('Azure Speech key/region not configured'), { code: 'NO_CREDENTIAL' });
+  const safeVoice = resolveAzureVoice(voice);
+  const ssml = `<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='${azureVoiceLocale(safeVoice)}'>`
+    + `<voice name='${escapeSsml(safeVoice)}'><prosody rate='+5%'>${escapeSsml(text)}</prosody></voice></speak>`;
   let lastError;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), AZURE_TTS_TIMEOUT_MS);
     try {
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 15_000);
-      const r = await fetch(`${piperUrl}/api/tts`, {
+      const response = await fetch(`https://${credential.region}.tts.speech.microsoft.com/cognitiveservices/v1`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ text, voice: piperVoice, outputFormat: 'mp3' }),
+        headers: {
+          'Ocp-Apim-Subscription-Key': credential.key,
+          'Content-Type': 'application/ssml+xml',
+          'X-Microsoft-OutputFormat': AZURE_TTS_OUTPUT_FORMAT,
+          'User-Agent': 'btc-indicator',
+        },
+        body: ssml,
         signal: ctrl.signal,
       });
-      clearTimeout(timer);
-      if (!r.ok) throw new Error(`Piper HTTP ${r.status}`);
-      const audio = Buffer.from(await r.arrayBuffer());
-      if (!audio.length) throw new Error('Piper returned no audio');
-      return audio;
+      const body = Buffer.from(await response.arrayBuffer());
+      if (!response.ok) throw new Error(`Azure Speech HTTP ${response.status}${body.length ? ` ${body.toString('utf8').slice(0, 200)}` : ''}`);
+      if (!body.length) throw new Error('Azure Speech returned no audio');
+      return body;
     } catch (error) {
-      if (error.code === 'EMPTY_TEXT') throw error;
       lastError = error;
       if (attempt < attempts) await new Promise(resolve => setTimeout(resolve, 350 * attempt));
-    }
+    } finally { clearTimeout(timer); }
   }
   throw lastError;
+}
+// 统一合成入口：Azure 优先，失败回退 Edge，engine 会随响应头发回给前端便于诊断。
+async function speechAudio(text, voice) {
+  try { return { audio: await azureTtsAudio(text, voice), engine: 'azure' }; }
+  catch (error) {
+    if (error.code === 'EMPTY_TEXT' || error.code === 'INVALID_VOICE') throw error;
+    // 没配凭据时不算故障，静默走 Edge；配了却失败才告警，便于定位 key/额度问题。
+    if (azureSpeechCredential()) console.warn(`[voice] Azure Speech failed, falling back to Edge: ${error.message}`);
+    try { return { audio: await edgeTtsAudio(text, voice), engine: 'edge' }; }
+    catch (edgeError) {
+      // 两条链路都失败时把 Azure 的原因也带上：Edge 的报错常是「WebSocket closed abnormally:
+      // [object Object]」这类糊状信息，单看它无从判断是音色不可用、额度还是网络。
+      throw Object.assign(new Error(`Azure: ${error.message} / Edge: ${edgeError.message}`), { code: error.code });
+    }
+  }
+}
+// 音色清单：Azure 区域可用的全部音色。官方路径带 /tts 前缀，个别区域仍收旧路径，两条都试。
+async function azureVoices(force = false) {
+  const credential = azureSpeechCredential();
+  if (!credential) throw Object.assign(new Error('尚未配置 Azure Speech 的密钥与区域'), { code: 'NO_CREDENTIAL', statusCode: 400 });
+  if (!force && azureVoicesCache && Date.now() - azureVoicesCache.fetchedAt < AZURE_VOICES_TTL_MS) return azureVoicesCache.voices;
+  if (!force && !azureVoicesCache) {
+    try {
+      const cached = JSON.parse(readFileSync(AZURE_VOICES_CACHE_FILE, 'utf8'));
+      if (cached?.voices?.length && Date.now() - cached.fetchedAt < AZURE_VOICES_TTL_MS) { azureVoicesCache = cached; return azureVoicesCache.voices; }
+    } catch { /* 无缓存或缓存过期：重新拉取 */ }
+  }
+  const urls = [
+    `https://${credential.region}.tts.speech.microsoft.com/tts/cognitiveservices/voices/list`,
+    `https://${credential.region}.tts.speech.microsoft.com/cognitiveservices/voices/list`,
+  ];
+  let voices = null, lastError = null;
+  for (const endpoint of urls) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 20_000);
+    try {
+      const response = await fetch(endpoint, { headers: { 'Ocp-Apim-Subscription-Key': credential.key }, signal: ctrl.signal });
+      if (!response.ok) { lastError = new Error(`Azure voices HTTP ${response.status} via ${endpoint}`); continue; }
+      const raw = await response.json();
+      voices = raw
+        .map(item => ({
+          name: item.ShortName, display: item.DisplayName, local: item.LocalName,
+          locale: item.Locale, localeName: item.LocaleName, gender: item.Gender,
+          type: item.VoiceType, styles: item.StyleList || [], sampleRate: item.SampleRateHertz,
+        }))
+        .filter(item => item.name);
+      break;
+    } catch (error) { lastError = error; }
+    finally { clearTimeout(timer); }
+  }
+  if (!voices) throw lastError || new Error('Azure voices list unavailable');
+  azureVoicesCache = { fetchedAt: Date.now(), voices };
+  try { writeFileSync(AZURE_VOICES_CACHE_FILE, JSON.stringify(azureVoicesCache), { mode: 0o600 }); } catch { /* 缓存写失败不影响主流程 */ }
+  return voices;
+}
+/* 带代次的音色（ShortName 里带冒号：DragonHD… / MAI-Voice…）只在少数区域可用 ——
+   官方文档列的可用区域是 southeastasia、centralindia、swedencentral、westeurope、
+   eastus、eastus2、westus2，**eastasia 不在其中**：这些音色在 TTS 接口上一律回 400
+   （响应体为空），可音色清单里照样列着它们 →「列表里有、选了却合成不出来」，
+   旧代码更会静默换成晓晓（女声）。这里用一次 6 个字符的探测把「本区域能否合成 HD」
+   变成可下发的事实，前端据此把不可用的音色置灰并说明原因。探测结果缓存一天，
+   失败也只是一次请求，不影响清单下发。 */
+const AZURE_HD_PROBE_VOICE = 'en-US-Ava:DragonHDLatestNeural';
+let azureHdProbe = null;
+async function azureHdSupported() {
+  if (azureHdProbe && Date.now() - azureHdProbe.at < AZURE_VOICES_TTL_MS) return azureHdProbe.supported;
+  let supported = false;
+  try { await azureTtsAudio('Voice test', AZURE_HD_PROBE_VOICE, 1); supported = true; }
+  catch { supported = false; }
+  azureHdProbe = { supported, at: Date.now() };
+  return supported;
 }
 async function edgeTtsAudio(text, voice='zh-CN-XiaoxiaoNeural', attempts=2) {
   if (!hasSpeakableContent(text)) throw Object.assign(new Error('Voice text has no pronounceable content'), { code:'EMPTY_TEXT' });
@@ -3850,26 +4009,52 @@ http.createServer((req, res) => {
     return;
   }
   if (url.pathname === '/api/alerts/health') { json(res,200,{enabled:alertStore.enabled,reason:alertStore.reason||null}); return; }
+  // 连通性面板的「服务器 → 服务商」真实延时。这里刻意不使用 request()/requestText()，
+  // 也不读任何业务缓存：每次都真打到上面的服务商端点，慢的会如实显示在秒级。
+  if (url.pathname === '/api/connectivity-probe') {
+    try { json(res,200,{ probes: await runConnectivityProbe(), timeoutMs: CONNECTIVITY_PROBE_TIMEOUT }); }
+    catch(error) { json(res,500,{ error:'connectivity probe failed', detail:String(error?.message||error) }); }
+    return;
+  }
+  // Azure Speech 音色清单：前端据此按界面语言接入全部中文 / 英文音色（含粤语、方言）。
+  if (url.pathname === '/api/voice/azure/voices' && req.method === 'GET') {
+    try {
+      const voices = await azureVoices(url.searchParams.get('refresh') === '1');
+      // hdSupported 只作提示（前端据此置灰不可用音色）；探测本身失败不影响清单下发。
+      const hdSupported = await azureHdSupported().catch(() => false);
+      json(res,200,{ voices, count:voices.length, engine:'azure', hdSupported });
+    } catch(error) {
+      if (error.code === 'NO_CREDENTIAL') json(res,400,{ error:'Azure Speech not configured', configured:false });
+      else json(res,502,{ error:'Azure voices unavailable', detail:String(error?.message||error) });
+    }
+    return;
+  }
+  // 语音链路自检：合成一句极短音频，回报真实使用的引擎与耗时，方便分辨走了 Azure 还是 Edge。
+  if (url.pathname === '/api/voice/azure/verify' && req.method === 'POST') {
+    try {
+      const started = performance.now();
+      const { audio, engine } = await speechAudio('Azure 语音服务连接正常', 'zh-CN-XiaoxiaoNeural');
+      json(res,200,{ ok:true, engine, ms:Math.round(performance.now()-started), bytes:audio.length });
+    } catch(error) { json(res,502,{ ok:false, error:'Voice synthesis failed', detail:String(error?.message||error) }); }
+    return;
+  }
   if (url.pathname === '/api/voice/edge' && req.method==='POST') {
     try {
       const {text,voice}=await readJson(req),safeText=String(text||'').trim();
       // 长度校验属于请求问题，直接 400；不要落进下面的上游 catch 被报成 503。
       if(!safeText||safeText.length>240) { json(res,400,{error:'Voice text must be 1–240 characters',detail:'播报文本长度需在 1–240 个字符之间'}); return; }
-      const safeVoice=['zh-CN-XiaoxiaoNeural','zh-CN-XiaoyiNeural','zh-CN-liaoning-XiaobeiNeural','zh-CN-shaanxi-XiaoniNeural','zh-TW-HsiaoChenNeural','zh-HK-HiuGaaiNeural','zh-CN-YunxiNeural','zh-CN-YunyangNeural','en-US-AvaNeural','en-US-EmmaNeural','en-US-AnaNeural','en-US-AriaNeural','en-US-JennyNeural','en-US-MichelleNeural','en-US-AndrewNeural','en-US-BrianNeural','en-US-ChristopherNeural','en-US-EricNeural','en-US-GuyNeural','en-US-RogerNeural','en-US-SteffanNeural'].includes(voice)?voice:'zh-CN-XiaoxiaoNeural';
-      let audio;
-      try {
-        audio = await piperTtsAudio(safeText, safeVoice); // 本地 Piper 优先（零网络、无解地区问题）
-      } catch (piperErr) {
-        if (piperErr.code === 'EMPTY_TEXT') throw piperErr;
-        audio = await edgeTtsAudio(safeText, safeVoice); // Piper 不可用时回退 Edge（旧站可用；新站美源不稳可能仍失败）
-      }
-      res.writeHead(200,{'content-type':'audio/mpeg','cache-control':'no-store','content-length':audio.length});res.end(audio);
+      // 音色名会拼进 SSML 属性：Azure 有 400+ 音色（含各方言与 HD/MAI 代次），这里只做格式白名单校验，
+      // 且**非法即报 400，不替换**（替换会让人听到并非自己选的音色）。
+      const safeVoice=resolveAzureVoice(voice);
+      const { audio, engine } = await speechAudio(safeText, safeVoice);
+      res.writeHead(200,{'content-type':'audio/mpeg','cache-control':'no-store','content-length':audio.length,'x-voice-engine':engine});res.end(audio);
     } catch(error) {
       // 文本无可朗读内容属于请求本身的问题，返回 400 并说明原因；只有上游真的
       // 不可用才返回 503，避免把「探针文本选错」误报成服务故障。
       // Unpronounceable text is a bad request, not an upstream outage.
       if (error.code === 'EMPTY_TEXT') json(res,400,{error:'Voice text has no pronounceable content',detail:'文本中没有可朗读的字母、数字或汉字，无法合成语音'});
-      else json(res,503,{error:'Edge voice unavailable',detail:error.message});
+      else if (error.code === 'INVALID_VOICE') json(res,400,{error:'Voice name rejected',detail:'音色名格式非法（只接受 Azure 音色表里的 ShortName）'});
+      else json(res,503,{error:'Voice synthesis unavailable',detail:error.message});
     }
     return;
   }

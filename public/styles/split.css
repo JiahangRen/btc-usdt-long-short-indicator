@@ -1,0 +1,626 @@
+/* ===== 多分屏模式：顶部按钮 + 全屏 2×2 覆盖层 + 面板页 =====
+   ⚠️ 本文件同时被主站 index.html 与面板页 split-pane.html 引入。
+   主站 tokens.css 已在 :root 定义 --bull/--bear 等语义色，因此这里的一切
+   变量与 body 规则都必须限定作用域（#splitOverlay 或 body.sp-pane-page），
+   绝不能写裸的 [data-theme] / body / html 选择器——否则会把主站全局配色
+   （含涨跌红绿）整个覆盖掉。 */
+
+#splitOverlay[data-theme="dark"], body.sp-pane-page[data-theme="dark"] {
+  --sp-bg: #0e1116; --sp-panel: #161b22; --sp-border: #232a33; --sp-text: #e6edf3; --sp-muted: #8b949e;
+  --sp-bull: #00d4aa; --sp-bear: #ff4d6a; --sp-accent: #f0b90b;
+  /* ⚠️ 两套方向色，别混：
+     --sp-bull/--sp-bear = 涨跌（**涨绿跌红**，与主站 tokens 的 --bull/--bear 同向）；
+     --sp-long/--sp-short = 多空（做多绿、做空红）。v2.12.18 起两者共用同一对红绿，
+     分屏原先的「涨红跌绿」是早期遗留、与全站相反，已一并纠正。 */
+  --sp-long: #00d4aa; --sp-short: #ff4d6a;
+  --sp-tone-glow: 0.5;
+}
+#splitOverlay[data-theme="light"], body.sp-pane-page[data-theme="light"] {
+  --sp-bg: #ffffff; --sp-panel: #f6f8fa; --sp-border: #d8dee4; --sp-text: #1f2328; --sp-muted: #656d76;
+  --sp-bull: #007f69; --sp-bear: #c3344f; --sp-accent: #d4a017;
+  --sp-long: #007f69; --sp-short: #c3344f;
+  --sp-tone-glow: 0.32;
+}
+
+/* ── 顶部栏按钮（主站顶栏与分屏顶栏共用）──
+   颜色优先取主站 tokens（:root 里有），分屏 overlay 内也可用。 */
+.topbar-btn {
+  appearance: none; cursor: pointer;
+  font: inherit; font-size: 13px; line-height: 1;
+  padding: 7px 12px; margin-left: 8px;
+  color: var(--text-primary, #e6edf3);
+  background: var(--bg-surface-2, rgba(255, 255, 255, 0.06));
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.14));
+  border-radius: 8px;
+}
+.topbar-btn:hover { filter: brightness(1.25); }
+.topbar-btn:active { transform: translateY(1px); }
+
+/* 分屏覆盖层里的顶栏按钮改用**分屏自己的青绿系**（原来直接吃主站蓝紫系 tokens：
+   --text-primary #e9effb / --border-subtle #26344b / --bg-surface-2 #0d1524，
+   在青绿磨砂底上明显"串色"，全屏与退出两颗尤其显眼）。只覆盖 #splitOverlay 作用域，
+   主站顶栏那几个同名按钮不受影响。 */
+#splitOverlay .topbar-btn {
+  color: var(--sp-text, #e6edf3);
+  background: rgba(45, 212, 191, 0.12);
+  border-color: rgba(45, 212, 191, 0.30);
+}
+#splitOverlay .topbar-btn:hover {
+  filter: none;
+  background: rgba(45, 212, 191, 0.22);
+  border-color: rgba(45, 212, 191, 0.55);
+}
+/* 退出＝关闭整个分屏，用偏红的"危险"色与其它操作区分开。 */
+#splitOverlay .split-close {
+  color: #ffd9de;
+  background: rgba(255, 77, 106, 0.12);
+  border-color: rgba(255, 77, 106, 0.42);
+}
+#splitOverlay .split-close:hover {
+  background: rgba(255, 77, 106, 0.24);
+  border-color: rgba(255, 77, 106, 0.68);
+}
+/* 浅色主题：青绿要压深一点才有对比度（底色是奶白，浅青会糊）。 */
+#splitOverlay[data-theme="light"] .topbar-btn {
+  color: var(--sp-text, #10201e);
+  background: rgba(13, 148, 136, 0.10);
+  border-color: rgba(13, 148, 136, 0.32);
+}
+#splitOverlay[data-theme="light"] .topbar-btn:hover {
+  background: rgba(13, 148, 136, 0.18);
+  border-color: rgba(13, 148, 136, 0.55);
+}
+#splitOverlay[data-theme="light"] .split-close {
+  color: #a3243c;
+  background: rgba(195, 52, 79, 0.10);
+  border-color: rgba(195, 52, 79, 0.38);
+}
+#splitOverlay[data-theme="light"] .split-close:hover {
+  background: rgba(195, 52, 79, 0.18);
+  border-color: rgba(195, 52, 79, 0.62);
+}
+
+/* ── 全屏覆盖层 ──
+   背景：与主站 body 同一套技法（多层 radial 色团 + 线性底 + 模糊色块 + 半透明磨砂），
+   但色系换成「青绿 / 墨青」系 —— 主站是蓝紫系，一眼能分清两个模式。
+   半透明 + backdrop-filter 让底下的主页面透出一点被模糊的轮廓，这就是磨砂感的来源。 */
+#splitOverlay {
+  position: fixed; inset: 0; z-index: 9999;
+  display: flex; flex-direction: column;
+  color: var(--sp-text, #e6edf3);
+  background:
+    radial-gradient(900px 560px at 6% -12%, rgba(45, 212, 191, 0.20), transparent 62%),
+    radial-gradient(780px 520px at 97% 0%, rgba(56, 189, 248, 0.13), transparent 60%),
+    radial-gradient(860px 640px at 46% 122%, rgba(20, 184, 166, 0.15), transparent 62%),
+    linear-gradient(
+      152deg,
+      rgba(5, 17, 16, 0.93) 0%,
+      rgba(6, 22, 26, 0.87) 47%,
+      rgba(4, 15, 15, 0.95) 100%
+    );
+  backdrop-filter: blur(22px) saturate(1.18);
+  -webkit-backdrop-filter: blur(22px) saturate(1.18);
+}
+/* 两团模糊光斑（主站 body:before/:after 的同款做法，换成青绿两色）。 */
+#splitOverlay::before,
+#splitOverlay::after {
+  content: ""; position: fixed; pointer-events: none; z-index: 0;
+  border-radius: 999px; filter: blur(64px); opacity: 0.55;
+}
+#splitOverlay::before {
+  width: 520px; height: 360px; left: -140px; top: -90px;
+  background: radial-gradient(circle, rgba(45, 212, 191, 0.55), transparent 70%);
+}
+#splitOverlay::after {
+  width: 470px; height: 350px; right: -120px; bottom: -130px;
+  background: radial-gradient(circle, rgba(14, 165, 233, 0.45), transparent 70%);
+}
+/* 内容层压在光斑之上。 */
+#splitOverlay > .split-topbar,
+#splitOverlay > .split-grid { position: relative; z-index: 1; }
+#splitOverlay[hidden] { display: none; }
+/* 浅色主题：磨砂改为「奶白 + 淡青」，色团压淡，避免整屏发灰。 */
+#splitOverlay[data-theme="light"] {
+  background:
+    radial-gradient(880px 540px at 6% -12%, rgba(13, 148, 136, 0.16), transparent 62%),
+    radial-gradient(760px 500px at 97% 0%, rgba(14, 165, 233, 0.12), transparent 60%),
+    radial-gradient(840px 620px at 46% 122%, rgba(20, 184, 166, 0.13), transparent 62%),
+    linear-gradient(
+      152deg,
+      rgba(248, 252, 252, 0.94) 0%,
+      rgba(238, 248, 248, 0.9) 47%,
+      rgba(246, 252, 251, 0.95) 100%
+    );
+}
+#splitOverlay[data-theme="light"]::before,
+#splitOverlay[data-theme="light"]::after { opacity: 0.4; }
+
+/* 分屏打开时，主站的「语音播报设置」浮层（.voice-settings-modal，基础 z-index 1004）
+   要压在覆盖层之上：各面板右上角的喇叭就是打开它（见 split-mode.js 的 split:voice-open）。
+   只在分屏期间提权，普通模式下的层叠关系一点不动。 */
+body.split-open .voice-settings-modal { z-index: 10001; }
+.split-topbar {
+  display: flex; flex-direction: column; align-items: stretch; gap: 6px;
+  padding: 8px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.01));
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+#splitOverlay[data-theme="light"] .split-topbar {
+  border-bottom-color: rgba(0, 0, 0, 0.08);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.6), rgba(255, 255, 255, 0.2));
+}
+/* 顶栏两行布局：JS 里 row1/row2 依赖这条规则做 flex 排版，
+   缺了它行内元素会挤成一团（2026-09-22 被并发写回踩过）。 */
+.split-topbar-row {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 12px;
+  min-width: 0;
+}
+.split-title { font-weight: 600; font-size: 15px; white-space: nowrap; }
+.split-sub {
+  color: var(--sp-muted, #8b949e); font-size: 12px; white-space: nowrap;
+  min-width: 0; overflow: hidden; text-overflow: ellipsis;
+}
+.split-topbar-spacer { flex: 1; }
+/* 双保险：spacer 即使被并发写回弄丢，全屏/退出仍应右对齐。 */
+.split-fullscreen { margin-left: auto; }
+.split-close { margin-left: 0; }
+
+.split-grid {
+  flex: 1; display: grid; gap: 8px; padding: 8px;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+}
+/* 2 币种：左右两格（单行）。 */
+.split-grid[data-count="2"] { grid-template-rows: 1fr; }
+/* 3 币种：左侧一大格纵跨两行 + 右侧两小格。 */
+.split-grid[data-count="3"] { grid-template-columns: 1.4fr 1fr; }
+.split-grid[data-count="3"] .split-cell:first-child { grid-row: 1 / 3; }
+
+/* 拖拽换位反馈 */
+.split-cell.dragging { opacity: 0.55; }
+.split-cell.drag-over { outline: 2px dashed var(--sp-accent, #f0b90b); outline-offset: -3px; }
+
+/* 顶栏分段按钮（布局 2/3/4 与 简单/完整 图表模式共用） */
+.split-seg { display: inline-flex; border: 1px solid rgba(255,255,255,0.14); border-radius: 8px; overflow: hidden; }
+#splitOverlay[data-theme="light"] .split-seg { border-color: rgba(0,0,0,0.16); }
+.split-seg-btn {
+  appearance: none; cursor: pointer; font: inherit; font-size: 12px; line-height: 1;
+  padding: 7px 11px; color: var(--sp-muted, #8b949e);
+  background: transparent; border: 0;
+}
+.split-seg-btn + .split-seg-btn { border-left: 1px solid rgba(128,128,128,0.22); }
+.split-seg-btn.active { color: var(--sp-text, #e6edf3); background: rgba(128,128,128,0.20); }
+.split-seg-btn:hover { filter: brightness(1.2); }
+
+/* 格子顶栏右侧小按钮（⤢ 放大 / ✕ 移除） */
+.split-bar-spacer { flex: 1; }
+.split-cell-btn {
+  appearance: none; cursor: pointer; font: inherit; font-size: 12px; line-height: 1;
+  width: 22px; height: 22px; padding: 0; border-radius: 6px;
+  color: var(--sp-muted, #8b949e);
+  background: rgba(128,128,128,0.12);
+  border: 1px solid rgba(255,255,255,0.12);
+}
+#splitOverlay[data-theme="light"] .split-cell-btn { border-color: rgba(0,0,0,0.14); }
+.split-cell-btn:hover { color: var(--sp-text); background: rgba(128,128,128,0.24); }
+.split-cell-close:hover { color: #fff; background: var(--sp-bear, #2ebd85); border-color: transparent; }
+.split-cell {
+  display: flex; flex-direction: column; min-height: 0; min-width: 0;
+  border: 1px solid rgba(255, 255, 255, 0.10); border-radius: 12px; overflow: hidden;
+  /* 磨砂玻璃板块：半透明底 + 背景模糊，叠在覆盖层的渐变上。 */
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.012));
+  backdrop-filter: blur(14px) saturate(1.1);
+  -webkit-backdrop-filter: blur(14px) saturate(1.1);
+  box-shadow: 0 18px 40px -26px rgba(0, 0, 0, 0.9), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  transition: border-color 0.25s ease, box-shadow 0.25s ease, background 0.25s ease;
+}
+#splitOverlay[data-theme="light"] .split-cell {
+  border-color: rgba(0, 0, 0, 0.10);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.78), rgba(255, 255, 255, 0.6));
+  box-shadow: 0 18px 40px -30px rgba(15, 40, 50, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.9);
+}
+/* ── 板块状态色（v2.12.18）：做多 → 绿、做空 → 红；观望时按涨跌（涨绿跌红）。
+   ⚠️ 这是「多空方向」的配色，与数字口径（涨红跌绿）是两套：价格 / 涨跌幅 / K 线不变。 */
+.split-cell.is-long {
+  border-color: rgba(0, 212, 170, 0.62);
+  background: linear-gradient(
+    180deg,
+    rgba(0, 212, 170, 0.17),
+    rgba(0, 212, 170, 0.05) 48%,
+    rgba(255, 255, 255, 0.012)
+  );
+  box-shadow:
+    0 0 0 1px rgba(0, 212, 170, 0.18),
+    0 18px 42px -24px rgba(0, 212, 170, 0.55),
+    inset 0 1px 0 rgba(255, 255, 255, 0.07);
+}
+.split-cell.is-short {
+  border-color: rgba(255, 77, 106, 0.62);
+  background: linear-gradient(
+    180deg,
+    rgba(255, 77, 106, 0.17),
+    rgba(255, 77, 106, 0.05) 48%,
+    rgba(255, 255, 255, 0.012)
+  );
+  box-shadow:
+    0 0 0 1px rgba(255, 77, 106, 0.18),
+    0 18px 42px -24px rgba(255, 77, 106, 0.5),
+    inset 0 1px 0 rgba(255, 255, 255, 0.07);
+}
+.split-cell-bar {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.035);
+  transition: background 0.25s ease, border-color 0.25s ease;
+}
+.split-cell.is-long .split-cell-bar {
+  border-bottom-color: rgba(0, 212, 170, 0.35);
+  background: linear-gradient(90deg, rgba(0, 212, 170, 0.26), rgba(0, 212, 170, 0.05) 70%);
+}
+.split-cell.is-short .split-cell-bar {
+  border-bottom-color: rgba(255, 77, 106, 0.35);
+  background: linear-gradient(90deg, rgba(255, 77, 106, 0.26), rgba(255, 77, 106, 0.05) 70%);
+}
+#splitOverlay[data-theme="light"] .split-cell-bar {
+  border-bottom-color: rgba(0, 0, 0, 0.08);
+  background: rgba(255, 255, 255, 0.5);
+}
+.split-coin-select {
+  font: inherit; font-size: 13px; padding: 4px 8px; border-radius: 6px;
+  color: var(--sp-text, #e6edf3); background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+}
+.split-interval-select { font-size: 12px; padding: 4px 4px; }
+.split-range-select { font-size: 12px; padding: 4px 4px; }
+.split-frame { flex: 1; width: 100%; border: 0; background: transparent; }
+
+/* ── 面板页（iframe 内，body 带 .sp-pane-page）── */
+body.sp-pane-page {
+  margin: 0; height: 100%;
+  /* ⚠️ 面板 iframe 的底必须自己画：实测「iframe 文档全透明」在本机（headless Chromium 与
+     主站同款内核）会渲染成**白底**，父层格子的磨砂底透不进来。所以这里用与外框同色系
+     的深青墨色渐变当底，再叠面板内的状态色光晕，视觉上仍然是「玻璃面板」。 */
+  background: linear-gradient(180deg, #101c1e 0%, #0b1416 58%, #0a1214 100%);
+  color: var(--sp-text, #e6edf3);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+body.sp-pane-page[data-theme="light"] {
+  background: linear-gradient(180deg, #fbfefd 0%, #f4faf8 58%, #f2f8f7 100%);
+}
+html:has(body.sp-pane-page) { height: 100%; background: #0a1214; }
+html:has(body.sp-pane-page[data-theme="light"]) { background: #f2f8f7; }
+#paneRoot { display: flex; flex-direction: column; height: 100%; box-sizing: border-box; padding: 8px 10px; }
+/* 板块状态色（多绿空红）在面板内的落点：顶部一片同色柔光 + 整块极淡的同色底
+   （别做浓底，免得和「涨红跌绿」的价格数字打架）。 */
+#paneRoot[data-tone="long"] {
+  background:
+    radial-gradient(135% 68% at 0% 0%, rgba(0, 212, 170, 0.26), rgba(0, 212, 170, 0.05) 48%, transparent 72%),
+    linear-gradient(180deg, rgba(0, 212, 170, 0.08), transparent 46%);
+}
+#paneRoot[data-tone="short"] {
+  background:
+    radial-gradient(135% 68% at 0% 0%, rgba(255, 77, 106, 0.26), rgba(255, 77, 106, 0.05) 48%, transparent 72%),
+    linear-gradient(180deg, rgba(255, 77, 106, 0.08), transparent 46%);
+}
+#paneRoot[data-tone="long"] .pane-coin { color: var(--sp-long); }
+#paneRoot[data-tone="short"] .pane-coin { color: var(--sp-short); }
+#paneHead { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px 12px; }
+.pane-coin { font-size: 14px; font-weight: 600; }
+.pane-price { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.pane-change {
+  font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums;
+  padding: 2px 9px; border-radius: 999px;
+}
+.pane-price.bull { color: var(--sp-bull); }
+.pane-price.bear { color: var(--sp-bear); }
+/* 实时价格逐位跳动：与首页大屏版（#price digit-flash）同一机制——只让真正变化的
+   那几位数字闪颜色 + 轻微上浮缩放。分屏坚持涨红跌绿：rise=红、fall=绿。 */
+.pane-price .price-digit { display: inline-block; }
+@keyframes sp-digit-rise {
+  0% { color: var(--sp-bull); text-shadow: 0 0 16px rgba(0, 212, 170, 0.9); transform: translateY(-1px) scale(1.16); }
+  100% { color: inherit; text-shadow: none; transform: none; }
+}
+@keyframes sp-digit-fall {
+  0% { color: var(--sp-bear); text-shadow: 0 0 16px rgba(255, 77, 106, 0.9); transform: translateY(-1px) scale(1.16); }
+  100% { color: inherit; text-shadow: none; transform: none; }
+}
+.pane-price .price-digit.changed-rise { animation: sp-digit-rise 500ms ease-out; }
+.pane-price .price-digit.changed-fall { animation: sp-digit-fall 500ms ease-out; }
+/* 涨幅做成胶囊：红/绿文字 + 同色半透明底，颜色区别更醒目（涨绿跌红，与主站一致）。 */
+.pane-change.bull { color: var(--sp-bull); background: rgba(0, 212, 170, 0.18); }
+.pane-change.bear { color: var(--sp-bear); background: rgba(255, 77, 106, 0.18); }
+/* 多空胶囊（做多 / 做空）走「多绿空红」，与板块状态色一致。
+   ⚠️ 注意与上面 .pane-price.bull / .pane-change.bull 区分：那两条是**涨跌**（涨红跌绿），
+   类名同为 bull/bear 但语义不同（这里是信号方向），别合并。 */
+.signal-chip { font-size: 13px; font-weight: 700; padding: 3px 10px; border-radius: 999px; }
+.signal-chip.bull { color: #fff; background: var(--sp-long, #2ebd85); }
+.signal-chip.bear { color: #fff; background: var(--sp-short, #e5484d); }
+.signal-chip.flat { color: var(--sp-muted); background: rgba(128, 128, 128, 0.18); }
+.signal-score { font-size: 12px; color: var(--sp-muted); font-variant-numeric: tabular-nums; }
+
+.pane-indicators { display: grid; grid-template-columns: repeat(6, 1fr); gap: 4px; margin: 6px 0; }
+.pane-indicators .metric {
+  display: flex; flex-direction: column; align-items: center; padding: 3px 2px;
+  border-radius: 6px; background: rgba(128, 128, 128, 0.08);
+}
+.pane-indicators .metric span { font-size: 10px; color: var(--sp-muted); }
+.pane-indicators .metric b { font-size: 12px; font-variant-numeric: tabular-nums; }
+.pane-indicators .metric i { font-size: 10px; font-style: normal; }
+/* 指标卡里的「多 / 空」小标：同样走多绿空红（原来跟涨跌色走，与胶囊不一致了）。 */
+.pane-indicators .metric i.bull { color: var(--sp-long, #2ebd85); }
+.pane-indicators .metric i.bear { color: var(--sp-short, #e5484d); }
+.pane-indicators .metric i.flat { color: var(--sp-muted); }
+/* 指标卡本身也做成磨砂小块。 */
+.pane-indicators .metric { background: rgba(255, 255, 255, 0.045); }
+
+.pane-chart-wrap { position: relative; flex: 1; min-height: 0; }
+#paneChart { position: absolute; inset: 0; width: 100%; height: 100%; }
+.pane-foot {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; color: var(--sp-muted);
+  padding: 2px 0 0; min-height: 18px;
+}
+.sp-zoom {
+  appearance: none; cursor: pointer; font: inherit;
+  width: 20px; height: 20px; line-height: 1; padding: 0;
+  color: var(--sp-text); background: rgba(128, 128, 128, 0.12);
+  border: 1px solid var(--sp-border, rgba(255, 255, 255, 0.14)); border-radius: 5px;
+}
+.sp-zoom:hover { background: rgba(128, 128, 128, 0.22); }
+.pane-zoom-count { min-width: 30px; text-align: center; font-variant-numeric: tabular-nums; }
+.pane-range { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pane-status { font-size: 11px; color: var(--sp-muted); min-height: 14px; }
+
+/* ── 面板页语音喇叭（每个图表独立播报，用自身 iframe 的 speechSynthesis）──
+   图标与主站「经典大屏」的 .voice-quick-toggle 同一 SVG / 同一套状态约定：
+   开启 = 蓝色喇叭 + 声波；关闭 = 灰色 + 红斜线；播报中 = 声波闪烁动效。 */
+#paneHead .pane-voice { margin-left: auto; align-self: center; }
+.pane-voice {
+  appearance: none; cursor: pointer; font: inherit;
+  display: grid; place-items: center;
+  width: 27px; height: 27px; padding: 0; border-radius: 7px;
+  background: transparent; border: 0;
+  color: var(--sp-muted, #8b949e); line-height: 1;
+}
+.pane-voice svg {
+  width: 21px; height: 21px; overflow: visible;
+  fill: currentColor; stroke: currentColor;
+  stroke-width: 5; stroke-linecap: round; stroke-linejoin: round;
+}
+.pane-voice .voice-wave { fill: none; }
+.pane-voice .voice-mute {
+  fill: none; stroke: #ff708a; stroke-width: 6; stroke-linecap: round; display: none;
+}
+.pane-voice.is-muted .voice-wave { display: none; }
+.pane-voice.is-muted .voice-mute { display: inline; }
+.pane-voice.on { color: #6f9de9; }
+.pane-voice:hover { transform: none; background: rgba(111, 157, 233, 0.12); color: #86b4ff; }
+.pane-voice.on:hover { color: #86b4ff; }
+/* 播报进行中：声波闪烁（与主站 voice-speaking-pulse 同款动效）。 */
+.pane-voice.is-speaking svg {
+  animation: sp-voice-speaking 1.1s ease-in-out infinite;
+  color: #00d4aa;
+}
+@keyframes sp-voice-speaking {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.55; transform: scale(1.12); }
+}
+
+/* ── 顶栏「播报设置」按钮 + 设置面板（v2.12.17）──
+   顶栏原先那排「🔊 + 各币 chip + 全部播报」收成一颗按钮，点开是一个设置面板：
+   总开关 / 按币种的播报顺序 / 语音引擎（引擎那三件套直接镜像主站控件）。 */
+.split-voice-open {
+  flex: none;
+  white-space: nowrap;
+}
+/* 面板挂在 body 上（不放进覆盖层），要压在覆盖层（9999）与主站语音浮层（10001）之上。 */
+#splitVoiceModal.split-voice-settings {
+  z-index: 10002;
+}
+/* 面板不在 #splitOverlay 里，--sp-* 变量得按主题自己再给一份（其它类一直在用它们）。 */
+#splitVoiceModal[data-theme="dark"] {
+  --sp-bg: #0e1116; --sp-panel: #161b22; --sp-border: #232a33;
+  --sp-text: #e6edf3; --sp-muted: #8b949e; --sp-accent: #f0b90b;
+}
+#splitVoiceModal[data-theme="light"] {
+  --sp-bg: #ffffff; --sp-panel: #f6f8fa; --sp-border: #d8dee4;
+  --sp-text: #1f2328; --sp-muted: #656d76; --sp-accent: #d4a017;
+}
+.split-voice-settings .voice-settings-coin {
+  background: rgba(240, 185, 11, 0.16);
+  border-color: rgba(240, 185, 11, 0.42);
+  color: #f0b90b;
+}
+.split-voice-master {
+  display: grid;
+  gap: 6px;
+  align-items: start;
+}
+.split-voice-master .voice-switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.split-voice-note,
+.split-voice-status {
+  color: var(--sp-muted, #8b949e);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.split-voice-status {
+  color: var(--accent-cyan, #22d3ee);
+  font-size: 11.5px;
+}
+.split-voice-section {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid var(--sp-border, #232a33);
+  border-radius: 10px;
+  background: var(--sp-surface, rgba(255, 255, 255, 0.02));
+}
+.split-voice-section > b {
+  font-size: 12.5px;
+  color: var(--sp-text, #e6edf3);
+}
+.split-voice-section > small {
+  color: var(--sp-muted, #8b949e);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.split-voice-engine {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px 14px;
+  margin-top: 2px;
+}
+.split-voice-engine > label {
+  display: grid;
+  gap: 4px;
+  font-size: 11.5px;
+  color: var(--sp-muted, #8b949e);
+  min-width: 0;
+}
+.split-voice-engine select {
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+}
+.split-voice-engine .voice-volume-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  white-space: nowrap;
+}
+/* 顺序列表里的圆点/规则按钮：点一下切换参与播报 / 打开该币种的语音规则。 */
+.split-voice-dot-btn {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1.5px solid var(--sp-muted, #8b949e);
+  background: transparent;
+  cursor: pointer;
+}
+.split-voice-dot-btn[aria-pressed="true"] {
+  border-color: #f0b90b;
+  background: #f0b90b;
+  box-shadow: 0 0 6px rgba(240, 185, 11, 0.55);
+}
+.split-voice-coin-name {
+  font-weight: 600;
+  font-size: 11.5px;
+  color: var(--sp-text, #e6edf3);
+}
+.split-voice-rules {
+  margin-left: auto;
+  flex: none;
+  font-size: 10.5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--sp-border, #232a33);
+  background: transparent;
+  color: var(--sp-muted, #8b949e);
+  cursor: pointer;
+}
+.split-voice-rules:hover {
+  border-color: rgba(85, 161, 213, 0.55);
+  color: var(--accent-cyan, #22d3ee);
+}
+/* 未参与播报的行整行变暗，一眼看出哪些币会出声。 */
+/* 顺序卡片：标题/说明/列表各占一行（主站那套是行内排的，这里信息更长，排成卡片更清楚）。 */
+.split-voice-priority {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid var(--sp-border, #232a33);
+  border-radius: 10px;
+  background: var(--sp-panel, rgba(255, 255, 255, 0.02));
+}
+.split-voice-priority > b {
+  font-size: 12.5px;
+  color: var(--sp-text, #e6edf3);
+}
+.split-voice-priority > small {
+  color: var(--sp-muted, #8b949e);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.split-voice-priority li {
+  font-size: 11.5px;
+  padding: 6px 9px;
+}
+.split-voice-priority li.is-off {
+  opacity: 0.55;
+}
+.split-voice-priority li.speaking {
+  border-color: rgba(0, 212, 170, 0.75);
+  color: #00d4aa;
+  animation: sp-chip-speaking 1.1s ease-in-out infinite;
+}
+.split-voice-priority li.is-dragging {
+  opacity: 0.45;
+}
+.split-voice-priority li.split-voice-empty {
+  cursor: default;
+  color: var(--sp-muted, #8b949e);
+}
+@keyframes sp-chip-speaking {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+.split-voice-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.split-voice-actions button {
+  font-size: 12px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(0, 212, 170, 0.45);
+  background: rgba(0, 212, 170, 0.1);
+  color: var(--accent-cyan, #22d3ee);
+  cursor: pointer;
+}
+.split-voice-actions button:hover {
+  background: rgba(0, 212, 170, 0.2);
+}
+.split-voice-actions small {
+  color: var(--sp-muted, #8b949e);
+  font-size: 11px;
+}
+
+/* ── 放大单看：首页同款详细浮层（覆盖层内）──
+   浮层 iframe 以 1440×900 逻辑尺寸渲染首页，再 transform: scale(≤0.85) 缩小，
+   整体更精致；由 split-mode.js 的 fitDetail() 计算缩放比。 */
+#splitDetailModal {
+  position: absolute; inset: 0; z-index: 60;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+}
+#splitDetailModal .split-detail-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  width: min(92vw, 1380px);
+  padding: 0 4px 8px;
+  color: var(--sp-text, #e6edf3); font-size: 13px;
+}
+.split-detail-title { font-weight: 600; }
+.split-detail-stage {
+  position: relative; overflow: hidden;
+  width: min(92vw, 1380px); height: min(86vh, 960px);
+  border: 1px solid var(--sp-border, #232a33); border-radius: 12px;
+  background: var(--sp-bg, #0e1116);
+  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.5);
+}
+.split-detail-frame {
+  position: absolute; top: 0; left: 0;
+  width: 1440px; height: 900px;
+  border: 0; background: #0e1116;
+  transform-origin: top left;
+}

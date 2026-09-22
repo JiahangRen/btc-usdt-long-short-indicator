@@ -151,8 +151,8 @@
 }
 
 /* At medium desktop widths, keep each position's heading and live values inside
-   its own third of the hero grid. Put PnL on a deterministic second row instead
-   of letting a long three-item row paint over the adjacent position. */
+   its own third of the hero grid. Price, status badge and the signed PnL share
+   one row: the PnL always sits right after the status badge. */
 @media (min-width: 1200px) and (max-width: 1600px) {
   #personalEntryCard .personal-entry-slot {
     max-width: 100%;
@@ -163,7 +163,7 @@
   }
   #personalEntryCard .personal-entry-price-row {
     display: grid;
-    grid-template-columns: max-content minmax(0, 1fr);
+    grid-template-columns: max-content max-content minmax(0, 1fr);
     align-items: baseline;
     gap: 4px 10px;
   }
@@ -175,7 +175,6 @@
     min-width: 0;
   }
   #personalEntryCard .personal-entry-status-pnl {
-    grid-column: 1 / -1;
     justify-self: start;
     min-width: 0;
     white-space: nowrap;

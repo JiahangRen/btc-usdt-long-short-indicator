@@ -25,10 +25,11 @@ const coinMetaOf = (coin = activeCoin()) => COINS[normalizeCoin(coin)] || COINS[
 const coinPair = (coin = activeCoin()) => `${normalizeCoin(coin)} / USDT`;
 const coinLabel = (coin = activeCoin()) => normalizeCoin(coin);
 /** 多币种本地存储键的币种后缀：BTC 用旧键（无后缀），其余币种 "_<COIN>"。
- *  放在文件最前，任何按币种隔离的 localStorage 键都复用它（避免 TDZ）。 */
-const coinStorageSuffix = () => {
-  const coin = activeCoin();
-  return coin === BASE_COIN ? "" : "_" + coin;
+ *  放在文件最前，任何按币种隔离的 localStorage 键都复用它（避免 TDZ）。
+ *  可选入参 coin：分屏要按「面板的币种」取键（此时它不等于当前币种），必须显式传。 */
+const coinStorageSuffix = (coin = activeCoin()) => {
+  const key = normalizeCoin(coin);
+  return key === BASE_COIN ? "" : "_" + key;
 };
 // 与币种强相关的接口：请求时自动带上 symbol，服务端据此切换缓存 / SQLite / 合约。
 // 账户、登录、语音、AI 配置等不属于行情，不带。
@@ -1164,6 +1165,10 @@ async function toggleFullscreen() {
     syncFullscreenButton();
   }
 }
+/* 分屏外壳（split-mode.js）复用这一套全屏：全屏的是整个文档，而分屏覆盖层本身就是
+   全屏固定层，所以效果就是「只看到分屏」。别在分屏那边另写一份 requestFullscreen ——
+   两处各写一份的话，`.is-fullscreen`（隐藏页头）与按钮态同步都会漏掉一边。 */
+window.btcFullscreen = { toggle: () => toggleFullscreen() };
 function applyLanguage() {
   const x = locale();
   document.documentElement.lang = uiLang === "zh" ? "zh-CN" : "en";
@@ -2596,6 +2601,8 @@ setTimeout(() => {
     liquidationChimeType: "warning",
     chimeVolume: 100,
     speechVolume: 100,
+    /* 音色列表的性别筛选：all / male / female（只影响下拉里列出的音色，不改动当前音色）。 */
+    voiceGenderFilter: "all",
   };
   try {
     settings = {
@@ -2607,6 +2614,8 @@ setTimeout(() => {
     ![15, 30, 60, 300, 600, 900, 1800, 3600].includes(Number(settings.interval))
   )
     settings.interval = 300;
+  if (!["all", "male", "female"].includes(settings.voiceGenderFilter))
+    settings.voiceGenderFilter = "all";
   const supported =
     "speechSynthesis" in window && "SpeechSynthesisUtterance" in window;
   const voicePlaybackAvailable = supported || "Audio" in window;
@@ -2661,8 +2670,18 @@ setTimeout(() => {
         speechQueueBusy = false;
         window.setTimeout(drainSpeechQueue, 300);
       };
-      /* say 返回 false（总开关已关）时放弃整条队列，避免 busy 永久卡住。 */
-      if (!say(item.text, { ...item.options, onEnded: done, onFailure: done })) {
+      /* say 返回 false（总开关已关）时放弃整条队列，避免 busy 永久卡住。
+         ⚠️ 队尾回调必须串起来：调用方给的 onEnded/onFailure（分屏靠它给面板打「播报中」
+         动效）若被这里的 done 直接覆盖掉，就会「开始闪了但永远不灭」。 */
+      const chained = (hook) => () => {
+        try { hook?.(); } catch {}
+        done();
+      };
+      if (!say(item.text, {
+        ...item.options,
+        onEnded: chained(item.options.onEnded),
+        onFailure: chained(item.options.onFailure),
+      })) {
         speechQueueBusy = false;
         speechQueue.length = 0;
       }
@@ -2762,7 +2781,7 @@ setTimeout(() => {
     await audio.play();
     return true;
   };
-  const say = (text, { force = false, chimeType, label, onStarted, onEnded, onFailure } = {}) => {
+  const say = (text, { force = false, chimeType, noChime = false, engine: engineOverride, fallback = true, label, onStarted, onEnded, onFailure } = {}) => {
     if (!settings.enabled && !force) return false;
     // Edge TTS does not depend on the browser's system speech API.  Some
     // embedded browsers omit speechSynthesis entirely, so only touch it when
@@ -2784,31 +2803,52 @@ setTimeout(() => {
         if (sequence === speechSequence) setSpeaking(false);
         onFailure?.(error);
       };
-    const delay = playChime(chimeType);
+    const delay = noChime ? 0 : playChime(chimeType);
     window.setTimeout(() => {
       if (sequence !== speechSequence) {
         onEnded?.();
         return;
       }
-      if (settings.engine === "edge") {
+      /* engineOverride：音色试听专用 —— 用户点的是 Azure 下拉里的音色，就算当前「播报引擎」
+         选的是本机系统语音，也必须用那条音色自己念一遍，否则试听等于没试。 */
+      if ((engineOverride || settings.engine) === "edge") {
         sayEdge(text, { onStarted: started, onEnded: ended, onFailure: failed })
           .catch((error) => {
-            if (!saySystem(text, { onStarted: started, onEnded: ended, onFailure: failed }))
-              failed(error);
+            /* fallback:false（音色试听）时不用本机系统语音顶替：那会「点任何音色都念同一个
+               系统嗓」，用户以为自己选错了音色，实际是这里悄悄换了声。 */
+            if (fallback && saySystem(text, { onStarted: started, onEnded: ended, onFailure: failed })) return;
+            failed(error);
           });
       } else if (!saySystem(text, { onStarted: started, onEnded: ended, onFailure: failed }))
         failed(new Error("System speech is unavailable"));
     }, delay);
     return true;
   };
-  const personalEntryComparisons = (value) => {
-    const entries = (
-        Array.isArray(window.btcPersonalEntries)
-          ? window.btcPersonalEntries
-          : typeof personalEntries !== "undefined"
-            ? personalEntries
-            : []
-      ).filter(
+  /* 取某个币种的持仓组：当前币种用内存里那份（随输入实时更新），其余币种直接读该币种
+     自己的存储键 —— 分屏替别的币种播报时也必须用它自己的持仓，否则会拿 BTC 的仓位去
+     说 ETH 的价格。 */
+  const personalEntriesForCoin = (coin) => {
+    if (!coin || normalizeCoin(coin) === activeCoin())
+      return Array.isArray(window.btcPersonalEntries)
+        ? window.btcPersonalEntries
+        : typeof personalEntries !== "undefined"
+          ? personalEntries
+          : [];
+    try {
+      const stored = JSON.parse(
+        localStorage.getItem(
+          "btc_personal_entry_prices_v3" + coinStorageSuffix(coin),
+        ) || "[]",
+      );
+      return Array.isArray(stored)
+        ? stored.filter((entry) => Number(entry?.price) > 0)
+        : [];
+    } catch {
+      return [];
+    }
+  };
+  const personalEntryComparisons = (value, coin) => {
+    const entries = personalEntriesForCoin(coin).filter(
         (entry) =>
           Number.isFinite(Number(entry?.price)) && Number(entry.price) > 0,
       ),
@@ -2847,21 +2887,27 @@ setTimeout(() => {
         : `Compared with your ${labelEn} of ${entryPrice.toLocaleString("en-US", { maximumFractionDigits: 2 })}, price is ${priceUp ? "up" : "down"} ${amount}, a ${priceUp ? "gain" : "drop"} of ${percent} percent. The price difference is ${amount} USD. ${sideEn} ${inProfit ? "is in profit" : "is at a loss"}${actualPnlText ? `, ${inProfit ? "profit" : "loss"} ${actualPnlText} USD` : ""}.`;
     });
   };
-  const priceText = (value) => {
+  /* 多币种播报（v2.12.10）：语音文本一律先说币种，且币种只用英文代码（BTC / ETH /
+     ZEC / BNB），不用「比特币」这类中文名 —— 中文名下再跟「实时价格」极易听混，
+     读成「比特币 实时价格」还容易被当成行情类型而不是资产。
+     可选入参 coin：分屏替某个面板播报时要按「面板的币种」起头，不能跟当前币种走。 */
+  const voiceCoinLabel = (coin) => coinLabel(coin || undefined);
+  const priceText = (value, coin) => {
     const current = Number(value).toLocaleString("en-US", {
         maximumFractionDigits: 2,
       }),
-      comparisons = personalEntryComparisons(value);
+      label = voiceCoinLabel(coin),
+      comparisons = personalEntryComparisons(value, coin);
     return uiLang === "zh"
-      ? `当前价格，${current}。${comparisons.join("")}`
-      : `Current price, ${current}. ${comparisons.join(" ")}`;
+      ? `当前 ${label} 价格，${current}。${comparisons.join("")}`
+      : `Current ${label} price, ${current}. ${comparisons.join(" ")}`;
   };
-  /* 精简版播报语：只报「当前实时价 + 数字」这一句，不带结尾句号和持仓对比。
+  /* 精简版播报语：只报「当前 BTC 实时价格 + 数字」这一句，不带结尾句号和持仓对比。
      数字不加千分位（76287.5 而非 76,287.5），避免 TTS 把逗号读成停顿。 */
-  const concisePriceText = (value) =>
+  const concisePriceText = (value, coin) =>
     uiLang === "zh"
-      ? `当前实时价 ${Number(value).toLocaleString("en-US", { maximumFractionDigits: 2, useGrouping: false })}`
-      : `Live price ${Number(value).toLocaleString("en-US", { maximumFractionDigits: 2, useGrouping: false })}`;
+      ? `当前 ${voiceCoinLabel(coin)} 实时价格 ${Number(value).toLocaleString("en-US", { maximumFractionDigits: 2, useGrouping: false })}`
+      : `Current ${voiceCoinLabel(coin)} live price ${Number(value).toLocaleString("en-US", { maximumFractionDigits: 2, useGrouping: false })}`;
   const trigger = document.createElement("button");
   trigger.id = "voiceQuickToggle";
   trigger.type = "button";
@@ -2894,12 +2940,12 @@ setTimeout(() => {
   settingsModal.id = "voiceSettingsModal";
   settingsModal.className = "alert-composer voice-settings-modal";
   settingsModal.hidden = true;
-  settingsModal.innerHTML = `<section role="dialog" aria-modal="true" aria-labelledby="voiceSettingsTitle"><header><b id="voiceSettingsTitle">${tx("语音播报设置", "Voice alert settings")}</b><button type="button" aria-label="${tx("关闭", "Close")}" data-close-voice-settings>×</button></header><div class="voice-settings-body"></div></section>`;
+  settingsModal.innerHTML = `<section role="dialog" aria-modal="true" aria-labelledby="voiceSettingsTitle"><header><b id="voiceSettingsTitle">${tx("语音播报设置", "Voice alert settings")}</b><span id="voiceSettingsCoinTag" class="voice-settings-coin" hidden></span><button type="button" aria-label="${tx("关闭", "Close")}" data-close-voice-settings>×</button></header><div class="voice-settings-body"></div></section>`;
   document.body.append(settingsModal);
   const settingsBody = settingsModal.querySelector(".voice-settings-body");
   const panel = document.createElement("section");
   panel.className = "voice-alert-panel";
-  panel.innerHTML = `<div class="voice-panel-head"><div><b>${tx("语音播报", "Voice alerts")}</b><small id="voiceAlertStatus"></small></div></div><div class="voice-panel-grid"><section class="voice-panel-group voice-panel-toggles"><label class="voice-switch"><input id="voiceAlertEnabled" type="checkbox"><span>${tx("语音总开关", "Voice master")}</span></label><label class="voice-switch"><input id="voiceLivePriceEnabled" type="checkbox"><span>${tx("定时播报实时价", "Speak live price")}</span></label><label class="voice-switch voice-switch-sub" title="${tx("开启后定时播报只报一句播报语（如「当前实时价 76287.5」），不带持仓对比", "When on, timed speech says only one short phrase (e.g. 'Live price 76287.5'), without position comparison")}"><input id="voiceLivePriceConcise" type="checkbox"><span>${tx("定时播报实时价精简版", "Concise live price")}</span></label><label class="voice-live-interval">${tx("播报间隔", "Interval")}<select id="voiceAlertInterval"><option value="15">15 ${tx("秒", "sec")}</option><option value="30">30 ${tx("秒", "sec")}</option><option value="60">1 ${tx("分钟", "min")}</option><option value="300">5 ${tx("分钟", "min")}</option></select><small id="voiceLastSpokenAt" class="voice-last-spoken"></small></label></section><section class="voice-panel-group"><label>${tx("播报引擎", "Engine")}<select id="voiceAlertEngine"><option value="edge">${tx("Edge 神经语音（免费）", "Edge neural (free)")}</option><option value="system">${tx("本机系统语音", "System voice")}</option></select></label><label>${tx("音色", "Voice")}<select id="voiceAlertEdgeVoice"><optgroup label="${tx("自然女声", "Female (natural)")}"><option value="zh-CN-XiaoxiaoNeural">${tx("小晓 · 普通话", "Xiaoxiao · Mandarin")}</option><option value="zh-CN-XiaoyiNeural">${tx("小艺 · 普通话", "Xiaoyi · Mandarin")}</option><option value="zh-CN-liaoning-XiaobeiNeural">${tx("小北 · 辽宁口音", "Xiaobei · Liaoning")}</option><option value="zh-CN-shaanxi-XiaoniNeural">${tx("小妮 · 陕西口音", "Xiaoni · Shaanxi")}</option><option value="zh-TW-HsiaoChenNeural">${tx("晓臻 · 台湾国语", "HsiaoChen · Taiwanese")}</option><option value="zh-HK-HiuGaaiNeural">${tx("晓佳 · 粤语", "HiuGaai · Cantonese")}</option></optgroup><optgroup label="${tx("自然男声", "Male (natural)")}"><option value="zh-CN-YunxiNeural">${tx("云希 · 普通话", "Yunxi · Mandarin")}</option><option value="zh-CN-YunyangNeural">${tx("云扬 · 普通话", "Yunyang · Mandarin")}</option></optgroup></select></label><label class="system-voice-label">${tx("系统回退", "System fallback")}<select id="voiceAlertVoice"><option>${tx("正在加载系统语音…", "Loading system voices…")}</option></select></label><label>${tx("提示音音量", "Chime volume")}<span class="voice-volume-row"><input id="voiceChimeVolume" type="range" min="0" max="200" step="1"><output id="voiceChimeVolumeValue"></output></span></label><label>${tx("语音音量", "Speech volume")}<span class="voice-volume-row"><input id="voiceSpeechVolume" type="range" min="0" max="100" step="1"><output id="voiceSpeechVolumeValue"></output></span></label></section><section class="voice-panel-group voice-panel-actions"><button type="button" id="voiceAlertAddRule">＋ ${tx("配置语音规则", "Voice rules")}</button><button type="button" id="voiceAlertTest">${tx("试听", "Test voice")}</button></section></div><small class="voice-rule-note">${tx("语音规则支持价格达到、上涨、下跌及爆仓价；在“添加预警”中勾选“触发时语音播报”。", "Voice rules support reached, rise, fall and liquidation prices; enable Speak when triggered in Add alert.")}</small>`;
+  panel.innerHTML = `<div class="voice-panel-head"><div><b>${tx("语音播报", "Voice alerts")}</b><small id="voiceAlertStatus"></small></div></div><div class="voice-panel-grid"><section class="voice-panel-group voice-panel-toggles"><label class="voice-switch"><input id="voiceAlertEnabled" type="checkbox"><span>${tx("语音总开关", "Voice master")}</span></label><label class="voice-switch"><input id="voiceLivePriceEnabled" type="checkbox"><span>${tx("定时播报实时价", "Speak live price")}</span></label><label class="voice-switch voice-switch-sub" title="${tx("开启后定时播报只报一句播报语（如「当前实时价 76287.5」），不带持仓对比", "When on, timed speech says only one short phrase (e.g. 'Live price 76287.5'), without position comparison")}"><input id="voiceLivePriceConcise" type="checkbox"><span>${tx("定时播报实时价精简版", "Concise live price")}</span></label><label class="voice-live-interval">${tx("播报间隔", "Interval")}<select id="voiceAlertInterval"><option value="15">15 ${tx("秒", "sec")}</option><option value="30">30 ${tx("秒", "sec")}</option><option value="60">1 ${tx("分钟", "min")}</option><option value="300">5 ${tx("分钟", "min")}</option></select><small id="voiceLastSpokenAt" class="voice-last-spoken"></small></label></section><section class="voice-panel-group"><label>${tx("播报引擎", "Engine")}<select id="voiceAlertEngine" title="${tx("微软云语音：服务器调用微软 Azure AI Speech 合成，音色最好、可选 400+ 音色；本机系统语音：直接使用你电脑/手机自带的声音，不联网但音质较机械。", "Microsoft cloud: the server synthesizes via Azure AI Speech (best quality, 400+ voices). System voice: your device's built-in voice, offline but robotic.")}"><option value="edge">${tx("微软云语音（Azure Speech）", "Microsoft cloud (Azure Speech)")}</option><option value="system">${tx("本机系统语音", "System voice")}</option></select></label><label>${tx("音色筛选", "Voice filter")}<select id="voiceGenderFilter"><option value="all">${tx("全部", "All")}</option><option value="male">${tx("男声", "Male")}</option><option value="female">${tx("女声", "Female")}</option></select></label><label>${tx("音色", "Voice")}<select id="voiceAlertEdgeVoice"><optgroup label="${tx("自然女声", "Female (natural)")}"><option value="zh-CN-XiaoxiaoNeural">${tx("小晓 · 普通话", "Xiaoxiao · Mandarin")}</option><option value="zh-CN-XiaoyiNeural">${tx("小艺 · 普通话", "Xiaoyi · Mandarin")}</option><option value="zh-CN-liaoning-XiaobeiNeural">${tx("小北 · 辽宁口音", "Xiaobei · Liaoning")}</option><option value="zh-CN-shaanxi-XiaoniNeural">${tx("小妮 · 陕西口音", "Xiaoni · Shaanxi")}</option><option value="zh-TW-HsiaoChenNeural">${tx("晓臻 · 台湾国语", "HsiaoChen · Taiwanese")}</option><option value="zh-HK-HiuGaaiNeural">${tx("晓佳 · 粤语", "HiuGaai · Cantonese")}</option></optgroup><optgroup label="${tx("自然男声", "Male (natural)")}"><option value="zh-CN-YunxiNeural">${tx("云希 · 普通话", "Yunxi · Mandarin")}</option><option value="zh-CN-YunyangNeural">${tx("云扬 · 普通话", "Yunyang · Mandarin")}</option></optgroup></select></label><label class="system-voice-label">${tx("系统回退", "System fallback")}<select id="voiceAlertVoice"><option>${tx("正在加载系统语音…", "Loading system voices…")}</option></select></label><label><span class="voice-volume-head">${tx("提示音音量", "Chime volume")}<output id="voiceChimeVolumeValue"></output></span><input id="voiceChimeVolume" type="range" min="0" max="200" step="1"></label><label><span class="voice-volume-head">${tx("语音音量", "Speech volume")}<output id="voiceSpeechVolumeValue"></output></span><input id="voiceSpeechVolume" type="range" min="0" max="100" step="1"></label></section><section class="voice-panel-group voice-panel-actions"><button type="button" id="voiceAlertAddRule">＋ ${tx("配置语音规则", "Voice rules")}</button><button type="button" id="voiceAlertTest">${tx("试听", "Test voice")}</button></section></div><small class="voice-rule-note">${tx("语音规则支持价格达到、上涨、下跌及爆仓价；在“添加预警”中勾选“触发时语音播报”。", "Voice rules support reached, rise, fall and liquidation prices; enable Speak when triggered in Add alert.")}</small>`;
   settingsBody.append(panel);
   const voicePanelGrid = panel.querySelector(".voice-panel-grid"),
     voicePanelToggles = panel.querySelector(".voice-panel-toggles"),
@@ -3008,6 +3054,7 @@ setTimeout(() => {
     livePriceEnabled = $("voiceLivePriceEnabled"),
     livePriceConcise = $("voiceLivePriceConcise"),
     engine = $("voiceAlertEngine"),
+    genderFilter = $("voiceGenderFilter"),
     edgeVoice = $("voiceAlertEdgeVoice"),
     interval = $("voiceAlertInterval"),
     lastSpokenAtLabel = $("voiceLastSpokenAt"),
@@ -3058,6 +3105,156 @@ setTimeout(() => {
   edgeVoice
     .querySelectorAll("optgroup:not([data-voice-language])")
     .forEach((group) => (group.dataset.voiceLanguage = "zh"));
+  /* Azure Speech 音色表：配置过 Azure 后，把该区域的全部中文 / 英文音色接进来
+     （含粤语、台湾国语与各方言），仍然按界面语言分组、复用下面的 filterEdgeVoices；
+     未配置 Azure 或拉取失败时，静默沿用上面的静态列表（Edge 可用的那批）。
+
+     ⚠️ Azure 只给「经典」音色配了中文名：HD / MAI 这类新代音色的 DisplayName 和
+     LocalName 返回的是同一串英文，原样显示会出现「Xiaoxiao Dragon HD Flash Latest ·
+     Xiaoxiao Dragon HD Flash Latest」这种自我重复。所以这里补一张人名对照表和版本后缀表，
+     中文界面统一显示「晓晓 · 女声 · 多语言」这类可读名称，并把同一位配音员的多个版本
+     按代次排在一起 —— 让「同名多版本」一眼可辨，而不是看着像重复条目。 */
+  const AZURE_PERSON_ZH = {
+    Xiaoxiao:"晓晓", Xiaoxiao2:"晓晓 2", Xiaoyi:"晓伊", Xiaochen:"晓辰", Xiaohan:"晓涵",
+    Xiaoke:"晓珂", Xiaomeng:"晓梦", Xiaomo:"晓墨", Xiaoqi:"晓琪", Xiaoqiu:"晓秋",
+    Xiaorou:"晓柔", Xiaorui:"晓睿", Xiaoshuang:"晓双", Xiaoyan:"晓颜", Xiaoyou:"晓悠",
+    Xiaoyu:"晓宇", Xiaozhen:"晓甄", Xiaobei:"晓北", Xiaoni:"晓妮",
+    Yunxi:"云希", Yunxiao:"云晓", Yunjian:"云健", Yunyang:"云扬", Yunyi:"云逸",
+    Yunze:"云泽", Yunhao:"云皓", Yunfeng:"云枫", Yunxia:"云夏", Yunye:"云野",
+    Yunjie:"云杰", Yunfan:"云帆", Yunhan:"云瀚", Yunqi:"云奇", Yundeng:"云登",
+    Yunbiao:"云彪", Yunxiang:"云翔",
+    Bo:"博", Lan:"岚", Mei:"梅", Wei:"薇",
+    HiuMaan:"曉曼", WanLung:"雲龍", HiuGaai:"曉佳", HsiaoChen:"曉臻", YunJhe:"雲哲", HsiaoYu:"曉雨",
+  };
+  // [短名里的版本标识, 中文标签, 英文标签]，顺序即下拉里的排列顺序。
+  const AZURE_VARIANTS = [
+    ["classic", "经典", "standard"],
+    ["Multilingual", "多语言", "multilingual"],
+    ["Dialects", "方言", "dialects"],
+    ["DragonLatest", "HD 超清", "HD"],
+    ["DragonHDFlashLatest", "HD 超清 · 极速", "HD flash"],
+    ["MAI-Voice-2-Flash", "MAI 二代 · 极速", "MAI 2 flash"],
+    ["MAI-Voice-2", "MAI 二代", "MAI 2"],
+  ];
+  /* 短名拆成「配音员 + 版本」：
+     zh-CN-Xiaoxiao:DragonHDFlashLatestNeural → Xiaoxiao / DragonHDFlashLatest；
+     zh-CN-XiaoxiaoMultilingualNeural → Xiaoxiao / Multilingual。 */
+  const parseAzureVoice = (name) => {
+    const body = String(name || "").replace(/^[a-z]{2}-[A-Za-z]{2}(-[a-z]+)?-/, "");
+    const colon = body.indexOf(":");
+    const head = colon >= 0 ? body.slice(0, colon) : body;
+    let person = head.replace(/Neural$/, "");
+    let variant = (colon >= 0 ? body.slice(colon + 1) : "").replace(/Neural$/, "");
+    if (/Multilingual$/.test(person)) { person = person.replace(/Multilingual$/, ""); variant = "Multilingual"; }
+    else if (/Dialects$/.test(person)) { person = person.replace(/Dialects$/, ""); variant = "Dialects"; }
+    return { person, variant: variant || "classic" };
+  };
+  const azureVoiceLabel = (item) => {
+    const parsed = parseAzureVoice(item.name),
+      genderOf = item.gender === "Male" ? tx("男声", "male") : item.gender === "Female" ? tx("女声", "female") : "",
+      variant = AZURE_VARIANTS.find((entry) => entry[0] === parsed.variant);
+    if (uiLang === "en") return [item.display || parsed.person, genderOf].filter(Boolean).join(" · ");
+    // 方言音色（zh-CN-sichuan / -liaoning 等）在 Azure 里的 LocalName 自带地名
+    // （「云希 四川」），直接用它可以避免与普通话版的同名音色在列表里撞名。
+    if (/^[a-z]{2}-[A-Z]{2}-[a-z]+/.test(String(item.locale)) && /[\u4e00-\u9fa5]/.test(String(item.local || "")))
+      return [...new Set([String(item.local).trim(), genderOf].filter(Boolean))].join(" · ");
+    // 官方中文名 → 人名对照表 → （万一都没有）英文原名，逐级兜底。
+    const zhName = AZURE_PERSON_ZH[parsed.person]
+      || (/[\u4e00-\u9fa5]/.test(String(item.local || "")) ? item.local : item.display || parsed.person);
+    return [...new Set([zhName, genderOf, variant ? variant[1] : ""].filter(Boolean))].join(" · ");
+  };
+  const escapeVoiceAttr = (value) =>
+    String(value ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]);
+  /* 本地区合成不了的音色（HD／极速／MAI 代次）**不出现在下拉里**。Azure 只在
+     southeastasia、eastus 等少数区域提供它们（eastasia 不在其中），列出来只能是
+     「选了必然失败」的选项 —— 用户要的是一份能用的清单。去掉几条要写清楚，
+     否则音色凭空少了会让人以为坏了：说明行给出条数与恢复办法（换区域即出现）。 */
+  const hdVoiceNote = (() => {
+    edgeVoice.insertAdjacentHTML(
+      "afterend",
+      `<small class="voice-rule-note" style="display:none;margin:4px 0 0;"></small>`,
+    );
+    return edgeVoice.nextElementSibling;
+  })();
+  const paintHdVoiceNote = (hiddenCount) => {
+    if (!hdVoiceNote) return;
+    const show = Number(hiddenCount) > 0;
+    hdVoiceNote.style.display = show ? "block" : "none";
+    if (show)
+      hdVoiceNote.textContent = tx(
+        `已隐藏 ${hiddenCount} 个本地区不支持的音色（HD 超清／极速／MAI 二代）。Azure 只在 southeastasia、eastus 等区域提供这些代次，把 Azure Speech 的区域换成其中之一即可全部出现。`,
+        `${hiddenCount} voices unavailable in this region are hidden (HD / flash / MAI generations). Azure serves those generations only in regions such as southeastasia or eastus — switch the Azure Speech region to make them appear.`,
+      );
+  };
+  const applyAzureVoices = (list, hdSupported = true) => {
+    if (!Array.isArray(list) || !list.length) return false;
+    /* 带代次的音色 ShortName 里有冒号（zh-CN-Yunhan:DragonHDLatestNeural），区域不支持时
+       按冒号整批判掉，剩下的才是本地区真能合成的清单。被去掉的条数只统计**本来会出现在
+       下拉里的语言**（zh / en），否则说明行会报出整个音色表（含几百条本来就看不到的语种）
+       的隐藏数，与用户实际少掉的条目对不上。 */
+    const listed = (item) => ["zh", "en"].includes(String(item && item.locale).split("-")[0].toLowerCase());
+    const usable = hdSupported === false
+      ? list.filter((item) => !/:/.test(String(item && item.name)))
+      : list;
+    paintHdVoiceNote(
+      hdSupported === false
+        ? list.filter((item) => listed(item) && /:/.test(String(item && item.name))).length
+        : 0,
+    );
+    const buckets = new Map();
+    usable.forEach((item) => {
+      const name = item && item.name, locale = item && item.locale;
+      if (!name || !locale) return;
+      const lang = String(locale).split("-")[0].toLowerCase();
+      if (lang !== "zh" && lang !== "en") return;
+      if (!buckets.has(lang)) buckets.set(lang, new Map());
+      if (!buckets.get(lang).has(locale)) buckets.get(lang).set(locale, []);
+      buckets.get(lang).get(locale).push(item);
+    });
+    // 组内按「配音员 + 代次」排序，同一人的经典 / 多语言 / 方言 / HD 依次相邻；
+    // MAI 系列是 Azure 最新的实验音色（只有音译名），整体沉到组尾，不挤在列表最上面。
+    const orderOf = (item) => {
+      const { person, variant } = parseAzureVoice(item.name),
+        index = AZURE_VARIANTS.findIndex((entry) => entry[0] === variant),
+        tail = /^MAI-Voice/.test(variant) ? "1" : "0";
+      return `${tail}|${person}|${String(index < 0 ? 99 : index).padStart(2, "0")}`;
+    };
+    const html = [...buckets.entries()]
+      .map(([lang, groups]) =>
+        [...groups.entries()]
+          .map(([locale, items]) => {
+            const label = items[0].localeName ? `${locale} · ${items[0].localeName}` : locale;
+            const options = [...items]
+              .sort((a, b) => orderOf(a).localeCompare(orderOf(b)))
+              .map((item) => {
+                /* data-gender 取自 Azure 音色表（权威），供「音色筛选」按性别过滤；
+                   静态回退列表没有这个属性时，再由标签文字兜底判断。 */
+                const gender =
+                  item.gender === "Male" ? "male" : item.gender === "Female" ? "female" : "";
+                return `<option value="${escapeVoiceAttr(item.name)}"${gender ? ` data-gender="${gender}"` : ""}>${escapeVoiceAttr(azureVoiceLabel(item))}</option>`;
+              })
+              .join("");
+            return `<optgroup data-voice-language="${lang}" label="${escapeVoiceAttr(label)}">${options}</optgroup>`;
+          })
+          .join(""),
+      )
+      .join("");
+    if (!html) return false;
+    edgeVoice.innerHTML = html;
+    return true;
+  };
+  (async () => {
+    try {
+      const response = await fetch("/api/voice/azure/voices");
+      if (!response.ok) return;
+      const payload = await response.json();
+      if (!applyAzureVoices(payload && payload.voices, payload?.hdSupported !== false)) return;
+      filterEdgeVoices();
+      save();
+    } catch {
+      /* 未配置 Azure：保留静态列表 */
+    }
+  })();
   chimeVolume
     .closest("label")
     .insertAdjacentHTML(
@@ -3114,19 +3311,30 @@ setTimeout(() => {
     save();
     render();
   };
+  /* 一条音色的性别：Azure 音色表里带性别（data-gender），静态回退列表只能从标签文字
+     （「男声 / 女声 / male / female」）反推；两者都认不出就返回空串，选中「全部」时才显示。 */
+  const optionGenderOf = (option) =>
+    option.dataset.gender ||
+    (/女声|女生|female/i.test(option.text) ? "female" : /男声|男生|male/i.test(option.text) ? "male" : "");
   const filterEdgeVoices = () => {
-    const desired = uiLang === "en" ? "en" : "zh";
+    const desired = uiLang === "en" ? "en" : "zh",
+      gender = settings.voiceGenderFilter || "all";
     edgeVoice.querySelectorAll("optgroup").forEach((group) => {
       const visible = group.dataset.voiceLanguage === desired;
       group.hidden = !visible;
       group.querySelectorAll("option").forEach((option) => {
-        option.hidden = !visible;
-        option.disabled = !visible;
+        /* 语言与性别两道筛选叠加：任一条不满足都从下拉里隐去并置灰。 */
+        const usable = visible && (gender === "all" || optionGenderOf(option) === gender);
+        option.hidden = !usable;
+        option.disabled = !usable;
       });
     });
     const selected = [...edgeVoice.options].find(
       (option) => option.value === settings.edgeVoice,
     );
+    /* 选中的音色若不在当前语言组（换过语言，或它已随「本地区不支持」被整批隐藏），
+       落到本语言组第一条。**性别筛选不算数**：它只是帮你挑音色的过滤器，不该在
+       你只是「看一眼男声有哪些」的时候把你正在用的女声悄悄改掉。 */
     if (
       !selected ||
       selected.parentElement?.dataset.voiceLanguage !== desired
@@ -3138,6 +3346,70 @@ setTimeout(() => {
       save();
     }
     edgeVoice.value = settings.edgeVoice;
+  };
+  /* ── 音色试听（v2.12.12）────────────────────────────────────────────────
+     在音色下拉里点选一个音色就立刻念一句自我介绍，不用先保存、再点「试听」才知道
+     自己选的是谁。文案从**下拉里显示的那个名字**反推，而不是去猜 voice.name，
+     所以念出来的永远和用户眼睛看到的一致：
+       「晓晓 · 女声 · 经典」          → 我是晓晓，这是我的声音。
+       「云帆 · 男声 · HD 超清 · 极速」 → 我是云帆，超清极速，这是我的声音。
+     三条规则：① 性别不念（男声/女声/male/female）；②「经典 / standard」是默认代次，
+     念出来纯属噪音，跳过；③ 其余代次去掉 HD 前缀、抹掉「 · 」分隔后连读。 */
+  const VOICE_GENDER_TOKEN = /^(?:女声|男声)$|\b(?:male|female)\b/i;
+  const voiceIntroParts = (option) => {
+    const raw = String(option?.text || "")
+      .split(" · ")
+      .map((part) => part.trim())
+      .filter(Boolean);
+    return {
+      name: raw[0] || "",
+      variant: raw
+        .slice(1)
+        .filter((part) => !VOICE_GENDER_TOKEN.test(part))
+        .join(" · "),
+      lang: /^zh/i.test(String(option?.value ?? "")) ? "zh" : "en",
+    };
+  };
+  const voiceIntroText = (name, variant, lang) => {
+    if (!name) return "";
+    /* 方言音色的显示名是「云希 四川」，念成「云希，四川」比连读清楚；但空格两侧都
+       要挑：中文名后的空格才断开（「晓晓 2」后面是数字会被念成「晓晓，2」），
+       而「William Multilingual」这种多词拉丁名一个空格都不能动。 */
+    const spoken =
+      lang === "en"
+        ? String(name)
+        : String(name).replace(/([\u4e00-\u9fa5])\s+(?=\D)/g, "$1，");
+    if (lang === "en")
+      return `I'm ${spoken}${variant ? ", " + variant : ""}. This is my voice.`;
+    const tail = variant
+      .replace(/\bHD\b/gi, "")
+      .replace(/经典|standard/gi, "")
+      .split(" · ")
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .join("");
+    return `我是${spoken}${tail ? "，" + tail : ""}，这是我的声音。`;
+  };
+  const previewVoice = ({ name, variant, lang }, engineOverride) => {
+    const text = voiceIntroText(name, variant, lang);
+    if (!text) return;
+    /* 试听是用户主动点的：不受「语音总开关」限制（静音状态下也能试音色），也不播提示音，
+       点完直接开口。**失败时不回退到本机系统语音**（fallback:false）—— 否则「点任何音色
+       都念同一个系统嗓」，用户会以为自己挑错了音色，而真正的原因被吞掉。这里如实报错。 */
+    say(text, {
+      force: true,
+      noChime: true,
+      engine: engineOverride,
+      fallback: false,
+      label: name,
+      onFailure: (error) => {
+        if (!status) return;
+        status.textContent = tx(
+          `试听失败：${error?.message || "语音服务不可用"}。音色设置已保存，未改动。`,
+          `Preview failed: ${error?.message || "voice service unavailable"}. Your voice choice is saved.`,
+        );
+      },
+    });
   };
   const formatLastSpokenAt = (ts) => {
     if (!ts) return tx("从未", "Never");
@@ -3190,6 +3462,7 @@ setTimeout(() => {
     chimeVolumeValue.textContent = `${settings.chimeVolume}%`;
     speechVolumeValue.value = `${settings.speechVolume}%`;
     speechVolumeValue.textContent = `${settings.speechVolume}%`;
+    genderFilter.value = settings.voiceGenderFilter;
     panel.classList.toggle("is-enabled", Boolean(settings.enabled));
     /* 定时播报关闭时，播报间隔一并置灰，避免“调了却不生效”的困惑。 */
     interval.disabled = !settings.livePriceEnabled;
@@ -3238,6 +3511,46 @@ setTimeout(() => {
       }
     }
   };
+  /* 分屏版的「定时播报实时价」：每个币种各自计时（主站那个用的是全局 lastSpokenAt，
+     多币种共用会互相把间隔顶掉）。间隔 / 精简版 / 引擎全部沿用同一份设置。
+     force = 手动试听（分屏面板里的「全部播报」）：不受「定时播报」开关与间隔约束，
+     也不需要总开关打开（与主站「试听」同一个口气，是一次明确的用户动作）。 */
+  const speakLiveFor = (coin, price, { force = false, rankBase = 0 } = {}) => {
+    const slot = runtimeFor(coin),
+      now = Date.now();
+    if (!Number.isFinite(price)) return false;
+    /* force = 手动试听（分屏面板的「全部播报」）：不受「定时播报」开关、间隔与总开关
+       约束 —— 与主站「试听」同一口径，点的是明确的试听动作就该出声。 */
+    if (!force && (!settings.enabled || !settings.livePriceEnabled)) return false;
+    if (!force && now - (slot.lastLiveAt || 0) < Number(settings.interval) * 1000) return false;
+    const chimeType =
+      !Number.isFinite(slot.lastLivePrice) || price === slot.lastLivePrice
+        ? settings.chimeType
+        : price > slot.lastLivePrice
+          ? settings.riseChimeType
+          : settings.dropChimeType;
+    const spokenText = settings.livePriceConcise
+      ? concisePriceText(price, coin)
+      : priceText(price, coin);
+    const queued = enqueueSpeech(
+      spokenText,
+      {
+        chimeType,
+        label: tx("定时播报实时价", "Timed live price"),
+        /* force 会把这次播报送出总开关之外（say 的 force 分支）—— 手动试听专用。 */
+        force,
+        onStarted: () => announceVoiceSpeaking(coin, true),
+        onEnded: () => announceVoiceSpeaking(coin, false),
+        onFailure: () => announceVoiceSpeaking(coin, false),
+      },
+      rankBase + speechRankOfKey("live"),
+    );
+    if (queued) {
+      slot.lastLiveAt = now;
+      slot.lastLivePrice = price;
+    }
+    return queued;
+  };
   enabled.onchange = () => {
     settings.enabled = enabled.checked;
     settings.lastSpokenAt = 0;
@@ -3272,11 +3585,22 @@ setTimeout(() => {
     save();
     render();
   };
+  /* 音色筛选（全部 / 男声 / 女声）：只改变下拉里列出的音色，不动当前正在用的音色。 */
+  genderFilter.onchange = () => {
+    settings.voiceGenderFilter = ["all", "male", "female"].includes(genderFilter.value)
+      ? genderFilter.value
+      : "all";
+    save();
+    filterEdgeVoices();
+    render();
+  };
   edgeVoice.onchange = () => {
     settings.edgeVoice = edgeVoice.value;
     save();
     render();
     syncVoiceToServer();
+    /* 选完就地试听：用刚选中的这条 Azure 音色念它的自我介绍。 */
+    previewVoice(voiceIntroParts(edgeVoice.options[edgeVoice.selectedIndex]), "edge");
   };
   interval.onchange = () => {
     settings.interval = Math.max(15, Number(interval.value) || 60);
@@ -3336,11 +3660,49 @@ setTimeout(() => {
     settings.voiceURI = voiceSelect.value;
     save();
     render();
+    /* 系统语音同理试听；音色名后带「· zh-CN」这类语言后缀，试听只念名字本身
+       （macOS 会给出「Eddy (中文（中国大陆）)」这种带括号的全名，括号到行尾一并去掉，
+       贪婪匹配对「X (Chinese (China))」这种嵌套括号也不会只切一半）。 */
+    const picked = voices.find((item) => item.voiceURI === settings.voiceURI),
+      name = String(picked?.name || "")
+        .split(" · ")[0]
+        .replace(/\s*\(.*\)\s*$/, "")
+        .trim();
+    previewVoice(
+      { name, variant: "", lang: /^zh/i.test(String(picked?.lang)) ? "zh" : "en" },
+      "system",
+    );
+  };
+  /* 分屏面板右上角的喇叭把本面板当作「普通模式下该币种的播报按钮」：
+     打开时把主站临时切到目标币种（语音规则按币种隔离存储，不切币就列不出该币种的规则），
+     关闭时原样还原 —— 在分屏里「看一眼某个币的播报设置」不该改变主站视图。 */
+  let voiceSettingsCoinSnapshot = null;
+  const restoreVoiceSettingsCoin = () => {
+    const snap = voiceSettingsCoinSnapshot;
+    voiceSettingsCoinSnapshot = null;
+    paintVoiceSettingsCoinTag(null);
+    const ctx = window.btcCoinContext;
+    if (!snap || !ctx) return;
+    try {
+      if (snap.coin && ctx.coin() !== snap.coin) ctx.setCoin(snap.coin);
+      if (snap.mode && ctx.mode() !== snap.mode) ctx.setMode(snap.mode);
+    } catch {}
+  };
+  /* 标题旁的币种标识：分屏里点不同面板的喇叭会来回切币种，需要一眼看出「这是哪个币的设置」。
+     样式内联 —— 这个浮层的样式集中在 styles.css，别为一个标签再动那份大文件。 */
+  const paintVoiceSettingsCoinTag = (coin) => {
+    const tag = $("voiceSettingsCoinTag");
+    if (!tag) return;
+    tag.style.cssText =
+      "color:#6f9de9;font-weight:600;font-size:12px;margin-left:8px;";
+    tag.textContent = coin ? coinPair(coin) : "";
+    tag.hidden = !coin;
   };
   const showVoiceSettings = (open) => {
     settingsModal.hidden = !open;
     trigger.setAttribute("aria-expanded", String(open));
     if (open) render();
+    else restoreVoiceSettingsCoin();
   };
   const primeAudioContext = () => {
     const Context = window.AudioContext || window.webkitAudioContext;
@@ -3361,8 +3723,33 @@ setTimeout(() => {
   trigger.onclick = () => {
     // 只打开设置面板，不自动开启语音总开关；
     // 是否启用由面板内的「语音总开关」控制。
+    paintVoiceSettingsCoinTag(activeCoin());
     primeAudioContext();
     showVoiceSettings(true);
+  };
+  /* 供分屏面板调用：面板右上角的喇叭 = 普通模式下该币种播报按钮的软链接。
+     点它出来的就是这套「语音播报设置」，且规则列表对应该面板的币种。 */
+  window.btcVoiceSettings = {
+    open: (coin) => {
+      const ctx = window.btcCoinContext;
+      const target = coin ? normalizeCoin(coin) : null;
+      if (ctx && target) {
+        const snapshot = { coin: ctx.coin(), mode: ctx.mode() };
+        if (snapshot.coin !== target || snapshot.mode !== "multi") {
+          /* `||=` 而非直接赋值：连续点不同面板的喇叭时，保住更深一层、尚未还原的那个快照。 */
+          voiceSettingsCoinSnapshot ||= snapshot;
+          try {
+            if (snapshot.mode !== "multi") ctx.setMode("multi");
+            if (ctx.coin() !== target) ctx.setCoin(target);
+          } catch {}
+        }
+      }
+      paintVoiceSettingsCoinTag(target);
+      primeAudioContext();
+      showVoiceSettings(true);
+    },
+    close: () => showVoiceSettings(false),
+    isOpen: () => !settingsModal.hidden,
   };
   settingsModal.querySelector("[data-close-voice-settings]").onclick = () =>
     showVoiceSettings(false);
@@ -3408,12 +3795,13 @@ setTimeout(() => {
   };
   $("voiceAlertAddRule").onclick = () => $("openLocalAlert")?.click();
   /* 多币种（v2.12.5）：语音规则按币种独立存储 —— BTC 沿用旧键保留历史数据，
-     其余币种各用 btc_voice_alert_rules_v1_<COIN>；没设置过的币种就是空，不借 BTC 的规则。 */
-  const voiceRuleStoreKey = () =>
-    "btc_voice_alert_rules_v1" + coinStorageSuffix();
-  const loadVoiceRulesFromStorage = () => {
+     其余币种各用 btc_voice_alert_rules_v1_<COIN>；没设置过的币种就是空，不借 BTC 的规则。
+     分屏（v2.12.17）要按「面板的币种」取用，所以这里带可选的 coin 入参。 */
+  const voiceRuleStoreKey = (coin) =>
+    "btc_voice_alert_rules_v1" + coinStorageSuffix(coin);
+  const parseVoiceRules = (raw) => {
     try {
-      const stored = JSON.parse(localStorage.getItem(voiceRuleStoreKey()) || "[]");
+      const stored = JSON.parse(raw || "[]");
       if (!Array.isArray(stored)) return [];
       return stored
         .filter((rule) => rule && rule.id && Number(rule.targetPrice) > 0)
@@ -3449,10 +3837,32 @@ setTimeout(() => {
       return [];
     }
   };
+  const loadVoiceRulesFromStorage = () =>
+    parseVoiceRules(localStorage.getItem(voiceRuleStoreKey()));
   let voiceRules = loadVoiceRulesFromStorage(),
-    voicePrevious = null,
-    voicePriceHistory = [],
     voiceRuleEditingId = null;
+  /* 每币种一套「跑动状态」：上一拍价 + 最近 61 秒的价格历史。主站当前币种用一份，分屏里
+     每个面板的币种各用一份 —— 跨币种价格量级差得远，共用基准会把切换瞬间当成暴涨暴跌。 */
+  const voiceRuntime = new Map();
+  const runtimeFor = (coin) => {
+    const key = normalizeCoin(coin);
+    let slot = voiceRuntime.get(key);
+    if (!slot) {
+      slot = { prev: null, history: [], lastLiveAt: 0, lastLivePrice: null };
+      voiceRuntime.set(key, slot);
+    }
+    return slot;
+  };
+  const activeRuntime = () => runtimeFor(activeCoin());
+  /* 分屏正在替哪些币种喂价（由 split-mode.js 随分屏开关登记）。这些币种的主站循环让位，
+     否则「主站按当前币种 1s 一拍」与「分屏按面板喂价」会把同一个币种播两遍。 */
+  const splitHandledCoins = new Set();
+  /* 分屏用：按币种取规则（当前币种直接用内存里那份，改动即时生效；其余币种每次现读，
+     保证在主站改动后立刻跟上）。 */
+  const loadVoiceRulesFor = (coin) =>
+    normalizeCoin(coin) === activeCoin()
+      ? voiceRules
+      : parseVoiceRules(localStorage.getItem(voiceRuleStoreKey(coin)));
   const saveVoiceRules = () => {
     localStorage.setItem(voiceRuleStoreKey(), JSON.stringify(voiceRules));
     /* 同步页面设置供状态恢复；服务端不执行关闭页面后的接力播报。 */
@@ -3511,12 +3921,10 @@ setTimeout(() => {
       })
       .catch(() => {});
   }, 10_000);
-  /* 多币种：切换币种时重读该币种自己的语音规则，并重置价格基准与短窗历史
-     （跨币种价格量级差异巨大，沿用旧基准会把切换瞬间当成暴涨暴跌误触发）。 */
+  /* 多币种：切换币种时重读该币种自己的语音规则。价格基准与短窗历史不再重置 —— 它们
+     已改成「按币种各存一份」（runtimeFor），切回来时基准仍在，也不会跨币种误触发。 */
   window.addEventListener("btc:coin-changed", () => {
     voiceRules = loadVoiceRulesFromStorage();
-    voicePrevious = null;
-    voicePriceHistory = [];
     voiceRuleEditingId = null;
     renderVoiceRules();
     syncVoiceToServer();
@@ -3829,14 +4237,11 @@ setTimeout(() => {
     ),
     voiceRuleTargetUnit = voiceRuleModal.querySelector("#voiceRuleTargetUnit"),
     voiceRuleSubmit = voiceRuleModal.querySelector(".alert-submit");
-  const theoreticalLiquidation = (side) => {
-    const entry = (
-      Array.isArray(window.btcPersonalEntries)
-        ? window.btcPersonalEntries
-        : typeof personalEntries !== "undefined"
-          ? personalEntries
-          : []
-    ).find((item) => item?.side === side && Number(item?.price) > 0);
+  /* 理论强平价按「该币种自己的持仓」算（可选 coin：分屏替某个面板判定时必须传）。 */
+  const theoreticalLiquidation = (side, coin) => {
+    const entry = personalEntriesForCoin(coin).find(
+      (item) => item?.side === side && Number(item?.price) > 0,
+    );
     if (!entry) return null;
     const price = Number(entry.price),
       amount = Number(entry.amount),
@@ -4083,10 +4488,12 @@ setTimeout(() => {
   // 表内每个分支与原有 if 块逐字节等价；表外的默认兜底处理 price_above /
   // price_below / long_liquidation / short_liquidation 这一组「价格越过类」规则，
   // 语义与原 if 链完全一致。
+  /* 匹配器统一签名 (rule, from, to, now, amount, coin)；coin 只在分屏替某个面板判定时
+     才非空 —— 理论强平价要用该币种自己的持仓算。 */
   const VOICE_MATCHERS = {
-    theoretical_liquidation_gap(rule, from, to, now, amount) {
+    theoretical_liquidation_gap(rule, from, to, now, amount, coin) {
       const side = rule.positionSide === "short" ? "short" : "long",
-        liquidation = theoreticalLiquidation(side);
+        liquidation = theoreticalLiquidation(side, coin);
       if (!Number.isFinite(liquidation)) return false;
       const satisfied =
         side === "short" ? to >= liquidation - amount : to <= liquidation + amount;
@@ -4094,7 +4501,7 @@ setTimeout(() => {
       // 双仓场景：若反方向也接近强平，只播报当前价格离得更近（更危险）的一边，
       // 避免价格上涨时做空盈利一边的语音播报干扰。
       const otherSide = side === "short" ? "long" : "short",
-        otherLiquidation = theoreticalLiquidation(otherSide);
+        otherLiquidation = theoreticalLiquidation(otherSide, coin);
       if (Number.isFinite(otherLiquidation)) {
         const myGap = Math.abs(to - liquidation),
           otherGap = Math.abs(to - otherLiquidation);
@@ -4114,11 +4521,13 @@ setTimeout(() => {
             : delta >= amount)
       );
     },
-    price_speed(rule, from, to, now, amount) {
+    price_speed(rule, from, to, now, amount, coin, history) {
       const cutoff =
           now -
           Math.min(60, Math.max(1, Number(rule.windowSeconds) || 3)) * 1_000,
-        base = voicePriceHistory.find((point) => point.ts >= cutoff),
+        base = (history || (coin ? runtimeFor(coin).history : activeRuntime().history)).find(
+          (point) => point.ts >= cutoff,
+        ),
         delta = base ? to - base.price : 0;
       return (
         base &&
@@ -4145,16 +4554,17 @@ setTimeout(() => {
       );
     },
   };
-  const voiceMatched = (rule, from, to, now) => {
+  /* coin / history 只在分屏替某个面板判定时传入；主站自己不传，走当前币种。 */
+  const voiceMatched = (rule, from, to, now, coin, history) => {
     const amount = Number(rule.targetPrice);
     const matcher = VOICE_MATCHERS[rule.kind];
-    if (matcher) return matcher(rule, from, to, now, amount);
+    if (matcher) return matcher(rule, from, to, now, amount, coin, history);
     /* 价格越过类规则按“状态”而非“穿越瞬间”判定：创建规则时价格已在目标之外
        （例如现价已高于“上涨至 79865”的目标）也必须立即播报，否则规则会静默失效。 */
     const up = rule.kind === "price_above" || rule.kind === "short_liquidation";
     return up ? to >= rule.targetPrice : to <= rule.targetPrice;
   };
-  const voiceDirection = (rule, from, to, now) => {
+  const voiceDirection = (rule, from, to, now, coin, history) => {
     if (rule.kind === "theoretical_liquidation_gap")
       return rule.positionSide === "short" ? "up" : "down";
     if (
@@ -4176,7 +4586,9 @@ setTimeout(() => {
       const cutoff =
           now -
           Math.min(60, Math.max(1, Number(rule.windowSeconds) || 3)) * 1_000,
-        base = voicePriceHistory.find((point) => point.ts >= cutoff);
+        base = (history || (coin ? runtimeFor(coin).history : activeRuntime().history)).find(
+          (point) => point.ts >= cutoff,
+        );
       return !base || to >= base.price ? "up" : "down";
     }
     return to >= from ? "up" : "down";
@@ -4192,31 +4604,30 @@ setTimeout(() => {
     if (LIQUIDATION_KINDS.has(rule.kind)) return settings.liquidationChimeType;
     return direction === "down" ? settings.dropChimeType : settings.riseChimeType;
   };
-  const voiceRuleMessage = (rule, current, direction) => {
+  /* 可选入参 coin：分屏替某个面板播报时传入该面板的币种 —— 播报语里的币种代码、理论
+     强平价与持仓对比句都按那个币种取，不能跟当前币种走。 */
+  const voiceRuleMessage = (rule, current, direction, coinParam) => {
     const target = Number(rule.targetPrice).toLocaleString("en-US", {
         maximumFractionDigits: 2,
       }),
       currentText = Number(current).toLocaleString("en-US", {
         maximumFractionDigits: 2,
-      });
-    const comparisonText = personalEntryComparisons(current).join(" ");
+      }),
+      /* 多币种播报（v2.12.10）：规则播报语一律带币种英文代码，规则名与「当前价格」
+         两处都带上，单独听到一句也能判断是哪个币种触发的。 */
+      coin = voiceCoinLabel(coinParam);
+    const comparisonText = personalEntryComparisons(current, coinParam).join(" ");
     let message;
     if (rule.kind === "theoretical_liquidation_gap") {
       const side = rule.positionSide === "short" ? "short" : "long",
-        liquidation = theoreticalLiquidation(side),
+        liquidation = theoreticalLiquidation(side, coinParam),
         gap = Number.isFinite(liquidation)
           ? Math.abs(current - liquidation).toLocaleString("en-US", {
               maximumFractionDigits: 2,
             })
           : "--";
       // 若持仓填写了名义金额，可估算当前亏损。
-      const entry = (
-          Array.isArray(window.btcPersonalEntries)
-            ? window.btcPersonalEntries
-            : typeof personalEntries !== "undefined"
-              ? personalEntries
-              : []
-        ).find(
+      const entry = personalEntriesForCoin(coinParam).find(
           (item) => item?.side === side && Number(item?.price) > 0,
         ),
         entryPrice = entry ? Number(entry.price) : null,
@@ -4249,24 +4660,24 @@ setTimeout(() => {
         }
       }
       message = uiLang === "zh"
-        ? `${side === "short" ? "做空" : "做多"}理论强平价警告。理论强平价 ${Number.isFinite(liquidation) ? liquidation.toLocaleString("en-US", { maximumFractionDigits: 2 }) : "暂不可用"}。当前价格 ${currentText}，距强平价 ${gap}。${lossText}`
-        : `${side === "short" ? "Short" : "Long"} theoretical liquidation warning. The theoretical liquidation price is ${Number.isFinite(liquidation) ? liquidation.toLocaleString("en-US", { maximumFractionDigits: 2 }) : "unavailable"}. Current price is ${currentText}, ${gap} from liquidation. ${lossText}`;
+        ? `${coin} ${side === "short" ? "做空" : "做多"}理论强平价警告。理论强平价 ${Number.isFinite(liquidation) ? liquidation.toLocaleString("en-US", { maximumFractionDigits: 2 }) : "暂不可用"}。当前 ${coin} 价格 ${currentText}，距强平价 ${gap}。${lossText}`
+        : `${coin} ${side === "short" ? "Short" : "Long"} theoretical liquidation warning. The theoretical liquidation price is ${Number.isFinite(liquidation) ? liquidation.toLocaleString("en-US", { maximumFractionDigits: 2 }) : "unavailable"}. Current ${coin} price is ${currentText}, ${gap} from liquidation. ${lossText}`;
     } else if (rule.kind === "price_tick_move")
       message = uiLang === "zh"
-        ? `价格跳动提醒。当前价格，${currentText}。较前一次报价${direction === "down" ? "下跌" : "上涨"} ${target}。`
-        : `Price jump alert. Current price is ${currentText}. It moved ${direction === "down" ? "down" : "up"} ${target} from the previous quote.`;
+        ? `${coin} 价格跳动提醒。当前 ${coin} 价格，${currentText}。较前一次报价${direction === "down" ? "下跌" : "上涨"} ${target}。`
+        : `${coin} price jump alert. Current ${coin} price is ${currentText}. It moved ${direction === "down" ? "down" : "up"} ${target} from the previous quote.`;
     else if (rule.kind === "price_speed")
       message = uiLang === "zh"
-        ? `快速价格变动提醒。当前价格，${currentText}。价格在 ${rule.windowSeconds} 秒内${direction === "down" ? "下跌" : "上涨"} ${target}。`
-        : `Rapid price movement alert. Current price is ${currentText}. Price moved ${direction === "down" ? "down" : "up"} ${target} within ${rule.windowSeconds} seconds.`;
+        ? `${coin} 快速价格变动提醒。当前 ${coin} 价格，${currentText}。价格在 ${rule.windowSeconds} 秒内${direction === "down" ? "急跌" : "急涨"} ${target}。`
+        : `${coin} rapid price movement alert. Current ${coin} price is ${currentText}. Price moved ${direction === "down" ? "down" : "up"} ${target} within ${rule.windowSeconds} seconds.`;
     else if (rule.kind === "price_move")
       message = uiLang === "zh"
-        ? `价格变动提醒。当前价格，${currentText}。价格已${direction === "down" ? "下跌" : "上涨"} ${target}。`
-        : `Price movement alert. Current price is ${currentText}. Price has moved ${direction === "down" ? "down" : "up"} ${target}.`;
+        ? `${coin} 价格变动提醒。当前 ${coin} 价格，${currentText}。价格已${direction === "down" ? "下跌" : "上涨"} ${target}。`
+        : `${coin} price movement alert. Current ${coin} price is ${currentText}. Price has moved ${direction === "down" ? "down" : "up"} ${target}.`;
     else
       message = uiLang === "zh"
-        ? `价格预警。当前价格，${currentText}。已触发${voiceRuleName(rule.kind)}，${target}。`
-        : `Price alert. Current price is ${currentText}. ${voiceRuleName(rule.kind)} ${target} triggered.`;
+        ? `${coin} 价格预警。当前 ${coin} 价格，${currentText}。已触发${voiceRuleName(rule.kind)}，${target}。`
+        : `${coin} price alert. Current ${coin} price is ${currentText}. ${voiceRuleName(rule.kind)} ${target} triggered.`;
     return comparisonText ? `${message}${comparisonText}` : message;
   };
   /* 规则的展示名（与规则列表标题一致）：「正在播报/已播报」状态行复用。 */
@@ -4305,36 +4716,37 @@ setTimeout(() => {
     settings.enabled = wasEnabled;
     status.textContent = tx("正在测试该规则…", "Testing this rule…");
   };
-  setInterval(() => {
-    updateVoiceEntrySummary();
-    const current = state?.ticker?.last;
-    if (!Number.isFinite(current)) return;
-    const now = Date.now();
-    voicePriceHistory.push({ ts: now, price: current });
-    voicePriceHistory = voicePriceHistory.filter(
-      (point) => point.ts >= now - 61_000,
-    );
-    if (voicePrevious === null) {
-      voicePrevious = current;
-      return;
+  /* ══ 语音引擎的「一拍」═══════════════════════════════════════════════════════
+   * 把某个币种的最新价喂进来，按【该币种自己的规则】判定并排队播报。两条路都走这里：
+   *   · 主站自己：每 1s 拿 state.ticker.last（当前币种）；
+   *   · 分屏（多币种并行监控）：每个面板把各自币种的价格喂进来（window.btcVoiceEngine.feedPrice）。
+   * 运行态（上一拍价 / 61 秒价格历史）按币种各存一份，跨币种互不干扰；播报本身一律走
+   * 同一个引擎（引擎 / 音色 / 音量 / 提示音全部共用主站设置）。
+   * rankBase：分屏里按「币种顺序」把某个币种的整体优先级垫高/压低（越小越先播）。 */
+  const runVoiceTick = ({ coin, current, rules, persist, rankBase = 0, applyUi = false }) => {
+    const slot = runtimeFor(coin),
+      now = Date.now();
+    slot.history.push({ ts: now, price: current });
+    slot.history = slot.history.filter((point) => point.ts >= now - 61_000);
+    if (slot.prev === null) {
+      slot.prev = current;
+      return 0;
     }
     /* 异常报价跳变保护：单拍价格不可能合法地跳 3% 以上，只有「页面刚打开时先拿到本地
        快照价（或行情源短暂串到别的币种）」这类坏读数才会如此。坏读数一旦进入规则判定，
        所有「价格达到／越过」类规则会在同一拍被同时判成穿越 —— 实测 09:44:39.433 有 6 条
        规则在同一毫秒全部播报（当时 BTC 实际 81,43x，不可能同时穿越 74,500~80,300 六个
        价位）。这一拍只用来把基准对齐到新价格，不参与任何规则判定。 */
-    if (
-      voicePrevious > 0 &&
-      Math.abs(current - voicePrevious) / voicePrevious > 0.03
-    ) {
-      voicePrevious = current;
-      return;
+    if (slot.prev > 0 && Math.abs(current - slot.prev) / slot.prev > 0.03) {
+      slot.prev = current;
+      return 0;
     }
-    const triggeredBatch = [];
+    const prev = slot.prev,
+      triggeredBatch = [];
     if (settings.enabled)
-      for (const rule of voiceRules) {
+      for (const rule of rules) {
         if (!rule.repeat && rule.lastTriggeredAt) continue;
-        const satisfied = voiceMatched(rule, voicePrevious, current, now);
+        const satisfied = voiceMatched(rule, prev, current, now, coin, slot.history);
         /* 冷却时间对「重复播报」规则是唯一的闸门 —— 包括每一次新的边沿。
            曾经的写法是 freshEdge（“上一拍不满足、这一拍满足”）直接短路冷却：对状态类
            规则（上涨至／下跌至，持续满足时 satisfied 恒为真）没问题，但 price_reached
@@ -4354,32 +4766,54 @@ setTimeout(() => {
           !rule.lastTriggeredAt || now - rule.lastTriggeredAt >= cooldown;
         /* 一次性规则到这一步时 lastTriggeredAt 必为空（上面已 continue），恒为真。 */
         if (satisfied && (rule.repeat ? cooldownReady : true)) {
-          const direction = voiceDirection(rule, voicePrevious, current, now);
+          const direction = voiceDirection(rule, prev, current, now, coin, slot.history);
           rule.lastTriggeredAt = now;
           if (rule.kind === "price_move" && rule.repeat)
             rule.anchorPrice = current;
-          saveVoiceRules();
+          persist?.(rules);
           triggeredBatch.push({ rule, direction });
         }
         rule.satisfied = satisfied;
       }
     /* 同一秒内多条规则同时命中：按「播报优先级」排序后依次入队播报，
-       而不是互相掐掉（此前数组靠后的规则会直接 cancel 前面的）。 */
+       而不是互相掐掉（此前数组靠后的规则会直接 cancel 前面的）。
+       分屏里 rankBase 把「币种顺序」放在规则优先级之前（1e6 一档）。 */
     triggeredBatch
       .map((item, index) => ({
         ...item,
-        rank: speechRankOfRule(item.rule) * 1000 + index,
+        rank: rankBase + speechRankOfRule(item.rule) * 1000 + index,
       }))
       .sort((a, b) => a.rank - b.rank)
       .forEach(({ rule, direction, rank }) => {
-        enqueueSpeech(voiceRuleMessage(rule, current, direction), {
+        enqueueSpeech(voiceRuleMessage(rule, current, direction, coin), {
           chimeType: voiceChimeFor(rule, direction),
           label: voiceRuleLabel(rule),
+          onStarted: () => announceVoiceSpeaking(coin, true),
+          onEnded: () => announceVoiceSpeaking(coin, false),
+          onFailure: () => announceVoiceSpeaking(coin, false),
         }, rank);
         announceVoiceTrigger(rule);
       });
-    if (triggeredBatch.length) renderVoiceRules();
-    voicePrevious = current;
+    if (triggeredBatch.length && applyUi) renderVoiceRules();
+    slot.prev = current;
+    return triggeredBatch.length;
+  };
+  /* 分屏里某个币种的播报开始 / 结束 —— 面板喇叭的「播报中」动效与设置面板的高亮都听它。 */
+  const announceVoiceSpeaking = (coin, speaking) => {
+    try {
+      window.dispatchEvent(
+        new CustomEvent("btc:voice-speaking", { detail: { coin: normalizeCoin(coin), speaking: !!speaking } }),
+      );
+    } catch {}
+  };
+  setInterval(() => {
+    updateVoiceEntrySummary();
+    const current = state?.ticker?.last;
+    if (!Number.isFinite(current)) return;
+    const coin = activeCoin();
+    /* 分屏打开且这个币种正由分屏喂价时，跳过主站这条 —— 否则同一个币种会被两条路各播一次。 */
+    if (splitHandledCoins.has(coin)) return;
+    runVoiceTick({ coin, current, rules: voiceRules, persist: saveVoiceRules, applyUi: true });
   }, 1_000);
   window.addEventListener("btc:voice-language-changed", () => {
     filterEdgeVoices();
@@ -4408,11 +4842,84 @@ setTimeout(() => {
     populateVoices();
     setTimeout(populateVoices, VOICE_LIST_POPULATE_DELAY_MS);
   }
-  setInterval(() => speakPrice(false), 1_000);
+  setInterval(() => {
+    /* 分屏打开时，屏幕上的币种由分屏按各自面板喂价播报（含定时实时价），主站这条让位，
+       否则同一个币种的实时价会被念两遍。 */
+    if (splitHandledCoins.has(activeCoin())) return;
+    speakPrice(false);
+  }, 1_000);
   filterEdgeVoices();
   renderVoiceRules();
   render();
   syncVoiceToServer();
+
+  /* ══ 供分屏（多币种并行监控）调用的接口 ══════════════════════════════════════
+   * 分屏的每个面板把「自己币种的最新价」喂进 feedPrice()，这里就用【该币种自己的语音
+   * 规则】判定、用【主站这一套引擎 / 音色 / 音量 / 提示音】发声 —— 与不分屏页面完全同源；
+   * 多个币种同时触发时，按 split-mode.js 给的币种顺序（rankBase）依次播报。
+   * 分屏设置面板里的引擎控件直接读写主站那几个控件（同一份设置），所以两边永远一致。 */
+  window.btcVoiceEngine = {
+    /* 分屏开着哪些币种：这些币种的主站循环让位（分屏接管）。 */
+    setSplitCoins(coins) {
+      splitHandledCoins.clear();
+      (Array.isArray(coins) ? coins : []).forEach((coin) => {
+        try {
+          splitHandledCoins.add(normalizeCoin(coin));
+        } catch {}
+      });
+    },
+    /* 喂一拍价：返回本条命中的规则数。rankBase = 币种顺序 × 1e6（越小越先播）。 */
+    feedPrice(coin, price, rankBase = 0) {
+      let key;
+      try {
+        key = normalizeCoin(coin);
+      } catch {
+        return 0;
+      }
+      const value = Number(price);
+      if (!Number.isFinite(value) || value <= 0) return 0;
+      /* 记下最近一次喂进来的价：面板的「全部播报」要在没开定时播报时也能念出这个价。 */
+      runtimeFor(key).lastPrice = value;
+      const fired = runVoiceTick({
+        coin: key,
+        current: value,
+        rules: loadVoiceRulesFor(key),
+        rankBase,
+        persist:
+          key === activeCoin()
+            ? saveVoiceRules
+            : (rules) =>
+                localStorage.setItem(voiceRuleStoreKey(key), JSON.stringify(rules)),
+      });
+      /* 定时播报实时价也按币种各自计时（共用 lastSpokenAt 会互相顶掉间隔）。 */
+      speakLiveFor(key, value, { rankBase });
+      return fired;
+    },
+    /* 立刻念一句该币种的实时价（分屏「全部播报」/ 单币试听）。price 省略时用最近一次喂价。 */
+    speakLive(coin, price, { force = true, rankBase = 0 } = {}) {
+      let key;
+      try {
+        key = normalizeCoin(coin);
+      } catch {
+        return false;
+      }
+      const value = Number.isFinite(Number(price))
+        ? Number(price)
+        : runtimeFor(key).lastPrice;
+      return speakLiveFor(key, value, { force, rankBase });
+    },
+    /* 只读：该币种配置了几条语音规则（分屏面板据此提示「未配置规则」）。 */
+    ruleCount: (coin) => {
+      try {
+        return loadVoiceRulesFor(normalizeCoin(coin)).length;
+      } catch {
+        return 0;
+      }
+    },
+    master: () => Boolean(settings.enabled),
+    /* 只读诊断：当前有哪些币种由分屏接管（主站循环对这些币种让位）。 */
+    splitCoins: () => [...splitHandledCoins],
+  };
 }, 0);
 
 /* Final readability pass: selected-point pricing, compact global explanations, and clearer short-horizon caveats. */
@@ -6804,19 +7311,25 @@ setTimeout(() => {
     rows = $("connectivityRows"),
     summary = $("connectivitySummary");
   let hasRun = false,
-    running = false;
+    running = false,
+    langTimer = 0;
+  // 分组标题随语言切换即时重绘，避免「面板上次运行在另一种语言」留下英文标题。
+  // Group titles repaint on language change so a panel rendered in the other
+  // language never keeps stale headings.
+  const groupLabels = [];
   const copy = () => {
     toggle.textContent = tx("连通性测试", "Connectivity");
     $("connectivityTitle").textContent = tx("数据连通性", "Data connectivity");
     $("connectivityScope").textContent = tx(
-      "浏览器 → 本站，与服务器 → 数据上游分开统计",
-      "Browser → site and server → upstream measured separately",
+      "浏览器 → 本站 → 服务商（分段统计）",
+      "Browser → site → provider (measured per hop)",
     );
     $("rerunConnectivity").textContent = tx("重新检测", "Test again");
     $("connectivityFoot").textContent = tx(
-      "本地到本站 = 浏览器总耗时减去服务端处理；服务器到上游 = 实际 REST 等待。OKX WebSocket 会显示数据年龄；缓存命中时上游为 0 ms。",
-      "Browser → site = total browser time minus server processing. Server → upstream is REST wait time. OKX WebSocket shows data age; cached responses show 0 ms upstream.",
+      "所有数据都经本站中转，所以「服务器 ↔ 你的浏览器」只有一份主数据（取多次往返的中位数）；下面每一行显示的是「服务器 → 该服务商」的真实往返延时，由服务器直连该服务商测得，缓存命中不会掩盖真实耗时。",
+      "Everything routes through this server, so there is a single Browser ↔ Server figure (median of the round trips below). Every row then shows the measured server → provider round trip, captured by calling that provider directly so cache hits cannot hide real latency.",
     );
+    groupLabels.forEach((item) => (item.el.textContent = item.label()));
   };
   const timedFetch = async (url) => {
     const started = performance.now(),
@@ -6835,6 +7348,7 @@ setTimeout(() => {
       return {
         data,
         ms: totalMs,
+        serverMs,
         siteMs: Math.max(0, totalMs - serverMs),
         upstreamMs: Number(data.timing?.upstreamMs) || 0,
         upstreamCalls: Number(data.timing?.upstreamCalls) || 0,
@@ -6939,12 +7453,35 @@ setTimeout(() => {
     { id: "news", label: () => tx("情绪与新闻", "Sentiment & news") },
     { id: "service", label: () => tx("AI 与服务", "AI & services") },
   ];
-  const checks = () => [
-    { cat: "market", name: tx("OKX WebSocket（优先）", "OKX WebSocket (preferred)"), contract: "wss://ws.okx.com:8443/ws/v5/public", run: webSocketCheck },
+  // 服务端探针按归属落进对应分组（对应 server.mjs 的 CONNECTIVITY_PROBES.group）。
+  const PROBE_CAT = {
+    exchange: "market",
+    macro: "macro",
+    sentiment: "news",
+    service: "service",
+  };
+  // 宏观日历是「多源聚合」：取它依赖的几个源里最慢的那一个作为该行的真实延时。
+  const MACRO_HOSTS = [
+    "fred.stlouisfed.org",
+    "api.bls.gov",
+    "home.treasury.gov",
+    "datacenter-web.eastmoney.com",
+  ];
+  // 没有对应业务行的服务商（备用行情源 / 辅助数据源）也占一行，保证每个服务商
+  // 的真实往返都出现在面板里，而不是只剩业务行。
+  const PROVIDER_NAME = {
+    "api.exchange.coinbase.com": () => tx("Coinbase 备用行情", "Coinbase fallback quotes"),
+    "api.gateio.ws": () => tx("Gate.io 备用行情", "Gate.io fallback quotes"),
+    "api.deribit.com": () => tx("Deribit 期权数据", "Deribit options data"),
+    "api.coingecko.com": () => tx("CoinGecko 行情聚合", "CoinGecko market data"),
+    "mempool.space": () => tx("mempool.space 链上数据", "mempool.space on-chain data"),
+  };
+  const checks = async () => { const base = [
+    { cat: "market", name: tx("OKX WebSocket（优先）", "OKX WebSocket (preferred)"), contract: "wss://ws.okx.com:8443/ws/v5/public", host: "www.okx.com", run: webSocketCheck },
     { cat: "market", name: tx("本站后端", "Site backend"), contract: "/api/status", run: backendCheck },
-    { cat: "market", name: "OKX", contract: coinMetaOf().okx.swap, run: marketCheck("okx", "OKX", coinMetaOf().okx.swap) },
-    { cat: "market", name: "Binance", contract: coinMetaOf().binance, run: marketCheck("binance", "Binance", coinMetaOf().binance) },
-    { cat: "market", name: tx("衍生品上下文", "Derivatives context"), contract: "/api/market-context · OKX", run: async () => {
+    { cat: "market", name: "OKX", contract: coinMetaOf().okx.swap, host: "www.okx.com", run: marketCheck("okx", "OKX", coinMetaOf().okx.swap) },
+    { cat: "market", name: "Binance", contract: coinMetaOf().binance, host: "api.binance.com", run: marketCheck("binance", "Binance", coinMetaOf().binance) },
+    { cat: "market", name: tx("衍生品上下文", "Derivatives context"), contract: "/api/market-context · OKX", host: "www.okx.com", run: async () => {
         const result = await timedFetch("/api/market-context?source=okx"),
           { data } = result;
         const fr = data.fundingRate, oi = data.oi;
@@ -6975,7 +7512,7 @@ setTimeout(() => {
           detail: `BTC ${data.btc.length} · SPY ${data.spy.length} · QQQ ${data.qqq.length} · ${data.cached ? tx("缓存", "cached") : tx("实时", "live")}`,
         };
       } },
-    { cat: "signal", name: tx("美股实时报价", "US equity quotes"), contract: "Yahoo Finance · /api/us-equity-quotes", run: async () => {
+    { cat: "signal", name: tx("美股实时报价", "US equity quotes"), contract: "Yahoo Finance · /api/us-equity-quotes", host: "query1.finance.yahoo.com", run: async () => {
         const result = await timedFetch("/api/us-equity-quotes"),
           { data } = result;
         const spy = (data.quotes || []).find((q) => q.symbol === "SPY"),
@@ -6987,7 +7524,7 @@ setTimeout(() => {
           detail: `SPY ${money(spy?.last)} · QQQ ${money(qqq?.last)} · ${data.source || "--"}`,
         };
       } },
-    { cat: "macro", name: tx("宏观日历与市场环境", "Macro calendar & market context"), contract: "/api/fed-calendar", run: macroCheck },
+    { cat: "macro", name: tx("宏观日历与市场环境", "Macro calendar & market context"), contract: "/api/fed-calendar", hosts: MACRO_HOSTS, run: macroCheck },
     { cat: "macro", name: tx("投资日历", "Investment calendar"), contract: "/api/investment-calendar", run: async () => {
         const result = await timedFetch("/api/investment-calendar"),
           { data } = result;
@@ -7000,8 +7537,8 @@ setTimeout(() => {
           detail: `${events.length} ${tx("个事件", "events")} · ${(sources.join(" / ") || "--").slice(0, 48)}`,
         };
       } },
-    { cat: "news", name: tx("恐惧&贪婪指数", "Fear & Greed Index"), contract: "Alternative.me · /api/sentiment", run: sentimentCheck },
-    { cat: "news", name: tx("新闻流", "News feed"), contract: "Google News · /api/news", run: async () => {
+    { cat: "news", name: tx("恐惧&贪婪指数", "Fear & Greed Index"), contract: "Alternative.me · /api/sentiment", host: "api.alternative.me", run: sentimentCheck },
+    { cat: "news", name: tx("新闻流", "News feed"), contract: "Google News · /api/news", host: "news.google.com", run: async () => {
         const result = await timedFetch("/api/news"),
           { data } = result;
         const items = data.items || [];
@@ -7012,7 +7549,7 @@ setTimeout(() => {
           detail: `${items.length} ${tx("条", "items")} · ${data.source || "--"}`,
         };
       } },
-    { cat: "service", name: tx("AI 助手与密钥", "AI assistant & keys"), contract: "/api/api-center", run: async () => {
+    { cat: "service", name: tx("AI 助手与密钥", "AI assistant & keys"), contract: "/api/api-center", host: "dashscope.aliyuncs.com", run: async () => {
         const result = await timedFetch("/api/api-center"),
           { data } = result;
         const c = data.credentials || {};
@@ -7024,7 +7561,7 @@ setTimeout(() => {
           detail: `${tx("已配置", "configured")}: ${on.length ? on.join(", ") : tx("无", "none")}`,
         };
       } },
-    { cat: "service", name: tx("语音播报", "Voice (Edge TTS)"), contract: "Microsoft Edge TTS · /api/voice/edge", run: async () => {
+    { cat: "service", name: tx("语音播报", "Voice (Azure Speech)"), contract: "Microsoft Azure AI Speech · /api/voice/edge", host: "eastasia.tts.speech.microsoft.com", run: async () => {
         const started = performance.now(),
           controller = new AbortController(),
           timer = setTimeout(() => controller.abort(), 20_000);
@@ -7042,15 +7579,16 @@ setTimeout(() => {
             }),
             buf = await response.arrayBuffer();
           if (!response.ok || buf.byteLength === 0) throw new Error(`HTTP ${response.status}`);
-          const elapsed = Math.round(performance.now() - started);
+          const elapsed = Math.round(performance.now() - started),
+            engine = response.headers.get("x-voice-engine") || "unknown";
           return {
             ms: elapsed,
             siteMs: elapsed,
             upstreamMs: 0,
             upstreamCalls: 0,
-            name: tx("语音播报", "Voice (Edge TTS)"),
-            contract: "Microsoft Edge TTS · /api/voice/edge",
-            detail: `${tx("合成成功", "synthesized")} · ${(buf.byteLength / 1024).toFixed(1)} KB`,
+            name: tx("语音播报", "Voice (Azure Speech)"),
+            contract: `Microsoft Azure AI Speech · ${engine}`,
+            detail: `${tx("合成成功", "synthesized")} · ${(buf.byteLength / 1024).toFixed(1)} KB · ${engine}`,
           };
         } catch (error) {
           throw new Error(error.name === "AbortError" ? tx("请求超时", "Request timed out") : error.message);
@@ -7068,7 +7606,55 @@ setTimeout(() => {
           detail: data.enabled ? tx("已启用", "enabled") : (data.reason || tx("未启用", "disabled")),
         };
       } },
-  ];
+    ];
+    // 「服务器 → 服务商」真实延时：绕开业务缓存，由服务端真打上游端点后回读毫秒数。
+    // 阈值与真实网络相称：<1s 快（绿）、1–3s 慢（黄）、≥3s 或连接失败（红）。
+    let probes = [];
+    try {
+      const probe = await timedFetch("/api/connectivity-probe");
+      probes = probe?.data?.probes || [];
+    } catch { probes = []; }
+    // 每个业务行挂上它依赖的服务商探针（多个源时取最慢的那个）。被业务行认领的
+    // 服务商不再单列 —— 数字直接显示在业务行上；没被认领的补一行，避免重复计数。
+    // Each row adopts the probe of the provider it depends on, taking the slowest
+    // source when a row aggregates several. Claimed providers are not listed twice.
+    const attach = (check) => {
+      const keys = check.hosts || (check.host ? [check.host] : []),
+        hits = keys.map((h) => probes.find((p) => p.host === h)).filter(Boolean);
+      if (!hits.length) return check;
+      const slowest = hits.reduce((a, b) => (Number(b.ms) > Number(a.ms) ? b : a));
+      return { ...check, provider: slowest, providerCount: hits.length };
+    };
+    const claimed = new Set(
+      base.flatMap((check) => check.hosts || (check.host ? [check.host] : [])),
+    );
+    const extra = probes
+      .filter((p) => !claimed.has(p.host))
+      .map((p) => {
+        const nameOf = PROVIDER_NAME[p.host] || (() => p.name);
+        return {
+          cat: PROBE_CAT[p.group] || "service",
+          name: nameOf(),
+          contract: p.host,
+          provider: p,
+          providerCount: 1,
+          run: async () => ({
+            ms: 0,
+            siteMs: 0,
+            serverMs: 0,
+            upstreamMs: 0,
+            upstreamCalls: 0,
+            name: nameOf(),
+            contract: p.host,
+            kind: "provider",
+            detail: p.ok
+              ? `${p.host} · HTTP ${p.status}`
+              : `${tx("连接失败", "connection failed")} · ${p.error || ""}`,
+          }),
+        };
+      });
+    return base.map(attach).concat(extra);
+  };
   const row = (index, name, contract) => {
     const el = document.createElement("article");
     el.className = "connectivity-row testing";
@@ -7086,16 +7672,17 @@ setTimeout(() => {
     running = true;
     copy();
     toggle.classList.add("testing");
-    const all = checks(),
+    const all = await checks(),
       total = all.length;
     summary.className = "connectivity-summary testing";
     summary.textContent = tx(
       `正在并行检测 ${total} 项数据链路（优先 OKX WebSocket）…`,
       `Testing ${total} data paths, prioritizing OKX WebSocket…`,
     );
-    rows.replaceChildren();
-    const groupState = {};
-    for (const cat of CATS) {
+      rows.replaceChildren();
+      groupLabels.length = 0;
+      const groupState = {};
+      for (const cat of CATS) {
       const section = document.createElement("section");
       section.className = "connectivity-group";
       section.dataset.cat = cat.id;
@@ -7105,6 +7692,7 @@ setTimeout(() => {
       head.innerHTML =
         '<span class="connectivity-group-title"></span><span class="connectivity-group-badge"></span>';
       head.querySelector(".connectivity-group-title").textContent = cat.label();
+      groupLabels.push({ el: head.querySelector(".connectivity-group-title"), label: cat.label });
       const body = document.createElement("div");
       body.className = "connectivity-group-body";
       section.append(head, body);
@@ -7149,18 +7737,50 @@ setTimeout(() => {
         el = rows.querySelector(`[data-check="${result.index}"]`);
       el.classList.remove("testing");
       if (result.ok) {
-        passed++;
-        g.passed++;
-        const level =
-          result.siteMs > 1_800 ? "bad" : result.siteMs > 800 ? "warn" : "good";
+        // 右侧只显示「服务器 → 该服务商」的真实往返，不再掺入浏览器那一跳
+        // （浏览器 → 本站统一在顶部的主数据里给一次）。优先用服务端直连探针的
+        // 实测值，其次是本次响应里真实发生的上游等待，两者都没有说明是本机处理。
+        // Every row now shows one figure — server → provider. The browser hop is
+        // reported once above instead of being repeated on each row.
+        const provider = check.provider,
+          upstreamMs = Number(result.upstreamMs) || 0;
+        let ms, level, caption, localOnly = false;
+        if (provider) {
+          ms = Number(provider.ms) || 0;
+          level = !provider.ok || ms >= 3_000 ? "bad" : ms >= 1_000 ? "warn" : "good";
+          caption =
+            tx("服务器 → 服务商", "Server → provider") +
+            (Number(check.providerCount) > 1
+              ? ` · ${tx("多源取最慢", "slowest source")} ×${check.providerCount}`
+              : "") +
+            (provider.ok ? "" : ` · ${tx("超时 / 失败", "timeout / failed")}`);
+        } else if (upstreamMs > 0) {
+          ms = upstreamMs;
+          level = ms >= 3_000 ? "bad" : ms >= 1_000 ? "warn" : "good";
+          caption = `${tx("服务器 → 服务商", "Server → provider")} · ${tx("真实往返", "real round trip")}`;
+        } else {
+          // 纯内部处理（本机 SQLite / 已缓存不算网络往返）：不写 0 ms，
+          // 否则又会被读成「上游 0 ms」那种假象。
+          ms = Number(result.serverMs) || 0;
+          level = ms > 2_000 ? "bad" : ms > 800 ? "warn" : "good";
+          caption = tx("本机处理 · 无外部请求", "local · no upstream call");
+          localOnly = true;
+        }
+        result.latencyMs = ms;
+        result.level = level;
         el.classList.add(level);
         el.querySelector("b").textContent = result.name;
         el.querySelector("small").textContent = result.contract;
         el.querySelector("em").textContent = result.detail;
-        el.querySelector("strong span").textContent =
-          `${tx("本站", "Site")} ${result.siteMs} ms`;
-        el.querySelector("strong small").textContent =
-          `${tx("上游", "Upstream")} ${result.upstreamMs} ms${result.upstreamCalls ? ` · ${result.upstreamCalls} ${tx("次", "calls")}` : ""}`;
+        el.querySelector("strong span").textContent = localOnly
+          ? tx("本机", "local")
+          : `${ms.toLocaleString(uiLang === "zh" ? "zh-CN" : "en-US")} ms`;
+        el.querySelector("strong small").textContent = caption;
+        // 判定为「红」的不计入可用数，否则会出现「汇总全通过」却满屏红灯的自相矛盾。
+        if (level !== "bad") {
+          passed++;
+          g.passed++;
+        }
       } else {
         el.classList.add("bad");
         el.querySelector("em").textContent = result.error;
@@ -7175,11 +7795,54 @@ setTimeout(() => {
       g.section.classList.toggle("has-error", g.passed < g.total);
     }
     const allOk = passed === total;
+    // 两段耗时：①服务器 ↔ 你的浏览器（所有链路共用同一段网络，只显示一个主数据，
+    // 取多次往返的中位数）②服务器 → 各服务商（逐行真实往返，这里给分布）。
+    const roundTrips = results
+      .filter((r) => r.ok && Number(r.siteMs) > 0)
+      .map((r) => Number(r.siteMs))
+      .sort((a, b) => a - b);
+    const rttMs = roundTrips.length
+      ? Math.round(roundTrips[Math.floor(roundTrips.length / 2)])
+      : null;
+    const providerRows = results.filter((r) => all[r.index]?.provider),
+      upsFast = providerRows.filter((r) => r.ok && r.level === "good").length,
+      upsSlow = providerRows.filter((r) => r.ok && r.level === "warn").length,
+      upsFail = providerRows.filter((r) => !r.ok || r.level === "bad").length,
+      upsMax = providerRows.reduce(
+        (mx, r) => (r.ok && Number(r.latencyMs) > mx ? Number(r.latencyMs) : mx),
+        0,
+      );
     summary.className = `connectivity-summary ${allOk ? "good" : passed ? "warn" : "bad"}`;
-    summary.textContent = tx(
-      `检测完成：${passed}/${total} 项可用 · ${new Date().toLocaleTimeString("zh-CN")}`,
-      `Completed: ${passed}/${total} available · ${new Date().toLocaleTimeString("en-US")}`,
+    summary.style.whiteSpace = "";
+    summary.replaceChildren();
+    const summaryLine = (text, className) => {
+      const div = document.createElement("div");
+      if (className) div.className = className;
+      div.textContent = text;
+      summary.append(div);
+    };
+    summaryLine(
+      tx(
+        `检测完成：${passed}/${total} 项可用 · ${new Date().toLocaleTimeString("zh-CN")}`,
+        `Completed: ${passed}/${total} available · ${new Date().toLocaleTimeString("en-US")}`,
+      ),
     );
+    summaryLine(
+      rttMs !== null
+        ? tx(
+            `服务器 ↔ 你的浏览器：${rttMs} ms（主数据）`,
+            `Server ↔ your browser: ${rttMs} ms (master)`,
+          )
+        : tx("服务器 ↔ 你的浏览器：未测得", "Server ↔ your browser: not measured"),
+      "connectivity-rtt",
+    );
+    if (providerRows.length)
+      summaryLine(
+        tx(
+          `服务器 → 服务商：${upsFast} 快 / ${upsSlow} 慢 / ${upsFail} 超时或失败${upsMax ? ` · 最慢 ${upsMax.toLocaleString("zh-CN")} ms` : ""}`,
+          `Server → providers: ${upsFast} fast / ${upsSlow} slow / ${upsFail} failed${upsMax ? ` · slowest ${upsMax.toLocaleString("en-US")} ms` : ""}`,
+        ),
+      );
     toggle.classList.remove("testing");
     toggle.classList.toggle("has-error", !allOk);
     toggle.dataset.result = `${passed}/${total}`;
@@ -7217,6 +7880,14 @@ setTimeout(() => {
   applyLanguage = function () {
     applyLanguageWithConnectivity();
     copy();
+    // 面板处于打开状态时顺手重跑一次：行标题/说明是由运行时的语言渲染的，
+    // 只刷新静态文案会留下「中文界面 + 英文分组」的混合态。面板此刻是收起的
+    // （点语言按钮本身会收起浮层）就把「已跑过」标记清掉，下次展开自然重跑。
+    if (hasRun && !panel.hidden) {
+      clearTimeout(langTimer);
+      langTimer = setTimeout(() => run(), 400);
+    }
+    hasRun = false;
   };
 }, 0);
 
@@ -7384,7 +8055,7 @@ renderRangeExtremaPoints = function () {
   const version = document.createElement("button");
   version.type = "button";
   version.id = "appVersion";
-  version.textContent = "v2.12.7";
+  version.textContent = "v2.12.24";
   version.title = "查看更新日志";
   version.setAttribute("aria-expanded", "false");
   // v2.12.7：版本号随「账户 / API / 连通性 / 数据源」一起收进设置齿轮面板。
@@ -7635,7 +8306,72 @@ renderRangeExtremaPoints = function () {
   // v2.12.7：顶栏「深色」旁新增设置齿轮，低频入口收进下拉面板。
   const v2127SettingsGearChangelog = log.innerHTML;
   log.innerHTML = `<b>v2.12.7 更新日志</b><dl><dt>顶栏新增设置齿轮，低频入口收进面板</dt><dd>「深色」按钮旁新增一个齿轮按钮，点击展开下拉面板；原先常驻顶栏的<b>账户、API 接入中心、版本号、连通性测试、数据源切换</b>五个入口全部收进面板内，点击页面其他位置自动收起。顶栏现在只留 模式开关 · 语言 · 全屏 · 深色 · 齿轮，清爽不少。面板内各项功能与原先完全一致：版本号仍可点开更新日志，连通性测试仍带独立详情面板，账户按钮仍展开登录／账户卡片。</dd></dl><hr>` + v2127SettingsGearChangelog;
+  // v2.12.8：连通性面板改为显示「服务器 → 上游服务商」与「服务器 → 浏览器」的真实延时。
+  const v2128UpstreamLatencyChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.8 更新日志</b><dl><dt>连通性：显示真实的「服务器 → 上游服务商」延时</dt><dd>此前面板里多数项显示「上游 0 ms」且一律绿灯，那是假象：探测的是业务端点，而这些端点几乎都命中缓存（情绪 120 秒、投资日历 300 秒、宏观日历 600 秒、新闻 900 秒），服务端直接返回缓存结果、根本没有发起上游请求，耗时自然统计成 0。现在新增「服务器 → 上游服务商（真实延时）」一组：由服务器直接向 OKX、Binance、Coinbase、Gate、Deribit、FRED、BLS、美国财政部、东方财富、Alternative.me、CoinGecko、mempool.space、Google News、Yahoo Finance、阿里云通义、Edge TTS 共 16 个服务商的真实端点发起请求并计时，完全绕开业务缓存，每个源如实给出毫秒数与颜色 —— <b>1 秒内绿、1–3 秒黄、超过 3 秒或连接失败红</b>。判定为红的项不再计入「可用」数，避免出现「汇总全部通过」却满屏红灯的矛盾。</dd><dt>连通性：汇总区同时给出两段延时</dt><dd>面板顶部现在分两段展示：①服务器 ↔ 你的浏览器（本站往返耗时，本地部署约 2 ms，公网部署通常几十毫秒）②服务器 → 各上游服务商的延时分布（几条快／几条慢／几条超时或失败，并标出最慢的一项）。点击「连通性测试」或「重新检测」都会重跑一次真实探测。</dd></dl><hr>` + v2128UpstreamLatencyChangelog;
+  // v2.12.9：语音播报改用微软 Azure AI Speech Service，并按界面语言接入全部音色。
+  const v2129AzureSpeechChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.9 更新日志</b><dl><dt>语音播报改用微软 Azure AI Speech（官方 REST）</dt><dd>语音合成此前走两条老路：优先调本地 Piper sidecar（这个容器从未部署过，一直在打一个不存在的地址），失败后回退 Edge TTS 的免费 WebSocket 接口 —— 该接口在国内已被限制，也正是 HK 站点语音不稳的根因。现在主链路换成<b>微软 Azure AI Speech Service</b>：服务器向自己所在区域的官方端点合成 MP3（24 kHz / 48 kbps），线路正统且支持每月 50 万字符的免费额度；本地 Piper 相关代码全部移除。Azure 未配置或调用失败时仍回退 Edge TTS，合成响应会带上 x-voice-engine 头，标明本次实际走的是哪条链路。</dd><dt>音色按界面语言动态接入全部 Azure 音色</dt><dd>音色下拉不再是写死的 21 个，而是启动时拉取当前区域可用的全部音色，并按界面语言分组：中文界面接入全部中文音色（简体、粤语、台湾国语，以及东北话、陕西话、四川话、山东话、河南话、广西方言），英文界面接入全部英文音色（美式、英式、澳式、加拿大、新加坡、印度等）。音色名做了中文化整理：Azure 只给经典音色配了中文名，HD、MAI 这类新代音色返回的都是英文，原样显示会出现「Xiaoxiao Dragon HD Flash Latest」重复两遍的观感，现已统一成「晓辰 · 女声 · HD 超清 · 极速」这类可读名称，并把同一位配音员的经典、多语言、方言、HD 各版本排在一起 —— 中文 75 个音色其实只有 50 位配音员，其中 18 位有多个版本，并不是重复条目；方言与普通话撞名时用地名区分（如「云希 四川」），Azure 最新的 MAI 实验音色沉到列表末尾。「播报引擎」下拉里的「Edge 神经语音（免费）」也更名为「微软云语音（Azure Speech）」。音色清单在服务端缓存 24 小时，未配置 Azure 时自动沿用原有的静态列表。</dd></dl><hr>` + v2129AzureSpeechChangelog;
 
+  // v2.12.10：连通性面板重排 —— 浏览器那一跳只留一个主数据，每行只显示服务器到服务商的真实延时。
+  const v21210ConnectivityLatencyChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.10 更新日志</b><dl><dt>连通性：浏览器那一跳只留一个主数据</dt><dd>所有数据都是「浏览器 → 本站 → 服务商」同一条链路，浏览器到服务器这一段的往返跟访问哪个服务商无关，逐行重复显示没有意义。现在面板顶部只给<b>一个主数据</b>「服务器 ↔ 你的浏览器：X ms」（取本次所有成功往返的中位数），下面每一行右侧的数字一律是「服务器 → 该服务商」的真实往返延时。</dd><dt>连通性：服务商延时挂到对应业务行，不再单列一组</dt><dd>原先独立的「服务器 → 上游服务商（真实延时）」一组已取消：OKX、Binance、Yahoo、Alternative.me、Google News、阿里云通义、Azure Speech 等延时直接显示在它们各自的业务行上；宏观日历这类多源聚合的行取所依赖的几个源里最慢的一个并标注「多源取最慢 ×N」；没有被任何业务行认领的服务商（Coinbase、Gate.io、Deribit、CoinGecko、mempool.space）仍按归属补一行，避免重复计数。完全走本机 SQLite 或纯内部处理的行明确标注「本机处理 · 无外部请求」，不再伪装成 0 ms 的上游延时。</dd><dt>连通性：切换语言时整块重绘</dt><dd>修复「中文界面 + 英文分组标题」的混合态：分组标题现在跟随语言即时重绘；面板处于打开状态时切换语言还会顺带重跑一次检测，行名与说明也一并对齐到当前语言。</dd></dl><hr>` + v21210ConnectivityLatencyChangelog;
+
+  // v2.12.11：语音播报全部带币种 —— 实时价与各类状态播报都先说「BTC / ETH / …」。
+  const v21211VoiceCoinChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.11 更新日志</b><dl><dt>语音播报：所有播报语都先报币种</dt><dd>引入多币种后，播报语里一直只有价格、没有币种，听到的人无法判断这条播报说的是哪个币。现在<b>全部播报语都先说明币种，且币种一律用英文代码</b>（BTC / ETH / ZEC / BNB），不用「比特币」这类中文名 —— 中文名下紧跟「实时价格」容易被听成行情类型而不是资产名前缀。<br>① 定时播报实时价：精简版念「当前 BTC 实时价格 76287.5」，完整版念「当前 BTC 价格，76287.5」再接持仓对比。<br>② 状态类播报（价格达到／上涨至／下跌至／价格变动／跳价／短时急涨急跌）统一变成「BTC 价格预警。当前 BTC 价格……」—— 规则名与当前价格两处都带币种，单独听到一句也能确认是哪个币；短时急变规则的措辞同时改为「急涨／急跌」，与设置里「短时间急涨／急跌」的叫法一致。<br>③ 理论强平价警告：「BTC 做空理论强平价警告……当前 BTC 价格……」，亏损估算照旧。<br>播报开关、规则、冷却与播放引擎均未改动，切换币种后播报内容自动跟着当前币种走。</dd></dl><hr>` + v21211VoiceCoinChangelog;
+
+  // v2.12.12：音色下拉里点选即自动试听 —— 念一句「我是 X，这是我的声音」。
+  const v21212VoicePreviewChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.12 更新日志</b><dl><dt>选音色即试听：点一下就知道选的是谁</dt><dd>以前要挑音色只能先选中、保存，再点一次「试听」才听得到，来回比对十几个音色非常费事。现在<b>在音色下拉里点中任意一条就立刻念一句自我介绍</b>：<br>「晓晓 · 女声 · 经典」→「我是晓晓，这是我的声音。」<br>「云帆 · 男声 · HD 超清 · 极速」→「我是云帆，超清极速，这是我的声音。」<br>文案直接从下拉里<b>显示的那个名字</b>生成，不另存一份对照表 —— 列表写什么就念什么，不会出现「写着 HD 超清、念出来是别的版本」这种错位。三条拼接规则：性别不念（女声／男声）；「经典」是默认代次，念出来是噪音，跳过；其余代次去掉 HD 前缀、抹掉分隔点后连读（超清 · 极速 → 超清极速）。方言音色的显示名带地名（如「云希 四川」），会念成「我是云希，四川，这是我的声音。」而不是别扭的连读；「晓晓 2」这类带数字后缀的名字不会被拆开。本机系统语音的那张下拉同样支持点选试听（念英文音色时用英文句式）。</dd><dt>试听不受总开关与提示音影响</dt><dd>试听是点选动作本身触发的，所以<b>静音状态下（语音总开关关闭）也能试听</b>，方便先把音色挑好再开播报；试听也不再先敲一遍提示音，点完直接开口。另外，点的是 Azure 音色时一律用该音色自身合成，即使「播报引擎」当前选着本机系统语音也能听到真实音色。</dd></dl><hr>` + v21212VoicePreviewChangelog;
+
+  // v2.12.13：修复「点任何 HD 音色都念同一个女声」—— 音色名白名单误杀 + 静默换声。
+  const v21213HdVoiceChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.13 更新日志</b><dl><dt>修复：选 HD／极速／MAI 音色时，念出来却是同一个女声</dt><dd>带代次的音色（HD 超清、极速、MAI 二代）在 Azure 里的正式名带一个冒号，例如「云瀚」的高清版是 <code>zh-CN-Yunhan:DragonHDLatestNeural</code>。服务端的音色名白名单把它当成了非法字符，于是<b>把音色悄悄替换成默认的「晓晓」</b>（女声）—— 表现就是「点任何一个 HD 男声，念出来都是同一个人、还是女声」，而且因为声音正常、只是换人，极难判断是哪里出了问题。现在白名单放行冒号（仍然只做防注入校验），并且<b>格式非法时直接报错、绝不替换</b>：让用户听到并非自己选的音色，比直接失败危险得多。</dd><dt>本地区不支持的代次音色直接从下拉里去掉</dt><dd>HD／极速／MAI 代次的音色只在 Azure 的部分区域提供（southeastasia、eastus 等），当前区域（eastasia）合成它们只会返回错误，但音色清单里照旧列着它们。启动时会探测一次本区域是否支持这些代次：不支持就把它们<b>整批从音色下拉里去掉</b>（不留「选了必然失败」的选项），并在下拉下方写明去掉了多少个、以及让它们出现的办法（换成支持 HD 的区域即全部回来）。先前若已选中过这类音色，会自动改回本语言下第一条可用音色，不会停在一个已经消失的选择上。</dd><dt>试听失败不再「悄悄换成本机系统语音」</dt><dd>此前若云端合成没成功，代码会退回用本机系统语音把这句话念一遍 —— 听起来像「音色没变」，实际是换了一套声音。现在音色试听<b>只在成功时出声，失败则如实报错</b>（不会再冒充你选的音色）；广播播报仍保留系统语音兜底，以免彻底静音。</dd></dl><hr>` + v21213HdVoiceChangelog;
+
+  // v2.12.14：音量控件重排 + 新增「音色筛选」（全部 / 男声 / 女声）。
+  const v21214VolumeAndFilterChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.14 更新日志</b><dl><dt>音量：百分比挪到标签右边，滑条拉满整行</dt><dd>提示音／语音音量的百分比原先挂在滑条同一行的末尾，栏目一窄就整段换行掉到滑条下面，看着像是「百分比离标签很远」，滑条也只剩半截。现在<b>百分比紧跟「提示音音量／语音音量」标签</b>（同一行、紧邻），<b>滑条独占整行、铺满栏宽</b>，两行高度也对齐了。</dd><dt>音量：100% 时滑条能真正到底</dt><dd>原生滑条的填充比例由浏览器按「拇指可移动区间」折算，<b>拉到 100% 时右端仍会留一小段灰底</b>，看着像没拉到底。现在轨道与拇指改为自绘：填充比例直接用脚本算好的百分比（此前这个变量只有脚本在写、样式里从没用过），并在两端各留半个拇指的内边距，于是 0% 与 100% 的拇指都正好贴住滑条两端，不再有空白。实测 100% 时拇指右缘与滑条右缘重合（差 1 像素以内）。</dd><dt>新增「音色筛选」：全部 / 男声 / 女声</dt><dd>音色下拉上方多了一个筛选框，可按性别缩小音色列表：选「男声」只列男声音色，选「女声」只列女声音色，选「全部」不限制。性别直接取自 Azure 音色表（不是从名字里猜），系统语音那批没有性别字段的则由标签文字兜底判断。<b>筛选只影响列表里列出哪些音色，不会悄悄改动你当前正在用的音色</b> —— 即使当前音色被筛掉（例如在用女声时切到「男声」），实际播报仍是你选的那条，筛完切回「全部」即可看到它。</dd></dl><hr>` + v21214VolumeAndFilterChangelog;
+
+  // v2.12.15：顶栏「₿ 比特币 / 多币种」模式开关比旁边的药丸高出 4px。
+  const v21215CoinToggleHeightChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.15 更新日志</b><dl><dt>修复：顶栏的模式开关比旁边的按钮高出 4 像素</dt><dd>「₿ 比特币 / 多币种」这个分段开关是<b>整排里唯一一个不是按钮的元素</b>（EN／全屏／深色／齿轮／多分屏都是 button），所以它没吃到「顶栏按钮统一 36px 高」那条规则，只继承了按钮的「最小高度 34px」，再叠上自己的上下各 2px 内边距与 1px 描边，最终算出 <b>40px</b> —— 比紧挨着的邻居高出 4 像素，上下各冒出一截，整排看着参差、像是没对齐。现在把开关外框<b>显式锁到与邻居一致的 36px</b>，内部两段由外框撑高、文字改为居中，切换观感与原来的位置都没变。</dd></dl><hr>` + v21215CoinToggleHeightChangelog;
+
+  // v2.12.16：分屏面板右上角的喇叭改成「普通模式下该币种播报按钮」的软链接。
+  const v21216SplitPaneVoiceLinkChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.16 更新日志</b><dl><dt>分屏：面板上的喇叭改成打开「语音播报设置」</dt><dd>以前分屏每个面板右上角那颗喇叭是它自己的一套简易播报（只念「当前价 + 信号」，30 秒一次），和普通模式下的播报设置完全是两回事 —— 想调音色、加价格预警规则都得先退出分屏。现在它变成普通模式下该币种那颗喇叭的<b>软链接</b>：<b>点它就弹出完整的「语音播报设置」</b>（总开关、定时播报实时价、播报间隔、引擎与音色、按币种隔离的语音规则、播报优先级、音量），而且在分屏里点哪个面板的喇叭，设置面板就自动切到那个币种的规则。关掉设置后主站币种会自动还原成打开前的状态 —— 在分屏里「看一眼某个币的播报设置」不会悄悄改掉你的主视图。</dd><dt>分屏：独立播报的开关搬到顶部「语音优先级」面板</dt><dd>每个币各自独立播报（可同时出声、互不打断）的能力保留，开关移到分屏顶栏的语音面板上：<b>列出当前分屏的所有币种，点一下就开／关该币的独立播报</b>（黄色实心圆点＝开着），按住条目左右拖动仍可调整多条语音同时触发时的播报顺序，「全部播报」按这个顺序依次念一遍。面板上的喇叭图标与这里保持同步 —— 无论从哪边开关，另一边都立刻跟着变。</dd><dt>设置面板标题标出当前币种</dt><dd>分屏里点不同面板的喇叭会来回切币种，标题旁现在会标出「· ETH / USDT」这样的当前币种，一眼就知道这份设置是给哪个币配的；普通模式下点喇叭打开时同样显示当前币种。</dd></dl><hr>` + v21216SplitPaneVoiceLinkChangelog;
+
+  // v2.12.17：分屏顶栏那排语音 chip 收成一颗「播报设置」按钮 + 设置面板（总开关 / 币种顺序 / 引擎）。
+  const v21217SplitVoicePanelChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.17 更新日志</b><dl><dt>分屏：顶栏语音区收成一颗「播报设置」按钮</dt><dd>原先顶栏上摊着「🔊 + 各币种 chip + 全部播报」一整排，币种一多就挤。现在只留一颗 <b>🔊 播报设置</b> 按钮，点开一个面板，里面放三件事：<b>总开关</b>、<b>按币种的播报顺序</b>、<b>语音引擎</b>。<br>面板里的顺序列表就是原来的拖动排序（按住条目上下拖，越靠上越先播）；每行左侧的圆点点亮表示该币种参与播报（原来的 chip 开关），右侧按钮直接打开该币种的语音规则设置。</dd><dt>分屏里各币种真正按「该币种自己的语音规则」播报</dt><dd>以前分屏每个面板是它自己的一套简易播报：每 30 秒念一句「价格 + 涨跌 + 信号」，和你在设置里配的语音规则完全没有关系。现在分屏把每个面板的最新价喂给主站的语音引擎，<b>用该币种自己在「语音播报设置」里配的规则</b>（爆仓价、急涨急跌、价格达到、距理论强平价…）判定并播报 —— 分屏里听到的，就是不分屏页面下那个币种会播报的内容。分屏打开期间主站自己的循环对这些币种让位，不会同一个币种播两遍。</dd><dt>分屏的播报引擎与不分屏页面完全同一套</dt><dd>发声统一走主站的语音引擎：<b>引擎（微软云语音 / 本机系统语音）、音色、语音音量、提示音音量、播报间隔、精简版</b>全部共用同一份设置，面板里改哪一项，主页面与分屏一起变。面板里的这些控件就是主站那几个控件的镜像（改这里等于改主站设置），所以两边永远不会不一致。定时播报实时价在分屏里也按币种各自计时，不会几个币种互相顶掉间隔。</dd><dt>多个币种同时触发 → 按面板里的顺序依次播报</dt><dd>三个币种在同一拍都命中规则时，按你在面板里排的币种顺序从上到下依次念完，而不是抢着念、互相打断；面板里对应的那一行会跟面板喇叭一起闪「播报中」。</dd></dl><hr>` + v21217SplitVoicePanelChangelog;
+
+  // v2.12.18：多分屏背景改磨砂渐变（青绿系）+ 板块按多空状态上色。
+  const v21218SplitToneChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.18 更新日志</b><dl><dt>分屏背景：与主页同款的磨砂渐变，但换成青绿系</dt><dd>多分屏底色从一块纯色，改成跟主页同一套做法：<b>多层柔光色团 + 斜向渐变 + 半透明背景模糊</b>。底下的主页面会透出一点被模糊的轮廓，所以有磨砂玻璃的质感。<br>色系刻意与主页区分开 —— 主页是蓝紫系，分屏换成<b>青绿 / 墨青系</b>，一眼就知道自己在哪个模式里。浅色主题下则是奶白 + 淡青的同款磨砂。</dd><dt>分屏板块按多空状态上色：做多 → 绿，做空 → 红</dt><dd>每个格子的外框、顶部横条与面板内顶部光晕，会跟着该币种的状态变色：<b>做多（或多空信号没出来但价格在涨）→ 绿色；做空（或价格在跌）→ 红色</b>。多空胶囊（「做多 / 做空」）与指标卡里的「多 / 空」小标也一起统一成多绿空红。<br>⚠️ 只有<b>板块与多空</b>用这套颜色；价格数字、涨跌幅、K 线仍然是站内的「涨红跌绿」口径，一秒都没有混。</dd><dt>分屏的涨跌配色统一到主站口径（涨绿跌红）</dt><dd>分屏面板里的价格、涨跌幅与 K 线一直是「涨红跌绿」，与主站（涨绿跌红）正好相反 —— 早期遗留，进分屏像换了个市场。现在整块统一成主站的涨绿跌红，顺手也让「板块色 / 多空色 / 数字色」三者同向：涨且做多 → 全绿，跌或做空 → 全红，一眼看完不用再换算。</dd><dt>面板本身也变成磨砂玻璃</dt><dd>每个格子改成半透明 + 背景模糊的卡片，面板内部换成与外框同色系的深青墨底并叠一层状态色柔光（面板是 iframe，实测透明 iframe 会被浏览器画成白底，所以底色由面板自己画），四个格子叠在渐变背景上层次更清楚。</dd></dl><hr>` + v21218SplitToneChangelog;
+
+  // v2.12.19：分屏每个格子的滚轮手势 —— 滚轮缩放、⌘/Ctrl + 滚轮横向平移。
+  const v21219SplitWheelPanChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.19 更新日志</b><dl><dt>分屏：⌘ / Ctrl + 滚轮 = 横向平移，滚轮仍是缩放</dt><dd>分屏每个格子里，<b>滚轮照旧缩放</b>（以光标位置为锚点，指哪放哪）；<b>按住 ⌘（Command）或 Ctrl 再滚轮 = 左右平移</b>，一次滚动约移过可见宽度的一成，往下滚看更早的数据、往上滚回到最新。这与主站图表是同一个手势（主站工具栏里写的「按住 ⌘ / Ctrl + 滚轮」就是它），两个模式下不用换肌肉记忆。拖动图表平移、双击重置、底部 − / ＋ 也都还在。</dd><dt>分屏：底部手势提示同步更新</dt><dd>格子底部那行小字改成「<b>滚轮缩放 · ⌘/Ctrl+滚轮平移 · 拖拽平移</b>」，不用去查说明书。顺带修掉一个小毛病：触控板双指左右滑（只给横向滚动量）以前会被当成缩放、图表莫名缩小，现在被正确接到平移上。</dd></dl><hr>` + v21219SplitWheelPanChangelog;
+
+  // v2.12.20：分屏各币种的播报默认跟随主站「语音总开关」。
+  const v21220SplitVoiceFollowChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.20 更新日志</b><dl><dt>分屏的喇叭现在跟随主站「语音总开关」</dt><dd>此前分屏有个反直觉的默认：<b>各个币种默认「不参与播报」</b>，于是在普通页面里语音总开关明明开着，进分屏一看，四个格子的喇叭全是<b>静音（红斜线）</b>态，而且也不会把价格喂给播报引擎 —— 看着像分屏把播报关掉了。现在改成<b>默认跟随主站语音总开关</b>：主站开着，分屏里各币种的喇叭就都是亮的，并真的参与播报；主站关掉，四个一起变回静音。这一条与「不分屏时该币种会不会播报」完全一致。</dd><dt>主站总开关一改，分屏立刻跟上</dt><dd>在普通页面（或分屏设置面板那颗镜像开关）上切换总开关，分屏这边<b>四个格子的喇叭图标、播报顺序列表里的圆点、状态行、以及参与播报的币种范围</b>会同时刷新，不用退出分屏重进。</dd><dt>单个币种仍可单独关掉</dt><dd>默认跟随总开关之后，仍可以在分屏的「播报设置 → 播报顺序」里点某个币种左侧的圆点，把它单独从播报里摘出去（以你那次点击为准）；再点一下恢复跟随。</dd></dl><hr>` + v21220SplitVoiceFollowChangelog;
+
+  // v2.12.21：分屏「全屏」按钮修好 + 顶栏按钮配色归队 + 观望态不再染色。
+  const v21221SplitTopbarFixChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.21 更新日志</b><dl><dt>分屏的「⛶ 全屏」按钮修好了</dt><dd>这个按钮此前<b>点了没有任何反应</b> —— 它的处理函数只有调用、没有定义（点一下抛一个 ReferenceError 就没了，界面上看不出任何动静）。现在补上，并且<b>复用主站那一套全屏逻辑</b>：全屏的是整个页面，而分屏本身就是一个铺满全屏的层，所以效果就是「屏幕上只剩分屏」。再点一次按钮或按 <b>Esc</b> 退出，按钮文字会在「全屏 / 退出全屏」之间自动切换。</dd><dt>分屏顶栏按钮的配色归队（不再串主站的蓝紫色）</dt><dd>「全屏 / 退出 / ＋ 添加币种 / 🔊 播报设置」这几颗按钮原先直接继承了主站的蓝紫系色板，摆在青绿色的分屏底上明显不是一家人。现在统一改成<b>分屏自己的青绿系</b>：淡青底 + 青色描边，鼠标移上去变亮；<b>「退出」单独用偏红的颜色</b>（它是关闭整个分屏，跟其它操作区分开）。深色与浅色主题各配了一套。</dd><dt>「观望」的币种不再染成红/绿</dt><dd>板块的状态色现在只由<b>明确的多空信号</b>决定：<b>做多 → 绿、做空 → 红、观望 → 不染色（保持中性）</b>。此前观望时会拿涨跌幅兜底染色，于是「观望 + 微跌」的币种整块变红（比如 BNB 跌 0.03% 也在报红），看着像在提示做空 —— 现在不会了：涨跌由价格、涨跌幅和 K 线自己表达，板块色只表达多空方向。</dd></dl><hr>` + v21221SplitTopbarFixChangelog;
+
+  // v2.12.22：分屏「参与播报」改成会话级，并加「全部跟随总开关」。
+  const v21222SplitVoiceSessionChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.22 更新日志</b><dl><dt>修掉「主站播报开着、分屏却永远静音」</dt><dd>分屏里「某个币种是否参与播报」的选择原先<b>存在浏览器里长期有效</b>：一旦在旧版本里点过某个币种的开关（或它留下了「关闭」记录），<b>就会一直压住主站的语音总开关</b> —— 于是在普通页面里总开关和规则明明都是开着的，分屏四个格子的喇叭却始终是静音态，<b>连刷新页面都没用</b>。现在这类选择改成<b>只在当前这次会话有效</b>：关掉浏览器再打开、或刷新页面后，分屏一律回到「跟随主站总开关」。<br>换句话说：<b>持久状态只由主站的语音总开关决定</b>，分屏里不再有任何能悄悄把播报关掉的历史残留。</dd><dt>新增「全部跟随总开关」按钮</dt><dd>分屏的「播报设置」面板底部多了一颗按钮：一键把每个币种都恢复成<b>跟随主站总开关</b>（主站开着就都播）。如果你之前手动关过某个币种、想让它重新参与，点它最快，不用逐个点圆点。</dd><dt>重新打开总开关 = 全都播</dt><dd>把主站的语音总开关关掉再打开时，分屏会顺手清掉本会话里单独关掉的那些币种，避免出现「总开关明明开着、某个格子却还是静音」这种找不到原因的中间状态。</dd></dl><hr>` + v21222SplitVoiceSessionChangelog;
+
+  // v2.12.23：修掉顶部「美股实时报价」在盘中永远不显示（服务端交易时段判定漏 await）。
+  const v21223UsEquityStateChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.23 更新日志</b><dl><dt>顶部状态条的美股报价（SPY / QQQ）现在真会出现了</dt><dd>症状是：美股明明<b>开市中</b>——顶栏那句「纽约（美股）周二 09:45 · <b>开市中</b>」显示得好好的——可它右边本该跟出 SPY / QQQ 的<b>实时价格与涨跌幅</b>，那里却<b>永远是一片空白</b>。刷新、重启、换浏览器都一样。</dd><dt>根因：一个函数被写成了 async，调用时却漏了 await</dt><dd>服务端那个「现在是盘前 / 盘中 / 盘后」的判定函数被声明成了 <b>async</b>，但取用它的地方<b>没写 await</b>。于是拿到的不是 <code>"REGULAR"</code> 这个字符串，而是一个 <b>Promise 对象</b>；接口把它序列化成 <code>{}</code> 交给前端，前端每次判断「是否处于常规交易时段」都得到假值，就顺手把这一块清空了。<br>注意这跟开不开盘<b>无关</b>——只要走的是腾讯这个主源，它就<b>从来没有显示过</b>；跟数据源能不能连通也无关，行情其实早就取到了，只是被这一道判定挡在门外。</dd><dt>修复与顺带的两处对齐</dt><dd>① 该函数改成<b>同步函数</b>（它本来就不需要异步），并在旁边留了注释，写明「改回 async 就会重犯」，避免以后再次踩同一个坑。<br>② 取美东时间的方式换成按字段解析，不再依赖对本地化时间串的宽松解析。<br>③ 收盘边界从「≤ 16:00」收紧为「&lt; 16:00」—— 16:00 整不再算盘中，与前端口径完全一致。</dd></dl><hr>` + v21223UsEquityStateChangelog;
+
+  // v2.12.24：多分屏按钮移到「比特币 / 多币种」左边 + 币种切换组配色归队。
+  const v21224TopbarOrderChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.24 更新日志</b><dl><dt>「⊞ 多分屏」挪到顶栏最左边</dt><dd>它原先固定在顶栏最右端。现在移到<b>「₿ 比特币 / 多币种」切换组的左侧</b>，于是整排从左到右是：<b>多分屏 → 币种切换 → EN → 全屏 → 深色 → 齿轮</b>，与「先选模式、再选语言/显示」的顺序一致。<br>顺带说明为什么这颗按钮的落位要两个文件一起改：币种切换组由 <code>app.js</code> 注入，并且原本会<b>无条件把自己抢到第一位</b>，而多分屏按钮由另一个模块注入 —— 谁先跑谁就占位。现在两边都改成「以对方为锚、只在位置不对时才动」，<b>无论加载先后，最终都是多分屏在最左</b>，也不会来回抖。</dd><dt>币种切换组的配色归队</dt><dd>「₿ 比特币 / 多币种」这个分段开关原先用的是<b>深黑底色</b>（与页面背景同系），摆在旁边那排<b>紫色胶囊</b>按钮（EN / 全屏 / 深色 / 齿轮 / 多分屏）里明显不是一家人 —— 整排看着"凹"下去一块。<br>现在它的底色与描边改成<b>与顶栏其它按钮同一套紫色系</b>：外框淡紫描边 + 半透明紫底，选中的那一半用更实的紫并配白字。深色与浅色主题各对齐了一次（浅色下同样改为与相邻按钮一致的白底半透明 + 同色描边）。</dd><dt>「EN」的蓝色描边也一起归队</dt><dd>顺便查了一遍整排：这颗语言按钮过去被单独指定了<b>蓝色描边 + 蓝白字</b>，是全排里<b>唯一一颗蓝边按钮</b>，挨着旁边几颗淡紫边显得突兀。现在取消单独染色，与全屏 / 深色 / 齿轮 / 多分屏 完全同一套（只剩宽度差异）。</dd></dl><hr>` + v21224TopbarOrderChangelog;
 
   // 旧版本默认收起，确保用户打开日志时首先看到当前版本的完整变更。
   // Older releases are collapsed by default so opening the log focuses on the current release.
@@ -10834,7 +11570,13 @@ function renderExpandedIndicatorDetails(m) {
       vwap: `${relativeTo(vwap)}因此日内价格目前${vwapBull ? "在多数成交者的平均成本之上，偏强" : "在多数成交者的平均成本之下，偏弱"}。`,
       funding: `当前资金费率为 ${formatRate(funding)}，${crowdedLong ? "多头付费压力偏高，追多风险增加" : crowdedShort ? "空头付费压力偏高，追空风险增加" : "尚未达到明显拥挤水平"}。`,
       oi: `当前未平仓量为 ${Number.isFinite(oi) ? oi.toLocaleString("en-US", { maximumFractionDigits: 2 }) : "—"} ${context?.oiUnit || ""}；它反映杠杆资金规模，本项单独不能判断方向。`,
-      basis: `当前永续价差为 ${basis >= 0 ? "+" : ""}${basis.toFixed(3)}%，${extremeBasis ? "已达到需要留意杠杆拥挤的范围" : "仍在常规范围内"}。`,
+      /* ⚠️ basis 来自行情快照的 context.basisPct，可能整块缺失（合约数据没返回时）
+         → 这里必须自己守卫：此前直接 basis.toFixed(3)，缺数据时抛
+         TypeError: Cannot read properties of undefined (reading 'toFixed')，
+         连带把后面的 row.tip 赋值一起打断。 */
+      basis: `当前永续价差为 ${
+        Number.isFinite(basis) ? (basis >= 0 ? "+" : "") + basis.toFixed(3) : "—"
+      }%，${extremeBasis ? "已达到需要留意杠杆拥挤的范围" : "仍在常规范围内"}。`,
     };
   rows.forEach((row) => {
     row.tip = `${liveMeaning[row.key] || `当前读数为 ${row.value}，系统标记为${tag(row.kind)}。`} ${row.tip}`;
@@ -16638,11 +17380,18 @@ positionCalc = function () {
     setCoinMode(chip.dataset.mode);
   });
 
-  // 账号按钮已由 v2.12.7 收进设置面板；模式开关固定插在顶栏最前（账户按钮左侧不再成立）。
+  // 账号按钮已由 v2.12.7 收进设置面板。v2.12.24：「⊞ 多分屏」固定在顶栏最左，
+  // 模式开关紧随其后（用户要求分屏按钮排在「₿ 比特币 / 多币种」左边），不再无条件抢第一位。
+  // 分屏按钮由 split-mode.js 注入、可能晚于本段执行，所以以它为锚：存在就排在它后面，否则仍排最前。
+  // 两个文件互相让位，但都只在「位置不对」时才动 DOM，MutationObserver 因此能收敛、不会来回抖。
   const placeModeButton = () => {
-    if (header.firstElementChild !== modeBtn) {
-      header.insertBefore(modeBtn, header.firstElementChild);
-    }
+    const splitBtn = document.getElementById("splitModeBtn"),
+      anchor =
+        splitBtn && splitBtn.parentElement === header
+          ? splitBtn.nextElementSibling
+          : header.firstElementChild;
+    if (anchor === modeBtn) return;
+    header.insertBefore(modeBtn, anchor);
   };
   placeModeButton();
   if (window.MutationObserver) new MutationObserver(placeModeButton).observe(header, { childList: true });

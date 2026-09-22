@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>分屏面板</title>
+<link rel="stylesheet" href="/styles/split.css?v=18">
+</head>
+<body class="sp-pane-page" data-theme="dark">
+<div id="paneRoot">
+  <div id="paneHead">
+    <span class="pane-coin" id="paneCoin">--</span>
+    <strong class="pane-price" id="panePrice">--</strong>
+    <span class="pane-change" id="paneChange">--</span>
+    <span class="signal-chip flat" id="paneSignal">--</span>
+    <span class="signal-score" id="paneBasis"></span>
+    <!-- 喇叭图标与主站「经典大屏」语音按钮（.voice-quick-toggle）同一 SVG：
+         开启时显示声波（voice-wave），关闭时显示红色斜线（voice-mute）。 -->
+    <button class="pane-voice is-muted" id="paneVoice" type="button" aria-label="语音播报">
+      <svg viewBox="0 0 64 64" aria-hidden="true"><path d="M8 25h13l18-14v42L21 39H8z"/><path class="voice-wave" d="M46 23c5 5 5 13 0 18M52 16c10 10 10 22 0 32"/><line class="voice-mute" x1="9" y1="10" x2="55" y2="54"/></svg>
+    </button>
+  </div>
+  <div class="pane-indicators" id="paneIndicators"></div>
+  <div class="pane-chart-wrap">
+    <canvas id="paneChart"></canvas>
+  </div>
+  <div class="pane-foot">
+    <button class="sp-zoom" id="zoomOut" type="button" title="缩小">−</button>
+    <span class="pane-zoom-count" id="zoomCount">130</span>
+    <button class="sp-zoom" id="zoomIn" type="button" title="放大">＋</button>
+    <span class="pane-range" id="paneRange"></span>
+  </div>
+  <div class="pane-status" id="paneStatus"></div>
+</div>
+<script>
+// 经典脚本先于 module 执行，可捕获模块加载/解析/链接阶段的错误（模块自身内联监听来不及注册）。
+window.addEventListener('error', function (e) {
+  var s = document.getElementById('paneStatus');
+  if (s) s.textContent = '面板加载失败：' + (e.message || (e.filename + ':' + e.lineno) || e.type);
+}, true);
+</script>
+<script type="module" src="/split-pane.js?v=24"></script>
+</body>
+</html>

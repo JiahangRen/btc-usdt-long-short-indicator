@@ -1703,8 +1703,9 @@ html[data-theme="light"] #chartTooltip {
 }
 .controls #langToggle {
   min-width: 74px;
-  border-color: #608fce;
-  color: #dceaff;
+  /* v2.12.24：原先这里额外给了 `border-color: #608fce` + `color: #dceaff`，于是 EN
+     成了整排顶栏按钮里唯一一颗蓝边按钮（其余都是淡紫边）。顶栏已统一为紫系胶囊，
+     这里不再单独染色，只留宽度。浅色主题的对应覆盖见下方 ID 版规则。 */
 }
 .controls #themeToggle {
   min-width: 88px;
@@ -4150,6 +4151,17 @@ main > header .controls .connectivity-toggle:hover {
 .connectivity-summary.bad {
   color: var(--bear);
   background: rgba(255, 77, 106, 0.08);
+}
+/* 「服务器 ↔ 你的浏览器」是全面板唯一的一段本机延迟，加粗突出为主数据。 */
+.connectivity-summary > div {
+  line-height: 1.55;
+}
+.connectivity-summary .connectivity-rtt {
+  font:
+    800 12px "SF Mono",
+    ui-monospace,
+    monospace;
+  letter-spacing: 0.2px;
 }
 .connectivity-rows {
   display: block;
@@ -8843,21 +8855,69 @@ body.voice-grid-resizing {
   width: auto !important;
   height: auto !important;
 }
+/* 音量：标签与百分比同一行（百分比紧贴标签，不再换行掉到滑条下面），滑条独占整行。
+   原先 .voice-volume-row 用 flex-wrap 把滑条与百分比排在一行，窄栏下必然换行 ——
+   那正是「百分比离标签很远、滑条右边还空一截」的来源。 */
+.voice-alert-panel .voice-volume-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  white-space: nowrap;
+}
+.voice-alert-panel .voice-volume-head output {
+  min-width: 0;
+}
+/* 自绘 range 的轨道与拇指：原生 range 的填充由浏览器按「拇指可移动区间」折算，100% 时
+   右端仍会留一小段灰底（看着像「拉不到最右边」）。这里把填充比例交给 JS 已经算好的
+   --voice-range-fill（此前该变量只有 JS 在写、CSS 从未用过），并用左右各半个拇指的
+   padding 留出端点余量，于是 0% 与 100% 的拇指都正好贴住滑条两端。 */
 .voice-alert-panel input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
   width: 100%;
   min-width: 110px;
-  accent-color: var(--accent-cyan);
+  height: 16px;
+  margin: 0;
+  padding: 0 7px;
+  background: transparent;
   cursor: pointer;
 }
-.voice-alert-panel .voice-volume-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  /* 窄栏下允许换行，避免音量滑条（min-width 110px）把行顶出卡片。 */
-  flex-wrap: wrap;
+.voice-alert-panel input[type="range"]::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--accent-cyan) 0 var(--voice-range-fill, 0%),
+    rgba(126, 178, 238, 0.22) var(--voice-range-fill, 0%) 100%
+  );
 }
-.voice-alert-panel .voice-volume-row output {
-  flex: 0 0 auto;
+.voice-alert-panel input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -4px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--accent-cyan);
+  box-shadow: 0 0 0 2px rgba(8, 16, 30, 0.9);
+}
+.voice-alert-panel input[type="range"]::-moz-range-track {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(126, 178, 238, 0.22);
+}
+.voice-alert-panel input[type="range"]::-moz-range-progress {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--accent-cyan);
+}
+.voice-alert-panel input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--accent-cyan);
 }
 .voice-alert-panel output {
   min-width: 30px;
@@ -8870,6 +8930,15 @@ body.voice-grid-resizing {
 .voice-alert-panel .voice-rule-note {
   flex-basis: 100%;
   line-height: 1.45;
+  /* ⚠️ label 全局 white-space:nowrap，而这条说明行是插在标签内部的：必须允许换行，
+     否则一行长文案会把整列撑宽，连带把同标签里的下拉一起顶出卡片（实测窄栏下
+     「音色」下拉被撑到 639px，压到右侧语音规则卡片上）。 */
+  white-space: normal;
+  min-width: 0;
+}
+.voice-alert-panel select {
+  /* 下拉的固有宽度 = 最长选项文本，窄栏里会把卡片顶破；允许收缩后由浏览器截断显示。 */
+  min-width: 0;
 }
 .voice-alert-panel.uses-edge .system-voice-label {
   display: none;
@@ -14430,26 +14499,41 @@ main > header.is-smart-bar.is-stowed {
 
 /* ══ 多币种：模式开关 + 币种切换器 ══════════════════════════════════════════
    只新增两类元素，不改动任何既有规则，因此比特币模式下的观感与之前完全一致。 */
+/* ⚠️ 高度必须盯住顶栏其它药丸（`main > header .controls > button` 的 height:36px）：
+   本控件是 div 而非 button，吃不到那条 36px，只会从内部按钮继承 `min-height: 34px`，
+   于是自己算出 40px（34 + 2×2 padding + 2×1 border）—— 比旁边的 EN/全屏/深色/齿轮/多分屏
+   各高出 4px，上下各冒 2px，整排看着参差。这里显式锁 36px，并把按钮交给 stretch 撑高。 */
 .controls #coinModeToggle {
   display: inline-flex;
   align-items: stretch;
+  box-sizing: border-box;
+  height: 36px;
+  min-height: 36px;
   gap: 1px;
   padding: 2px;
-  border: 1px solid var(--border-subtle, #2a313b);
-  background: var(--bg-surface-2, #0d1524);
+  /* v2.12.24：配色对齐顶栏紫胶囊。原先吃 `--border-subtle` / `--bg-surface-2`
+     是深黑底（#0d1524），摆在 EN/全屏/深色/齿轮/多分屏 那排紫胶囊里明显不是一家人。 */
+  border: 1px solid rgba(176, 159, 223, 0.3);
+  background: rgba(111, 83, 159, 0.2);
   border-radius: 999px;
   white-space: nowrap;
   line-height: 1;
 }
 .controls #coinModeToggle button {
   flex: 1 1 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* 覆盖 `main > header .controls button { min-height: 34px }`：高度由容器给定，
+     上下内边距改为 0，文字用 flex 居中 —— 否则 34px 最小高会把容器重新顶回 40px。 */
+  min-height: 0;
   appearance: none;
   border: 0;
   background: transparent;
-  color: var(--text-secondary, #9aa4b2);
+  color: rgba(231, 234, 251, 0.72);
   font-size: 12px;
   line-height: 1;
-  padding: 5px 11px;
+  padding: 0 11px;
   border-radius: 999px;
   cursor: pointer;
   transition: background .15s ease, color .15s ease, box-shadow .15s ease, transform .15s ease;
@@ -14459,18 +14543,21 @@ main > header.is-smart-bar.is-stowed {
   transform: translateY(-0.5px);
 }
 .controls #coinModeToggle button.is-active {
-  background: var(--bg-elevated, #19243a);
-  color: var(--text-primary, #e6edf3);
+  /* 用顶栏描边同源的淡紫（#b09fdf）提高不透明度做选中块：比原来那个深黑 `--bg-elevated`
+     更"凸"、也更贴合这排紫胶囊。 */
+  background: rgba(176, 159, 223, 0.34);
+  color: #fff;
   font-weight: 600;
   box-shadow: 0 1px 2px rgba(0, 0, 0, .18), 0 0 0 1px rgba(255, 255, 255, .06) inset;
 }
 html[data-theme="light"] .controls #coinModeToggle button.is-active {
   background: #fff;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, .12), 0 0 0 1px rgba(0, 0, 0, .04) inset;
+  color: #24364d;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .12), 0 0 0 1px rgba(64, 88, 119, .18) inset;
 }
 html[data-theme="light"] .controls #coinModeToggle {
-  background: #eef2f6;
-  border-color: #d6dde5;
+  background: rgba(255, 255, 255, 0.72);
+  border-color: rgba(64, 88, 119, 0.22);
 }
 html[data-theme="light"] .controls #coinModeToggle button { color: #56616e; }
 html[data-theme="light"] .controls #coinModeToggle button:hover { color: #1a1d23; }
