@@ -14,6 +14,8 @@ on:
           - preflight
           - configure-env
           - deploy
+          - db-diag
+          - db-fix
 
 jobs:
   deploy:
@@ -238,6 +240,85 @@ jobs:
                 fi
               fi
             '
+
+      # Postgres 密码漂移的体检 / 修复。
+      #
+      # 背景：POSTGRES_PASSWORD 只在数据卷「首次初始化」时写进数据库。改了服务器
+      # .env 的密码之后，卷里的旧密码不会跟着变 —— 症状很隐蔽：站点照常 200，但
+      # /api/alerts/health 变成 enabled:false，alert-worker 反复重启。
+      # db-diag 只读，db-fix 才会执行 ALTER USER（把库里的密码对齐到 .env 当前值）。
+      - name: Inspect or fix postgres password drift
+        if: steps.ssh.outputs.ready == 'true' && (inputs.mode == 'db-diag' || inputs.mode == 'db-fix')
+        env:
+          DEPLOY_HOST: ${{ env.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ env.DEPLOY_USER }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p 22 "$DEPLOY_USER@$DEPLOY_HOST" '
+            set -Eeuo pipefail
+            app=/opt/btc-usdt-long-short-indicator
+            cd "$app"
+            db_pw="$(grep -E ^POSTGRES_PASSWORD= .env | head -1 | cut -d= -f2- || true)"
+            echo "=== 1. 容器状态 ==="
+            docker compose ps --format "table {{.Service}}\t{{.Status}}" || true
+            echo
+            echo "=== 2. .env 关键项体检（只打印长度与字符类别，绝不打印值）==="
+            for key in POSTGRES_PASSWORD ALERT_ENCRYPTION_KEY AZURE_SPEECH_KEY FINNHUB_API_KEY EIA_API_KEY COINGECKO_API_KEY; do
+              value="$(grep -E "^${key}=" .env | head -1 | cut -d= -f2- || true)"
+              if [ -z "$value" ]; then
+                echo "   ${key}: 缺失"
+              else
+                note=""
+                case "$value" in *\$*) note="$note 含美元符";; esac
+                case "$value" in *[[:space:]]*) note="$note 含空白";; esac
+                case "$value" in *[!A-Za-z0-9_./:+-]*) note="$note 含非常规字符";; esac
+                echo "   ${key}: 长度 ${#value}${note}"
+              fi
+            done
+            echo
+            echo "=== 3. 用 .env 的密码连 postgres（host 认证）==="
+            if [ -z "$db_pw" ]; then
+              echo "   .env 里没有 POSTGRES_PASSWORD，无法测试"
+            elif docker compose exec -T -e PGPASSWORD="$db_pw" postgres psql -U btc_alerts -h 127.0.0.1 -d btc_alerts -tAc "select 1" >/dev/null 2>&1; then
+              echo "   认证成功 —— 密码与数据卷一致"
+            else
+              echo "   认证失败 —— 密码漂移（.env 与数据卷不一致）"
+            fi
+            echo
+            echo "=== 4. 容器内 local socket（trust）是否可用（决定能否修复）==="
+            if docker compose exec -T postgres psql -U btc_alerts -d btc_alerts -tAc "select current_user" >/dev/null 2>&1; then
+              echo "   可用"
+            else
+              echo "   不可用"
+            fi
+            echo
+            echo "=== 5. 告警库现有表数量（确认改密码不影响数据）==="
+            docker compose exec -T postgres psql -U btc_alerts -d btc_alerts -tAc "select count(*) from information_schema.tables where table_schema = current_schema()" 2>/dev/null || echo "   查询失败"
+            echo
+            echo "=== 6. 本机告警健康 ==="
+            curl -s --noproxy "*" -m 10 http://127.0.0.1:8787/api/alerts/health || echo "   取不到"
+            echo
+            if [ "${MODE}" = "db-fix" ]; then
+              echo "=== 7. 对齐 postgres 密码到 .env 当前值 ==="
+              if [ -z "$db_pw" ]; then
+                echo "   缺少 POSTGRES_PASSWORD，拒绝执行" >&2
+                exit 1
+              fi
+              case "$db_pw" in *\$\$*)
+                echo "   密码含连续美元符，无法用 dollar-quote 安全传递，拒绝执行" >&2
+                exit 1
+                ;;
+              esac
+              printf "ALTER USER btc_alerts WITH PASSWORD \$\$%s\$\$;\n" "$db_pw" | docker compose exec -T postgres psql -U btc_alerts -d btc_alerts -q -v ON_ERROR_STOP=1 -f -
+              echo "   ALTER USER 执行完毕"
+              docker compose restart app alert-worker >/dev/null
+              echo "   已重启 app 与 alert-worker，等待重新探测…"
+              sleep 10
+              echo "   重启后健康："
+              curl -s --noproxy "*" -m 10 http://127.0.0.1:8787/api/alerts/health || echo "   取不到"
+              echo
+            fi
+          '
 
       - name: Build, deploy and verify local health
         id: deploy_app
