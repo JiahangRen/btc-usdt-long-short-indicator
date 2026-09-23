@@ -15,6 +15,16 @@ services:
       # Azure AI Speech：语音播报的主链路。留空则回退 Edge TTS。
       AZURE_SPEECH_KEY: ${AZURE_SPEECH_KEY:-}
       AZURE_SPEECH_REGION: ${AZURE_SPEECH_REGION:-eastasia}
+      # 以下 API Key 走「服务端兜底」语义：server.mjs 读取顺序是
+      # apiCredentials（网页「API 中心」保存的加密文件）→ 其次才是这些环境变量。
+      # 网页里配的凭据存在 data/api-credentials.json，而 rsync 恒排除 data/ 与 .env，
+      # 它永远到不了服务器，所以线上只能由 configure-env 注入到这里。
+      # 留空＝该 provider 未配置，行为与改动前完全一致。
+      # ⚠️ 千问（Qwen）刻意不在此列：它是 key + baseUrl + model 一整组配置，只从
+      #    网页保存的加密文件读取；其兜底变量是 DASHSCOPE_*，这里不声明也不注入。
+      FINNHUB_API_KEY: ${FINNHUB_API_KEY:-}
+      EIA_API_KEY: ${EIA_API_KEY:-}
+      COINGECKO_API_KEY: ${COINGECKO_API_KEY:-}
     expose:
       - "8787"
     ports:

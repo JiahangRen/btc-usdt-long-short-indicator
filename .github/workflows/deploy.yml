@@ -111,6 +111,14 @@ jobs:
             if ! grep -qE "^AZURE_SPEECH_KEY=.+" "$app/.env"; then
               echo "Warning: AZURE_SPEECH_KEY is unset in $app/.env — Azure Speech is skipped and the Edge fallback may also be unreachable from this host. Re-run this workflow with mode=configure-env to inject it." >&2
             fi
+            # 这几个凭据同样不是硬依赖：缺了会静默降级到公开数据源（宏观日历/币价额度/
+            # 新闻），页面上看不出原因。明确提示，避免以后又有人问「为什么这块是空的」。
+            # 千问（Qwen）不在此列：它不参与同步，缺省即未配置，属预期状态。
+            for optional_secret in FINNHUB_API_KEY EIA_API_KEY COINGECKO_API_KEY; do
+              if ! grep -qE "^${optional_secret}=.+" "$app/.env"; then
+                echo "Warning: $optional_secret is unset in $app/.env — that provider falls back to its public source. Re-run this workflow with mode=configure-env to inject it." >&2
+              fi
+            done
             # Keep snapshots below the deploy-owned app directory so Actions
             # never needs an interactive sudo password.
             mkdir -p "$releases"
@@ -137,25 +145,40 @@ jobs:
           ALERT_ENCRYPTION_KEY: ${{ secrets.ALERT_ENCRYPTION_KEY }}
           AZURE_SPEECH_KEY: ${{ secrets.AZURE_SPEECH_KEY }}
           AZURE_SPEECH_REGION: ${{ secrets.AZURE_SPEECH_REGION }}
+          FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+          EIA_API_KEY: ${{ secrets.EIA_API_KEY }}
+          COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
         run: |
           if [ -z "$POSTGRES_PASSWORD" ] || [ -z "$ALERT_ENCRYPTION_KEY" ]; then
             echo "POSTGRES_PASSWORD and ALERT_ENCRYPTION_KEY repository secrets are required." >&2
             exit 1
           fi
-          # Four values travel only on SSH stdin. The remote command preserves all
-          # existing .env entries, replaces these keys, and never echoes any of
-          # them into the Actions log.
+          # One value per line travels on SSH stdin, in the exact order read below.
+          # The remote command preserves all existing .env entries, rewrites only
+          # the keys this run carries, and never echoes a value into the log.
           #
-          # 语音密钥不随源码同步：网页「API 中心」的凭据写在 data/api-credentials.json，
-          # 而 rsync 恒排除 data/ 与 .env —— 服务器上的 AZURE_SPEECH_KEY 只能由这里注入。
-          # Azure 两项 Secret 留空 = 「保持服务器上已有的值」，绝不会把手工配好的行删掉。
-          printf '%s\n%s\n%s\n%s\n' "$POSTGRES_PASSWORD" "$ALERT_ENCRYPTION_KEY" "$AZURE_SPEECH_KEY" "$AZURE_SPEECH_REGION" | \
+          # 网页「API 中心」里配的凭据写在 data/api-credentials.json，而 rsync 恒排除
+          # data/ 与 .env —— 所有服务端凭据都只能由这里注入。server.mjs 的读取顺序是
+          # apiCredentials（网页保存的）→ 其次才是这些环境变量，所以这里的值只是兜底：
+          # 在网页里重新配过的 provider，仍以网页那份为准。
+          #
+          # 任何一项 Secret 留空 = 「保持服务器上已有的值」，绝不会把手工配好的行删掉。
+          #
+          # ⚠️ 千问（Qwen）刻意排除在同步范围之外：它是一整组配置（key + baseUrl + model），
+          #    且其兜底变量是 DASHSCOPE_*。这里既不写入、也不删除任何 QWEN_/DASHSCOPE_ 行。
+          printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+            "$POSTGRES_PASSWORD" "$ALERT_ENCRYPTION_KEY" \
+            "$AZURE_SPEECH_KEY" "$AZURE_SPEECH_REGION" \
+            "$FINNHUB_API_KEY" "$EIA_API_KEY" "$COINGECKO_API_KEY" | \
             ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p 22 "$DEPLOY_USER@$DEPLOY_HOST" '
               set -Eeuo pipefail
               IFS= read -r postgres_password
               IFS= read -r encryption_key
               IFS= read -r azure_speech_key
               IFS= read -r azure_speech_region
+              IFS= read -r finnhub_api_key
+              IFS= read -r eia_api_key
+              IFS= read -r coingecko_api_key
               app=/opt/btc-usdt-long-short-indicator
               env_file="$app/.env"
               before_hash=""
@@ -164,13 +187,16 @@ jobs:
               fi
               tmp_file="$(mktemp "$app/.env.XXXXXX")"
               trap "rm -f \"$tmp_file\"" EXIT
-              # Only drop the keys this run actually rewrites. When the Azure
-              # secrets are unset, their lines must survive untouched.
-              if [ -n "$azure_speech_key" ]; then
-                drop="^(POSTGRES_PASSWORD|ALERT_ENCRYPTION_KEY|AZURE_SPEECH_KEY|AZURE_SPEECH_REGION)="
-              else
-                drop="^(POSTGRES_PASSWORD|ALERT_ENCRYPTION_KEY)="
-              fi
+              # Build the drop list from the keys this run actually carries. An unset
+              # secret must leave its existing line untouched; otherwise one deploy
+              # with a missing secret would wipe manually configured credentials.
+              # Qwen / DASHSCOPE_* never appear here: never written, never removed.
+              drop_optional=""
+              if [ -n "$azure_speech_key" ]; then drop_optional="$drop_optional|AZURE_SPEECH_KEY|AZURE_SPEECH_REGION"; fi
+              if [ -n "$finnhub_api_key" ]; then drop_optional="$drop_optional|FINNHUB_API_KEY"; fi
+              if [ -n "$eia_api_key" ]; then drop_optional="$drop_optional|EIA_API_KEY"; fi
+              if [ -n "$coingecko_api_key" ]; then drop_optional="$drop_optional|COINGECKO_API_KEY"; fi
+              drop="^(POSTGRES_PASSWORD|ALERT_ENCRYPTION_KEY${drop_optional})="
               if [ -f "$env_file" ]; then
                 grep -v -E "$drop" "$env_file" > "$tmp_file" || true
               fi
@@ -178,9 +204,21 @@ jobs:
               if [ -n "$azure_speech_key" ]; then
                 [ -n "$azure_speech_region" ] || azure_speech_region=eastasia
                 printf "AZURE_SPEECH_KEY=%s\nAZURE_SPEECH_REGION=%s\n" "$azure_speech_key" "$azure_speech_region" >> "$tmp_file"
-                echo "Azure Speech credentials injected (region: $azure_speech_region)."
+                written_azure="injected(region=$azure_speech_region)"
               else
-                echo "AZURE_SPEECH_KEY secret is unset; existing Azure Speech settings left untouched."
+                written_azure="secret unset - existing settings kept"
+              fi
+              if [ -n "$finnhub_api_key" ]; then printf "FINNHUB_API_KEY=%s\n" "$finnhub_api_key" >> "$tmp_file"; written_finnhub="injected"; else written_finnhub="secret unset - existing settings kept"; fi
+              if [ -n "$eia_api_key" ]; then printf "EIA_API_KEY=%s\n" "$eia_api_key" >> "$tmp_file"; written_eia="injected"; else written_eia="secret unset - existing settings kept"; fi
+              if [ -n "$coingecko_api_key" ]; then printf "COINGECKO_API_KEY=%s\n" "$coingecko_api_key" >> "$tmp_file"; written_coingecko="injected"; else written_coingecko="secret unset - existing settings kept"; fi
+              # 只打印状态，绝不打印值。
+              echo "AZURE_SPEECH_KEY       : $written_azure"
+              echo "FINNHUB_API_KEY        : $written_finnhub"
+              echo "EIA_API_KEY            : $written_eia"
+              echo "COINGECKO_API_KEY      : $written_coingecko"
+              echo "Qwen (DASHSCOPE_*)     : excluded by design - never written, never removed"
+              if grep -qE "^(QWEN_|DASHSCOPE_)" "$tmp_file"; then
+                echo "note: this host still has a Qwen entry in .env; it was preserved untouched."
               fi
               chmod 600 "$tmp_file"
               mv "$tmp_file" "$env_file"
