@@ -160,7 +160,7 @@ jobs:
               env_file="$app/.env"
               before_hash=""
               if [ -f "$env_file" ]; then
-                before_hash="$(sha256sum "$env_file" | cut -d' ' -f1)"
+                before_hash="$(sha256sum "$env_file" | cut -c1-64)"
               fi
               tmp_file="$(mktemp "$app/.env.XXXXXX")"
               trap "rm -f \"$tmp_file\"" EXIT
@@ -185,7 +185,7 @@ jobs:
               chmod 600 "$tmp_file"
               mv "$tmp_file" "$env_file"
               trap - EXIT
-              after_hash="$(sha256sum "$env_file" | cut -d' ' -f1)"
+              after_hash="$(sha256sum "$env_file" | cut -c1-64)"
               if [ "$before_hash" = "$after_hash" ]; then
                 echo "Deployment environment values unchanged; running containers left as they are."
               else
