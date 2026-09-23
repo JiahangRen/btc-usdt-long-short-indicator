@@ -320,6 +320,57 @@ jobs:
             fi
           '
 
+      # 第二轮取证。第一轮已排除「库里的密码漂移」（用 .env 的密码能连上库），
+      # 矛盾指向 app 容器实际拿到的 DATABASE_URL —— 它由 compose 用 .env 插值拼出，
+      # 中间任何一层（行尾、引号、特殊字符）出错都会表现为「密码认证失败」。
+      - name: Probe database credentials
+        if: steps.ssh.outputs.ready == 'true' && (inputs.mode == 'db-diag' || inputs.mode == 'db-fix')
+        env:
+          DEPLOY_HOST: ${{ env.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ env.DEPLOY_USER }}
+        run: |
+          ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p 22 "$DEPLOY_USER@$DEPLOY_HOST" '
+            set -Eeuo pipefail
+            app=/opt/btc-usdt-long-short-indicator
+            cd "$app"
+            nonzero() { printf %s "$1" | tr -d "A-Za-z0-9" | fold -w1 | sort -u | tr -d "\n"; }
+            echo "=== A. .env 里的 POSTGRES_PASSWORD ==="
+            echo -n "   出现行数: "; grep -cE ^POSTGRES_PASSWORD= .env || true
+            env_pw="$(grep -E ^POSTGRES_PASSWORD= .env | head -1 | cut -d= -f2- || true)"
+            echo "   首行值长度: ${#env_pw}"
+            echo "   非字母数字字符(去重): [$(nonzero "$env_pw")]"
+            echo
+            echo "=== B. app 容器实际拿到的 DATABASE_URL ==="
+            app_url="$(docker compose exec -T app printenv DATABASE_URL 2>/dev/null || true)"
+            echo "   长度: ${#app_url}"
+            if [ -z "$app_url" ]; then
+              echo "   容器里没有 DATABASE_URL"
+            else
+              echo "   脱敏: $(printf %s "$app_url" | sed -e s#://[^@]*@#://****@#)"
+              app_pw="${app_url#*://btc_alerts:}"
+              app_pw="${app_pw%@*}"
+              echo "   URL 密码段长度: ${#app_pw}"
+              echo "   非字母数字字符(去重): [$(nonzero "$app_pw")]"
+              if [ "$env_pw" = "$app_pw" ]; then echo "   结论: 与 .env 完全一致"; else echo "   结论: 与 .env 不一致 <== 差异源头"; fi
+            fi
+            echo
+            echo "=== C. app 容器解析 postgres 服务名 ==="
+            docker compose exec -T app node -e "require(\"dns\").promises.lookup(\"postgres\",{all:true}).then(a=>console.log(\"   \"+JSON.stringify(a))).catch(e=>console.log(\"   ERR \"+e.message))" 2>/dev/null || echo "   查询失败"
+            echo
+            echo "=== D. 用 app 的 URL 实际建连 ==="
+            docker compose exec -T app node -e "const pg=require(\"pg\");const p=new pg.Pool({connectionString:process.env.DATABASE_URL});p.query(\"select 1 as ok\").then(()=>{console.log(\"   连接成功\");return p.end()}).catch(e=>{console.log(\"   连接失败: \"+e.message);process.exit(0)})" 2>/dev/null || echo "   探测失败"
+            echo
+            echo "=== E. postgres 容器身份 ==="
+            docker compose ps -q postgres | xargs -r docker inspect -f "   {{.Name}} started={{.State.StartedAt}}"
+            echo
+            echo "=== F. .env 前 12 行骨架（值已抹掉，行尾以 cat -A 显示，^M 即 CR）==="
+            sed -E -e "s/=.*/=<value>/" .env | head -12 | cat -A
+            echo
+            echo "=== G. 本机告警健康 ==="
+            curl -s --noproxy "*" -m 10 http://127.0.0.1:8787/api/alerts/health || echo "   取不到"
+            echo
+          '
+
       - name: Build, deploy and verify local health
         id: deploy_app
         if: steps.ssh.outputs.ready == 'true' && (github.event_name == 'push' || inputs.mode == 'deploy')
