@@ -256,6 +256,9 @@ jobs:
         run: |
           ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p 22 "$DEPLOY_USER@$DEPLOY_HOST" '
             set -Eeuo pipefail
+            # MODE 必须内联进来：ssh 不会继承 step 的 env，远程 shell 里读 ${MODE}
+            # 会直接 unbound variable 退出（上一次就是这么把第二步整个跳过的）。
+            MODE="${{ inputs.mode }}"
             app=/opt/btc-usdt-long-short-indicator
             cd "$app"
             db_pw="$(grep -E ^POSTGRES_PASSWORD= .env | head -1 | cut -d= -f2- || true)"
@@ -324,7 +327,7 @@ jobs:
       # 矛盾指向 app 容器实际拿到的 DATABASE_URL —— 它由 compose 用 .env 插值拼出，
       # 中间任何一层（行尾、引号、特殊字符）出错都会表现为「密码认证失败」。
       - name: Probe database credentials
-        if: steps.ssh.outputs.ready == 'true' && (inputs.mode == 'db-diag' || inputs.mode == 'db-fix')
+        if: ${{ !cancelled() && steps.ssh.outputs.ready == 'true' && (inputs.mode == 'db-diag' || inputs.mode == 'db-fix') }}
         env:
           DEPLOY_HOST: ${{ env.DEPLOY_HOST }}
           DEPLOY_USER: ${{ env.DEPLOY_USER }}
@@ -362,6 +365,18 @@ jobs:
             echo
             echo "=== E. postgres 容器身份 ==="
             docker compose ps -q postgres | xargs -r docker inspect -f "   {{.Name}} started={{.State.StartedAt}}"
+            echo
+            echo "=== H. 网络归属（app 连的 postgres 是不是同一个容器）==="
+            app_id="$(docker compose ps -q app)"
+            app_net="$(docker inspect -f "{{range \$k,\$v := .NetworkSettings.Networks}}{{\$k}}{{end}}" "$app_id")"
+            echo "   app 所在网络: $app_net"
+            docker inspect -f "   app 容器 IP: {{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}" "$app_id"
+            docker compose ps -q postgres | xargs -r docker inspect -f "   compose postgres IP: {{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}"
+            echo "   该网络里的全部容器:"
+            docker network inspect "$app_net" -f "{{range .Containers}}      {{.Name}} {{.IPv4Address}}{{println}}{{end}}" || true
+            echo
+            echo "=== I. 全机容器清单（是否存在第二个 postgres 或同名别名）==="
+            docker ps -a --format "   {{.Names}} | {{.Image}} | {{.Status}}"
             echo
             echo "=== F. .env 前 12 行骨架（值已抹掉，行尾以 cat -A 显示，^M 即 CR）==="
             sed -E -e "s/=.*/=<value>/" .env | head -12 | cat -A
