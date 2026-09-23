@@ -2,6 +2,17 @@
 # HTTPS entry point: compress responses and proxy them to the local Node service.
 {$SITE_DOMAIN:renjiahang1201.xyz} {
 	encode zstd gzip
+
+	# 指纹静态资源做一年强缓存。为了让本地改完立刻生效，服务端对 app.js / styles.css 发 no-cache；
+	# 生产上这些 URL 都带 ?v=<版本> 指纹（改版本必 +1），指纹本身就是破缓存机制，所以在生产边界
+	# （这里）替换为长期缓存。另外需在 Cloudflare「缓存 → 配置 → Browser Cache TTL」选
+	# Respect Existing Headers，否则会被 CF 的默认值覆盖掉。
+	@immutable {
+		path_regexp \.(css|js|svg|ico|png|woff|woff2)$
+		query v=*
+	}
+	header @immutable Cache-Control "public, max-age=31536000, immutable"
+
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		X-Content-Type-Options "nosniff"

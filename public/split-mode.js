@@ -471,6 +471,17 @@ function buildVoiceModal() {
     updateVoicePanelStatus();
   });
   bindEngineMirrors();
+  /* 面板开着时，主站那几个「音色相关」控件一变就重新镜像一次 —— 分屏面板显示的必须
+     永远等于主站（比特币）那一套。用事件委托而不是绑控件本身：主站语音浮层重建会掉监听。
+     分屏面板自己写回主站时也会走到这里，但那时两边的值已经相同，重镜像没有副作用
+     （程序化赋值不触发 change）。 */
+  document.addEventListener('change', (e) => {
+    const id = e.target && e.target.id;
+    if (!id || !voiceModal || voiceModal.hidden) return;
+    if (id === 'voiceAlertEngine' || id === 'voiceAlertEdgeVoice' ||
+        id === 'voiceAlertVoice' || id === 'voiceGenderFilter')
+      syncVoicePanelFromMain();
+  });
   // 「全部跟随总开关」：清掉本会话里对所有币种的单独静音，回到「总开关开着就都播」。
   voiceModal.querySelector('#splitVoiceFollowAll').addEventListener('click', () => {
     writeVoiceMap({});
@@ -532,32 +543,50 @@ function currentVoiceSelectId() {
 /* 打开面板时把主站那份设置镜像过来（面板开着时主站那个浮层不会同时开着，所以一次性同步足够）。 */
 function syncVoicePanelFromMain() {
   if (!voiceModal) return;
+  /* ⚠️ 整份搬过来（含 hidden / disabled 状态），**不要**按 hidden 过滤。
+     旧写法跳过 hidden 的选项，于是主站当前选中的音色恰好被隐去时
+     （「音色筛选」选了男声/女声，或 HD / MAI 这类本地区不支持的代次被整批隐藏 ——
+     服务端日志里那些 `Azure Speech HTTP 400` 就是用户选过这类音色留下的），
+     `mine.value = theirs.value` 就设不上，紧接着回落到 `selectedIndex = 0`。
+     结果：分屏面板显示成列表里第一条音色，跟主站（比特币）显示的不是同一个 ——
+     这正是「其他币种语音播报系统里的音色跟比特币不一样」的由来（v2.12.25 修）。
+     现在：hidden / disabled 一并搬过来（列表可见性与主站保持一致），
+     并且**选中项绝不回落**——真对不上就把主站当前值补成一项。 */
   const copySelect = (mineId, theirsId) => {
     const mine = voiceModal.querySelector('#' + mineId), theirs = document.getElementById(theirsId);
     if (!mine || !theirs) return;
     mine.textContent = '';
+    const cloneOption = (option) => {
+      const clone = document.createElement('option');
+      clone.value = option.value;
+      clone.textContent = option.textContent;
+      clone.hidden = !!option.hidden;
+      clone.disabled = !!option.disabled;
+      return clone;
+    };
     [...theirs.children].forEach((node) => {
       if (node.tagName === 'OPTGROUP') {
         const group = document.createElement('optgroup');
         group.label = node.label;
-        [...node.children].forEach((option) => {
-          if (option.hidden) return;
-          const clone = document.createElement('option');
-          clone.value = option.value;
-          clone.textContent = option.textContent;
-          group.appendChild(clone);
-        });
+        group.hidden = !!node.hidden;
+        [...node.children].forEach((option) => group.appendChild(cloneOption(option)));
         if (group.children.length) mine.appendChild(group);
       } else if (node.tagName === 'OPTION') {
-        if (node.hidden) return;
-        const clone = document.createElement('option');
-        clone.value = node.value;
-        clone.textContent = node.textContent;
-        mine.appendChild(clone);
+        mine.appendChild(cloneOption(node));
       }
     });
     mine.value = theirs.value;
-    if (mine.value !== theirs.value && mine.options.length) mine.selectedIndex = 0;
+    /* 兜底：显示成「另一个音色」比留空更糟 —— 用户会以为分屏这边被人改过，
+       甚至照着改下去，把主站（比特币）的音色也一起改掉。所以这里补一项，
+       而不是退回第一条。 */
+    if (mine.value !== theirs.value) {
+      const current = theirs.options[theirs.selectedIndex];
+      const extra = cloneOption(current || { value: theirs.value, textContent: theirs.value });
+      extra.hidden = false;
+      extra.disabled = false;
+      mine.appendChild(extra);
+      mine.value = theirs.value;
+    }
   };
   const master = voiceModal.querySelector('#splitVoiceMaster');
   const masterBox = document.getElementById('voiceAlertEnabled');

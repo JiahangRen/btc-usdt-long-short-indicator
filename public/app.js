@@ -2778,7 +2778,18 @@ setTimeout(() => {
       onEnded?.();
     };
     audio.onerror = onFailure;
-    await audio.play();
+    /* 自动播放许可缺失 / 音频通道被抢占时 play() 会 reject，而这会一路走到 say() 的
+       「本机系统语音」兜底 —— 用户听到的就成了另一个嗓（与他选的云音色完全不是一个人）。
+       重试一次能吸收这类瞬时失败：两句之间只隔 200ms，仍在同一个用户手势的有效期内。 */
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        await audio.play();
+        break;
+      } catch (error) {
+        if (attempt >= 2) throw error;
+        await new Promise((resolve) => window.setTimeout(resolve, 200));
+      }
+    }
     return true;
   };
   const say = (text, { force = false, chimeType, noChime = false, engine: engineOverride, fallback = true, label, onStarted, onEnded, onFailure } = {}) => {
@@ -8055,7 +8066,7 @@ renderRangeExtremaPoints = function () {
   const version = document.createElement("button");
   version.type = "button";
   version.id = "appVersion";
-  version.textContent = "v2.12.24";
+  version.textContent = "v2.12.25";
   version.title = "查看更新日志";
   version.setAttribute("aria-expanded", "false");
   // v2.12.7：版本号随「账户 / API / 连通性 / 数据源」一起收进设置齿轮面板。
@@ -8372,6 +8383,9 @@ renderRangeExtremaPoints = function () {
   // v2.12.24：多分屏按钮移到「比特币 / 多币种」左边 + 币种切换组配色归队。
   const v21224TopbarOrderChangelog = log.innerHTML;
   log.innerHTML = `<b>v2.12.24 更新日志</b><dl><dt>「⊞ 多分屏」挪到顶栏最左边</dt><dd>它原先固定在顶栏最右端。现在移到<b>「₿ 比特币 / 多币种」切换组的左侧</b>，于是整排从左到右是：<b>多分屏 → 币种切换 → EN → 全屏 → 深色 → 齿轮</b>，与「先选模式、再选语言/显示」的顺序一致。<br>顺带说明为什么这颗按钮的落位要两个文件一起改：币种切换组由 <code>app.js</code> 注入，并且原本会<b>无条件把自己抢到第一位</b>，而多分屏按钮由另一个模块注入 —— 谁先跑谁就占位。现在两边都改成「以对方为锚、只在位置不对时才动」，<b>无论加载先后，最终都是多分屏在最左</b>，也不会来回抖。</dd><dt>币种切换组的配色归队</dt><dd>「₿ 比特币 / 多币种」这个分段开关原先用的是<b>深黑底色</b>（与页面背景同系），摆在旁边那排<b>紫色胶囊</b>按钮（EN / 全屏 / 深色 / 齿轮 / 多分屏）里明显不是一家人 —— 整排看着"凹"下去一块。<br>现在它的底色与描边改成<b>与顶栏其它按钮同一套紫色系</b>：外框淡紫描边 + 半透明紫底，选中的那一半用更实的紫并配白字。深色与浅色主题各对齐了一次（浅色下同样改为与相邻按钮一致的白底半透明 + 同色描边）。</dd><dt>「EN」的蓝色描边也一起归队</dt><dd>顺便查了一遍整排：这颗语言按钮过去被单独指定了<b>蓝色描边 + 蓝白字</b>，是全排里<b>唯一一颗蓝边按钮</b>，挨着旁边几颗淡紫边显得突兀。现在取消单独染色，与全屏 / 深色 / 齿轮 / 多分屏 完全同一套（只剩宽度差异）。</dd></dl><hr>` + v21224TopbarOrderChangelog;
+  /* v2.12.25：分屏「播报设置」的音色必须与主站（比特币）逐字一致。 */
+  const v21225SplitVoiceMirrorChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.25 更新日志</b><dl><dt>分屏「播报设置」里的音色不再显示成另一个人</dt><dd>症状：多分屏顶栏「🔊 播报设置」里看到的音色，跟主站「语音播报设置」里的不是同一个 —— 例如主站是「晓晓 · 女声 · 经典」，分屏面板却显示成「云帆 · 男声 · 多语言」。<br><b>原因</b>：分屏面板是从主站那个下拉整份搬过来的，但旧代码<b>跳过了被隐藏的选项</b>；而主站当前用的音色恰好可能正被隐藏 —— 只要「音色筛选」选的是男声或女声，或者选中的是 HD 超清 / MAI 这类<b>本机 Azure 区域不支持的代次</b>（服务端日志里那批 <code>Azure Speech HTTP 400</code> 就是这么来的），搬过去之后就匹配不上，于是回落到列表里的第一条。分屏这边显示的于是成了另一个音色，而实际发声其实还是主站那一个 —— 两边自然对不上。<br><b>现在</b>：隐藏与置灰状态一并搬过来（列表可见性与主站保持一致），并且<b>选中项绝不回落</b> —— 万一还是匹配不上，就把主站当前值补成一项，宁可多一项也不显示成别人。另外分屏面板开着时，主站那几个音色相关控件一变就重新镜像一次，两边永远同步。</dd><dt>云语音偶发失败不再悄悄换成「系统嗓」</dt><dd>浏览器拒掉自动播放、或音频通道被上一次播报占用时，云语音的播放会失败，旧代码会<b>静默改用本机系统语音</b>把同一句话再念一遍 —— 听感上就是「音色突然换了一个人」，界面上完全看不出来。<br>现在这种失败会立刻重试一次（间隔 200 毫秒，仍在同一个用户手势的有效期内），能吃掉这类瞬时失败，明显减少被误换成系统声音的概率。</dd></dl><hr>` + v21225SplitVoiceMirrorChangelog;
 
   // 旧版本默认收起，确保用户打开日志时首先看到当前版本的完整变更。
   // Older releases are collapsed by default so opening the log focuses on the current release.
@@ -14165,7 +14179,7 @@ function renderOkxMicrostructure(context) {
     gridClass = (items) =>
       items.length % 2 === 0 ? "is-even" : "is-odd";
   const rowHtml = (row) =>
-    `<article class="microstructure-item ${row.kind}${row.value === "—" ? " unavailable" : ""}" style="--micro-level:${meterLevel(row).toFixed(1)}%"><div><span>${row.name}<button class="help-dot" type="button" data-tip="${row.tip}" aria-label="${tx("查看说明", "Show explanation")}">!</button></span><i>${label(row.kind)}</i></div><b>${row.value}</b><small>${row.note}</small><div class="microstructure-meter" aria-label="${tx("指标强度", "Indicator strength")}"><em></em></div></article>`;
+    `<article class="microstructure-item ${row.kind}${row.value === "—" ? " unavailable" : ""}" style="--micro-level:${meterLevel(row).toFixed(1)}%"><div><span>${row.name}<button class="help-dot" type="button" data-tip="${row.tip}" aria-label="${tx("查看说明", "Show explanation")}">!</button></span><i>${label(row.kind)}</i></div><b>${row.value}</b><small>${row.note}</small><div class="microstructure-meter" role="meter" aria-label="${tx("指标强度", "Indicator strength")}" aria-valuenow="${meterLevel(row).toFixed(1)}" aria-valuemin="0" aria-valuemax="100"><em></em></div></article>`;
   const neutralSection = neutralRows.length
     ? `<section class="microstructure-neutral-group ${microstructureNeutralExpanded ? "is-expanded" : ""}"><button type="button" class="microstructure-neutral-toggle" aria-expanded="${microstructureNeutralExpanded}"><span>${tx("中性指标", "Neutral indicators")} · ${neutralRows.length} ${tx("项", "items")}</span><b>${microstructureNeutralExpanded ? tx("收起", "Hide") : tx("展开", "Show")}</b></button><div class="microstructure-grid microstructure-neutral-grid ${gridClass(neutralRows)} ${microstructureNeutralExpanded ? "" : "is-collapsed"}" ${microstructureNeutralExpanded ? "" : "hidden"}>${neutralRows.map(rowHtml).join("")}</div></section>`
     : "";

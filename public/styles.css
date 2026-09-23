@@ -2995,7 +2995,7 @@ html[data-theme="light"] {
   --border-strong: #91a2b6;
   --text-primary: #162235;
   --text-secondary: #43566d;
-  --text-muted: #65778c;
+  --text-muted: #566779;
   --bull: #007f69;
   --bear: #c3344f;
   --warn: #9b6200;
@@ -3066,7 +3066,7 @@ html[data-theme="light"] #selectionOverlay {
     --border-strong: #91a2b6;
     --text-primary: #162235;
     --text-secondary: #43566d;
-    --text-muted: #65778c;
+    --text-muted: #566779;
     --bull: #007f69;
     --bear: #c3344f;
     --warn: #9b6200;
@@ -9631,8 +9631,7 @@ body.voice-grid-resizing {
 }
 
 /* Deep navy terminal treatment: shared backdrop, restrained card borders, and compact information blocks. */
-html[data-theme="dark"],
-html[data-theme="auto"] {
+html[data-theme="dark"] {
   --bg-base: #070d19;
   --bg-surface: #121a2a;
   --bg-surface-2: #0d1524;
@@ -9641,10 +9640,22 @@ html[data-theme="auto"] {
   --border-strong: #3b5272;
   --text-primary: #e9effb;
   --text-secondary: #97a9c2;
-  --text-muted: #64758f;
+  --text-muted: #8090a6;
 }
-html[data-theme="dark"] body,
-html[data-theme="auto"] body {
+@media (prefers-color-scheme: dark) {
+  html[data-theme="auto"] {
+    --bg-base: #070d19;
+    --bg-surface: #121a2a;
+    --bg-surface-2: #0d1524;
+    --bg-elevated: #19243a;
+    --border-subtle: #26344b;
+    --border-strong: #3b5272;
+    --text-primary: #e9effb;
+    --text-secondary: #97a9c2;
+    --text-muted: #8090a6;
+  }
+}
+html[data-theme="dark"] body {
   background:
     radial-gradient(
       900px 720px at -8% 0%,
@@ -9658,6 +9669,23 @@ html[data-theme="auto"] body {
     ),
     linear-gradient(132deg, #0b2941 0%, #0b1322 38%, #111328 72%, #241842 100%);
   background-attachment: fixed;
+}
+@media (prefers-color-scheme: dark) {
+  html[data-theme="auto"] body {
+    background:
+      radial-gradient(
+        900px 720px at -8% 0%,
+        rgba(22, 94, 139, 0.54),
+        transparent 58%
+      ),
+      radial-gradient(
+        900px 740px at 108% 4%,
+        rgba(76, 43, 124, 0.44),
+        transparent 58%
+      ),
+      linear-gradient(132deg, #0b2941 0%, #0b1322 38%, #111328 72%, #241842 100%);
+    background-attachment: fixed;
+  }
 }
 
 /* Rule signal: use a restrained directional wash behind the headline instead
@@ -9715,6 +9743,11 @@ html[data-theme="light"] #ruleSignalCard[data-signal-tone="bear"] {
 .signal-basis-chip[data-tone="bull"] { background: var(--bull); }
 .signal-basis-chip[data-tone="bear"] { background: var(--bear); }
 .signal-basis-chip[data-tone="flat"] { background: var(--text-muted); }
+/* a11y：暗色主题下 bull #00d4aa / bear #ff4d6a / flat 三种底色都偏亮，白字对比度最低仅 1.91:1；改深字后达到 5.76–9.81:1。 */
+html[data-theme="dark"] .signal-basis-chip { color: #0b1220; }
+@media (prefers-color-scheme: dark) {
+  html[data-theme="auto"] .signal-basis-chip { color: #0b1220; }
+}
 html[data-theme="light"] .signal-basis-chip[data-tone="bull"],
 html[data-theme="light"] .signal-basis-chip[data-tone="bear"],
 html[data-theme="light"] .signal-basis-chip[data-tone="flat"] {
@@ -9728,38 +9761,67 @@ html[data-theme="light"] .signal-basis-chip[data-tone="flat"] {
   }
 }
 html[data-theme="dark"] body:before,
-html[data-theme="dark"] body:after,
-html[data-theme="auto"] body:before,
-html[data-theme="auto"] body:after {
+html[data-theme="dark"] body:after {
   display: block;
   z-index: -1;
   filter: blur(70px);
   opacity: 0.55;
 }
-html[data-theme="dark"] body:before,
-html[data-theme="auto"] body:before {
+@media (prefers-color-scheme: dark) {
+  html[data-theme="auto"] body:before,
+  html[data-theme="auto"] body:after {
+    display: block;
+    z-index: -1;
+    filter: blur(70px);
+    opacity: 0.55;
+  }
+}
+html[data-theme="dark"] body:before {
   width: 460px;
   height: 460px;
   left: -230px;
   top: 18%;
   background: rgba(15, 157, 175, 0.16);
 }
-html[data-theme="dark"] body:after,
-html[data-theme="auto"] body:after {
+@media (prefers-color-scheme: dark) {
+  html[data-theme="auto"] body:before {
+    width: 460px;
+    height: 460px;
+    left: -230px;
+    top: 18%;
+    background: rgba(15, 157, 175, 0.16);
+  }
+}
+html[data-theme="dark"] body:after {
   width: 520px;
   height: 520px;
   right: -260px;
   top: 8%;
   background: rgba(109, 58, 200, 0.19);
 }
+@media (prefers-color-scheme: dark) {
+  html[data-theme="auto"] body:after {
+    width: 520px;
+    height: 520px;
+    right: -260px;
+    top: 8%;
+    background: rgba(109, 58, 200, 0.19);
+  }
+}
 
 /* The open dashboard backdrop follows the same rule direction as the signal
    card.  This includes the otherwise empty area beside the price summary. */
-html[data-theme="dark"],
-html[data-theme="auto"] {
+html[data-theme="dark"] {
   --rule-page-glow: rgba(76, 43, 124, 0.44);
   --rule-page-orb: rgba(109, 58, 200, 0.19);
   --rule-page-end: #241842;
+}
+@media (prefers-color-scheme: dark) {
+  html[data-theme="auto"] {
+    --rule-page-glow: rgba(76, 43, 124, 0.44);
+    --rule-page-orb: rgba(109, 58, 200, 0.19);
+    --rule-page-end: #241842;
+  }
 }
 html[data-rule-signal-tone="bull"] {
   --rule-page-glow: rgba(0, 180, 140, 0.38);
@@ -9771,18 +9833,31 @@ html[data-rule-signal-tone="bear"] {
   --rule-page-orb: rgba(255, 77, 106, 0.21);
   --rule-page-end: #301525;
 }
-html[data-theme="dark"] body,
-html[data-theme="auto"] body {
+html[data-theme="dark"] body {
   background:
     radial-gradient(900px 720px at -8% 0%, rgba(22, 94, 139, 0.54), transparent 58%),
     radial-gradient(900px 740px at 108% 4%, var(--rule-page-glow), transparent 58%),
     linear-gradient(132deg, #0b2941 0%, #0b1322 38%, #111328 72%, var(--rule-page-end) 100%);
   transition: background 320ms ease;
 }
-html[data-theme="dark"] body:after,
-html[data-theme="auto"] body:after {
+@media (prefers-color-scheme: dark) {
+  html[data-theme="auto"] body {
+    background:
+      radial-gradient(900px 720px at -8% 0%, rgba(22, 94, 139, 0.54), transparent 58%),
+      radial-gradient(900px 740px at 108% 4%, var(--rule-page-glow), transparent 58%),
+      linear-gradient(132deg, #0b2941 0%, #0b1322 38%, #111328 72%, var(--rule-page-end) 100%);
+    transition: background 320ms ease;
+  }
+}
+html[data-theme="dark"] body:after {
   background: var(--rule-page-orb);
   transition: background 320ms ease;
+}
+@media (prefers-color-scheme: dark) {
+  html[data-theme="auto"] body:after {
+    background: var(--rule-page-orb);
+    transition: background 320ms ease;
+  }
 }
 main > header {
   min-height: 70px;
