@@ -279,13 +279,16 @@ jobs:
               fi
             done
             echo
-            echo "=== 3. 用 .env 的密码连 postgres（host 认证）==="
+            echo "=== 3. 用 .env 的密码连 postgres（必须走 TCP+scram，才真的校验密码）==="
+            # 不能用 -h 127.0.0.1 或本地 socket：官方镜像的 pg_hba 对这两者都是 trust，
+            # 拿任何密码都会「认证成功」，是假阳性（第一轮诊断就在这里被误导过）。
+            # 连服务名 postgres 走容器网络，才会真正落到 scram-sha-256 校验。
             if [ -z "$db_pw" ]; then
               echo "   .env 里没有 POSTGRES_PASSWORD，无法测试"
-            elif docker compose exec -T -e PGPASSWORD="$db_pw" postgres psql -U btc_alerts -h 127.0.0.1 -d btc_alerts -tAc "select 1" >/dev/null 2>&1; then
-              echo "   认证成功 —— 密码与数据卷一致"
+            elif docker compose exec -T -e PGPASSWORD="$db_pw" postgres psql -U btc_alerts -h postgres -d btc_alerts -tAc "select 1" >/dev/null 2>&1; then
+              echo "   认证成功 —— 库内密码与 .env 一致"
             else
-              echo "   认证失败 —— 密码漂移（.env 与数据卷不一致）"
+              echo "   认证失败 —— 密码漂移（.env 与库内不一致）"
             fi
             echo
             echo "=== 4. 容器内 local socket（trust）是否可用（决定能否修复）==="
@@ -307,18 +310,29 @@ jobs:
                 echo "   缺少 POSTGRES_PASSWORD，拒绝执行" >&2
                 exit 1
               fi
-              case "$db_pw" in *\$\$*)
-                echo "   密码含连续美元符，无法用 dollar-quote 安全传递，拒绝执行" >&2
-                exit 1
-                ;;
-              esac
-              printf "ALTER USER btc_alerts WITH PASSWORD \$\$%s\$\$;\n" "$db_pw" | docker compose exec -T postgres psql -U btc_alerts -d btc_alerts -q -v ON_ERROR_STOP=1 -f -
-              echo "   ALTER USER 执行完毕"
-              docker compose restart app alert-worker >/dev/null
-              echo "   已重启 app 与 alert-worker，等待重新探测…"
-              sleep 10
-              echo "   重启后健康："
-              curl -s --noproxy "*" -m 10 http://127.0.0.1:8787/api/alerts/health || echo "   取不到"
+              # 幂等：已经一致就什么都不做（避免对正常机器做无谓重启）。
+              if docker compose exec -T -e PGPASSWORD="$db_pw" postgres psql -U btc_alerts -h postgres -d btc_alerts -tAc "select 1" >/dev/null 2>&1; then
+                echo "   库内密码已与 .env 一致，跳过 ALTER 与重启"
+              else
+                case "$db_pw" in *\$\$*)
+                  echo "   密码含连续美元符，无法用 dollar-quote 安全传递，拒绝执行" >&2
+                  exit 1
+                  ;;
+                esac
+                # 改密码走本地 socket（trust，无需旧密码即可登录）。
+                printf "ALTER USER btc_alerts WITH PASSWORD \$\$%s\$\$;\n" "$db_pw" | docker compose exec -T postgres psql -U btc_alerts -d btc_alerts -q -v ON_ERROR_STOP=1 -f -
+                echo "   ALTER USER 执行完毕"
+                if docker compose exec -T -e PGPASSWORD="$db_pw" postgres psql -U btc_alerts -h postgres -d btc_alerts -tAc "select 1" >/dev/null 2>&1; then
+                  echo "   复核：TCP 认证通过"
+                else
+                  echo "   复核：TCP 认证仍失败，需人工检查" >&2
+                fi
+                docker compose restart app alert-worker >/dev/null
+                echo "   已重启 app 与 alert-worker，等待重新探测…"
+                sleep 10
+                echo "   重启后健康："
+                curl -s --noproxy "*" -m 10 http://127.0.0.1:8787/api/alerts/health || echo "   取不到"
+              fi
               echo
             fi
           '
