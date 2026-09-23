@@ -106,6 +106,11 @@ jobs:
                 exit 1
               fi
             done
+            # 语音不是硬依赖，但缺了就是「整站没声音」（Azure 直接跳过，Edge 兜底
+            # 在部分机房出口不通）—— 明确提示，而不是让它在页面上静默失败。
+            if ! grep -qE "^AZURE_SPEECH_KEY=.+" "$app/.env"; then
+              echo "Warning: AZURE_SPEECH_KEY is unset in $app/.env — Azure Speech is skipped and the Edge fallback may also be unreachable from this host. Re-run this workflow with mode=configure-env to inject it." >&2
+            fi
             # Keep snapshots below the deploy-owned app directory so Actions
             # never needs an interactive sudo password.
             mkdir -p "$releases"
@@ -123,38 +128,77 @@ jobs:
             --exclude='docker-compose.override.yml' \
             -e "ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p 22" ./ "$DEPLOY_USER@$DEPLOY_HOST:/opt/btc-usdt-long-short-indicator/"
 
-      - name: Configure cloud alert secrets
+      - name: Configure deployment secrets
         if: steps.ssh.outputs.ready == 'true' && inputs.mode == 'configure-env'
         env:
           DEPLOY_HOST: ${{ env.DEPLOY_HOST }}
           DEPLOY_USER: ${{ env.DEPLOY_USER }}
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
           ALERT_ENCRYPTION_KEY: ${{ secrets.ALERT_ENCRYPTION_KEY }}
+          AZURE_SPEECH_KEY: ${{ secrets.AZURE_SPEECH_KEY }}
+          AZURE_SPEECH_REGION: ${{ secrets.AZURE_SPEECH_REGION }}
         run: |
           if [ -z "$POSTGRES_PASSWORD" ] || [ -z "$ALERT_ENCRYPTION_KEY" ]; then
             echo "POSTGRES_PASSWORD and ALERT_ENCRYPTION_KEY repository secrets are required." >&2
             exit 1
           fi
-          # Values travel only on SSH stdin. The remote command preserves all
-          # existing .env entries, replaces these two keys, and never echoes
+          # Four values travel only on SSH stdin. The remote command preserves all
+          # existing .env entries, replaces these keys, and never echoes any of
           # them into the Actions log.
-          printf '%s\n%s\n' "$POSTGRES_PASSWORD" "$ALERT_ENCRYPTION_KEY" | \
+          #
+          # 语音密钥不随源码同步：网页「API 中心」的凭据写在 data/api-credentials.json，
+          # 而 rsync 恒排除 data/ 与 .env —— 服务器上的 AZURE_SPEECH_KEY 只能由这里注入。
+          # Azure 两项 Secret 留空 = 「保持服务器上已有的值」，绝不会把手工配好的行删掉。
+          printf '%s\n%s\n%s\n%s\n' "$POSTGRES_PASSWORD" "$ALERT_ENCRYPTION_KEY" "$AZURE_SPEECH_KEY" "$AZURE_SPEECH_REGION" | \
             ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p 22 "$DEPLOY_USER@$DEPLOY_HOST" '
               set -Eeuo pipefail
               IFS= read -r postgres_password
               IFS= read -r encryption_key
+              IFS= read -r azure_speech_key
+              IFS= read -r azure_speech_region
               app=/opt/btc-usdt-long-short-indicator
               env_file="$app/.env"
+              before_hash=""
+              if [ -f "$env_file" ]; then
+                before_hash="$(sha256sum "$env_file" | cut -d' ' -f1)"
+              fi
               tmp_file="$(mktemp "$app/.env.XXXXXX")"
               trap "rm -f \"$tmp_file\"" EXIT
+              # Only drop the keys this run actually rewrites. When the Azure
+              # secrets are unset, their lines must survive untouched.
+              if [ -n "$azure_speech_key" ]; then
+                drop="^(POSTGRES_PASSWORD|ALERT_ENCRYPTION_KEY|AZURE_SPEECH_KEY|AZURE_SPEECH_REGION)="
+              else
+                drop="^(POSTGRES_PASSWORD|ALERT_ENCRYPTION_KEY)="
+              fi
               if [ -f "$env_file" ]; then
-                grep -v -E "^(POSTGRES_PASSWORD|ALERT_ENCRYPTION_KEY)=" "$env_file" > "$tmp_file" || true
+                grep -v -E "$drop" "$env_file" > "$tmp_file" || true
               fi
               printf "POSTGRES_PASSWORD=%s\nALERT_ENCRYPTION_KEY=%s\n" "$postgres_password" "$encryption_key" >> "$tmp_file"
+              if [ -n "$azure_speech_key" ]; then
+                [ -n "$azure_speech_region" ] || azure_speech_region=eastasia
+                printf "AZURE_SPEECH_KEY=%s\nAZURE_SPEECH_REGION=%s\n" "$azure_speech_key" "$azure_speech_region" >> "$tmp_file"
+                echo "Azure Speech credentials injected (region: $azure_speech_region)."
+              else
+                echo "AZURE_SPEECH_KEY secret is unset; existing Azure Speech settings left untouched."
+              fi
               chmod 600 "$tmp_file"
               mv "$tmp_file" "$env_file"
               trap - EXIT
-              echo "Cloud alert environment values are configured."
+              after_hash="$(sha256sum "$env_file" | cut -d' ' -f1)"
+              if [ "$before_hash" = "$after_hash" ]; then
+                echo "Deployment environment values unchanged; running containers left as they are."
+              else
+                echo "Deployment environment values are configured."
+                # 容器不会自己重读 .env：容器在跑就顺手按新值重建，否则这次注入
+                # （尤其是语音密钥）要等到下一次部署才生效。
+                if [ -n "$(cd "$app" && docker compose ps -aq app 2>/dev/null || true)" ]; then
+                  (cd "$app" && docker compose up -d --no-deps app)
+                  echo "app container recreated so the new settings take effect."
+                else
+                  echo "app container is not running yet; the next deploy will pick up the new settings."
+                fi
+              fi
             '
 
       - name: Build, deploy and verify local health
