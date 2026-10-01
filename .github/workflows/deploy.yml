@@ -75,7 +75,7 @@ jobs:
         run: |
           # This read-only check must pass before source synchronization. It is
           # also the default manual workflow mode for testing SSH credentials.
-          ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p 22 "$DEPLOY_USER@$DEPLOY_HOST" '
+          ssh -o IdentitiesOnly=yes -o ServerAliveInterval=20 -o ServerAliveCountMax=30 -i ~/.ssh/deploy_key -p 22 "$DEPLOY_USER@$DEPLOY_HOST" '
             set -Eeuo pipefail
             command -v rsync >/dev/null
             command -v docker >/dev/null
@@ -96,7 +96,7 @@ jobs:
           # Market history and training samples are a persistent server-side
           # SQLite, production secrets and the current release must never be
           # overwritten by source synchronization.
-          ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p 22 "$DEPLOY_USER@$DEPLOY_HOST" '
+          ssh -o IdentitiesOnly=yes -o ServerAliveInterval=20 -o ServerAliveCountMax=30 -i ~/.ssh/deploy_key -p 22 "$DEPLOY_USER@$DEPLOY_HOST" '
             set -Eeuo pipefail
             app=/opt/btc-usdt-long-short-indicator
             releases="$app/.releases"
@@ -136,7 +136,7 @@ jobs:
             --exclude='.git/' --exclude='data/' --exclude='.env' --exclude='.env.*' \
             --exclude='.releases/' --exclude='.rollback-current' \
             --exclude='docker-compose.override.yml' \
-            -e "ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p 22" ./ "$DEPLOY_USER@$DEPLOY_HOST:/opt/btc-usdt-long-short-indicator/"
+            -e "ssh -o IdentitiesOnly=yes -o ServerAliveInterval=20 -o ServerAliveCountMax=30 -i ~/.ssh/deploy_key -p 22" ./ "$DEPLOY_USER@$DEPLOY_HOST:/opt/btc-usdt-long-short-indicator/"
 
       - name: Configure deployment secrets
         if: steps.ssh.outputs.ready == 'true' && inputs.mode == 'configure-env'
@@ -172,7 +172,7 @@ jobs:
             "$POSTGRES_PASSWORD" "$ALERT_ENCRYPTION_KEY" \
             "$AZURE_SPEECH_KEY" "$AZURE_SPEECH_REGION" \
             "$FINNHUB_API_KEY" "$EIA_API_KEY" "$COINGECKO_API_KEY" | \
-            ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p 22 "$DEPLOY_USER@$DEPLOY_HOST" '
+            ssh -o IdentitiesOnly=yes -o ServerAliveInterval=20 -o ServerAliveCountMax=30 -i ~/.ssh/deploy_key -p 22 "$DEPLOY_USER@$DEPLOY_HOST" '
               set -Eeuo pipefail
               IFS= read -r postgres_password
               IFS= read -r encryption_key
@@ -254,7 +254,7 @@ jobs:
           DEPLOY_USER: ${{ env.DEPLOY_USER }}
           MODE: ${{ inputs.mode }}
         run: |
-          ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p 22 "$DEPLOY_USER@$DEPLOY_HOST" '
+          ssh -o IdentitiesOnly=yes -o ServerAliveInterval=20 -o ServerAliveCountMax=30 -i ~/.ssh/deploy_key -p 22 "$DEPLOY_USER@$DEPLOY_HOST" '
             set -Eeuo pipefail
             # MODE 必须内联进来：ssh 不会继承 step 的 env，远程 shell 里读 ${MODE}
             # 会直接 unbound variable 退出（上一次就是这么把第二步整个跳过的）。
@@ -346,7 +346,7 @@ jobs:
           DEPLOY_HOST: ${{ env.DEPLOY_HOST }}
           DEPLOY_USER: ${{ env.DEPLOY_USER }}
         run: |
-          ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p 22 "$DEPLOY_USER@$DEPLOY_HOST" '
+          ssh -o IdentitiesOnly=yes -o ServerAliveInterval=20 -o ServerAliveCountMax=30 -i ~/.ssh/deploy_key -p 22 "$DEPLOY_USER@$DEPLOY_HOST" '
             set -Eeuo pipefail
             app=/opt/btc-usdt-long-short-indicator
             cd "$app"
@@ -407,7 +407,7 @@ jobs:
           DEPLOY_HOST: ${{ env.DEPLOY_HOST }}
           DEPLOY_USER: ${{ env.DEPLOY_USER }}
         run: |
-          ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p 22 "$DEPLOY_USER@$DEPLOY_HOST" 'bash /opt/btc-usdt-long-short-indicator/scripts/deploy-production.sh'
+          ssh -o IdentitiesOnly=yes -o ServerAliveInterval=20 -o ServerAliveCountMax=30 -i ~/.ssh/deploy_key -p 22 "$DEPLOY_USER@$DEPLOY_HOST" 'bash /opt/btc-usdt-long-short-indicator/scripts/deploy-production.sh'
 
       - name: Verify production
         id: verify_production
@@ -425,5 +425,5 @@ jobs:
           DEPLOY_HOST: ${{ env.DEPLOY_HOST }}
           DEPLOY_USER: ${{ env.DEPLOY_USER }}
         run: |
-          ssh -o IdentitiesOnly=yes -i ~/.ssh/deploy_key -p 22 "$DEPLOY_USER@$DEPLOY_HOST" 'bash /opt/btc-usdt-long-short-indicator/scripts/rollback-production.sh'
+          ssh -o IdentitiesOnly=yes -o ServerAliveInterval=20 -o ServerAliveCountMax=30 -i ~/.ssh/deploy_key -p 22 "$DEPLOY_USER@$DEPLOY_HOST" 'bash /opt/btc-usdt-long-short-indicator/scripts/rollback-production.sh'
           exit 1
