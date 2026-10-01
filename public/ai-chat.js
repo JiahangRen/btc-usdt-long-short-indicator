@@ -74,6 +74,9 @@
       webReceipt: "已联网检索 {n} 条 · 来源 {src} · 耗时 {ms} ms",
       webReceiptCached: "已联网检索 {n} 条（复用 10 分钟内缓存）· 来源 {src}",
       webOffNote: "本次未联网，仅使用本站实时数据",
+      searchLimit: "检索",
+      searchLimitUnit: "条",
+      searchLimitTip: "联网检索最多取回多少条公开信息（条数越多 token 消耗越大）",
       webHeadlines: "本次获取到的外部信息",
       newChat: "新建对话",
       newChatTip: "开一段新对话；当前这段会自动存进历史记录",
@@ -170,6 +173,9 @@
       webReceipt: "Searched {n} items · {src} · {ms} ms",
       webReceiptCached: "Searched {n} items (cached, <10 min old) · {src}",
       webOffNote: "No web search this time — local data only",
+      searchLimit: "Search",
+      searchLimitUnit: "items",
+      searchLimitTip: "Cap how many public items web research pulls in (more = higher token cost)",
       webHeadlines: "External sources used",
       newChat: "New chat",
       newChatTip: "Start a fresh chat; the current one is filed under History",
@@ -285,6 +291,12 @@
       ".btc-ai-caret{display:inline-block;width:6px;height:14px;background:var(--accent-purple,#a78bfa);vertical-align:-2px;animation:btc-ai-blink 1s steps(2,start) infinite}",
       "@keyframes btc-ai-blink{to{visibility:hidden}}",
       ".btc-ai-quick{display:flex;gap:6px;flex-wrap:wrap;padding:0 14px 10px}",
+      ".btc-ai-searchmenu{position:absolute;right:10px;z-index:7;min-width:158px;padding:6px;border-radius:12px;border:1px solid var(--border-strong,#3a434f);background:var(--bg-elevated,#232a33);box-shadow:0 16px 40px rgba(0,0,0,.5)}",
+      ".btc-ai-searchmenu h4{margin:2px 4px 6px;font:500 12px/1.3 system-ui,sans-serif;color:var(--text-primary,#e8eaed)}",
+      ".btc-ai-search-opt{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;border:1px solid transparent;background:transparent;color:var(--text-secondary,#9aa4b2);border-radius:8px;padding:7px 10px;font:400 12px/1 system-ui,sans-serif;cursor:pointer;text-align:left}",
+      ".btc-ai-search-opt:hover{background:rgba(127,127,127,.14);color:var(--text-primary,#e8eaed)}",
+      ".btc-ai-search-opt[data-active='true']{color:var(--accent-purple,#a78bfa);border-color:rgba(167,139,250,.4)}",
+      ".btc-ai-search-opt .btc-ai-search-check{font-size:11px}",
       ".btc-ai-chip{border:1px solid var(--border-subtle,#2a313b);background:transparent;color:var(--text-secondary,#9aa4b2);border-radius:999px;padding:6px 10px;font:400 12px/1 system-ui,sans-serif;cursor:pointer}",
       ".btc-ai-chip:hover{border-color:var(--accent-purple,#a78bfa);color:var(--text-primary,#e8eaed)}",
       ".btc-ai-foot{border-top:1px solid var(--border-subtle,#2a313b);padding:10px 12px;background:var(--bg-surface-2,#1c2129)}",
@@ -752,6 +764,15 @@
   }
 
   function boot() {
+    // v2.12.30：分屏「放大单看」等 iframe 内不注入 AI 助手——主页面已有同一按钮，
+    // 浮层背板下会出现一暗一亮两个；且浮层内按钮按主页面存的坐标落位会错位。
+    if (window.top !== window) return;
+    // 幂等兜底（v2.12.31）：无论本脚本被加载几遍、core 被实例化几次，同一文档里只允许一个 AI 助手按钮。
+    // 直接查 DOM（第一个 boot 已把按钮挂上 body）+ 跨实例共享的 window 标志，双保险拦截重复注入。
+    // Idempotent safety net: no matter how many times this script or its loader runs, only one button per document.
+    if (window.__btcAiBooted) return;
+    if (document.querySelector(".btc-ai-launch")) return;
+    window.__btcAiBooted = true;
     injectStyle();
     let t = LANG[currentLang()];
     let busy = false;
@@ -815,12 +836,16 @@
       '<div class="btc-ai-tools">' +
         '<button type="button" class="btc-ai-tool" data-act="new"><span class="btc-ai-tool-label"></span></button>' +
         '<button type="button" class="btc-ai-tool" data-act="history"><span class="btc-ai-tool-label"></span><span class="btc-ai-tool-badge" hidden></span></button>' +
+        '<button type="button" class="btc-ai-tool btc-ai-search-limit" data-act="search-limit"><span class="btc-ai-tool-label"></span></button>' +
         '<span class="btc-ai-tool-spacer"></span>' +
         '<button type="button" class="btc-ai-tool" data-act="zoom-out">A−</button>' +
         '<button type="button" class="btc-ai-zoom-val" data-act="zoom-reset"></button>' +
         '<button type="button" class="btc-ai-tool" data-act="zoom-in">A＋</button>' +
         '<button type="button" class="btc-ai-tool" data-act="shot"><span class="btc-ai-tool-label"></span></button>' +
       "</div>" +
+      // 检索条数浮层：点工具条「检索 N 条」展开选项。
+      // Search-item-count overlay: opened from the "Search N" tool button.
+      '<div class="btc-ai-searchmenu" hidden></div>' +
       // 模型选择浮层：点头部模型徽标展开，按性价比排序。
       // Model picker overlay: opened from the model chip in the header, sorted by value.
       '<div class="btc-ai-models btc-ai-model-menu" hidden></div>' +
@@ -1233,6 +1258,11 @@
     // Web research: on by default (the server config can override), remembered locally.
     let webEnabled = true;
     try { webEnabled = localStorage.getItem("btc_ai_web") !== "0"; } catch (e) { /* 隐私模式 / private mode */ }
+    // 联网检索条数：面板可调（10/12/20/30），记在本地；默认 12。
+    // Web search item count: adjustable in the panel, remembered locally; default 12.
+    let searchLimitOptions = [10, 12, 20, 30];
+    let searchLimit = 12;
+    try { let s = parseInt(localStorage.getItem("btc_ai_search_limit") || "", 10); if (Number.isFinite(s) && s > 0) searchLimit = s; } catch (e) { /* 隐私模式 / private mode */ }
     // 思考模式：默认快速（关掉推理，秒级出结果），存 localStorage 记住选择。
     // Thinking mode: fast by default (no reasoning, answers in seconds), persisted in localStorage.
     let thinking = "fast";
@@ -1271,6 +1301,7 @@
       applyModeLabel();
       applyStyleLabel();
       applyWebLabel();
+      applySearchLabel();
       quick.innerHTML = "";
       t.quick.forEach(function (text) {
         let chip = document.createElement("button");
@@ -1420,6 +1451,76 @@
       webBtn.textContent = webEnabled ? t.webOn : t.webOff;
       webBtn.setAttribute("data-on", webEnabled ? "true" : "false");
       webBtn.title = webEnabled ? t.webTipOn : t.webTipOff;
+    }
+    // 联网检索条数：工具条按钮显示「检索 N 条」，点开是选项浮层。
+    // Search-item count: the tool button reads "Search N"; clicking opens the option overlay.
+    function applySearchLabel() {
+      let btn = panel.querySelector('[data-act="search-limit"]');
+      if (!btn) return;
+      let span = btn.querySelector(".btc-ai-tool-label");
+      if (span) span.textContent = t.searchLimit + " " + searchLimit + " " + t.searchLimitUnit;
+      btn.title = t.searchLimitTip;
+      btn.setAttribute("data-active", searchMenu && !searchMenu.hidden ? "true" : "false");
+    }
+    let searchMenu = panel.querySelector(".btc-ai-searchmenu");
+    function renderSearchMenu() {
+      if (!searchMenu) return;
+      searchMenu.innerHTML = "";
+      let head = document.createElement("h4");
+      head.textContent = t.searchLimit + "（" + t.searchLimitUnit + "）";
+      searchMenu.appendChild(head);
+      searchLimitOptions.forEach(function (n) {
+        let row = document.createElement("button");
+        row.type = "button";
+        row.className = "btc-ai-search-opt";
+        row.setAttribute("data-active", n === searchLimit ? "true" : "false");
+        let label = document.createElement("span");
+        label.textContent = String(n) + " " + t.searchLimitUnit;
+        let check = document.createElement("span");
+        check.className = "btc-ai-search-check";
+        check.textContent = n === searchLimit ? "✓" : "";
+        row.append(label, check);
+        row.onclick = function () {
+          if (n === searchLimit) { toggleSearchMenu(false); return; }
+          searchLimit = n;
+          try { localStorage.setItem("btc_ai_search_limit", String(n)); } catch (e) { /* 隐私模式 / private mode */ }
+          applySearchLabel();
+          toggleSearchMenu(false);
+        };
+        searchMenu.appendChild(row);
+      });
+    }
+    function toggleSearchMenu(force) {
+      if (!searchMenu) return;
+      let open = typeof force === "boolean" ? force : searchMenu.hidden;
+      // 三个浮层互斥，避免叠在一起（与历史/模型/语气浮层一致）。
+      // The overlays are mutually exclusive so they never stack.
+      if (open) { toggleModelMenu(false); toggleStyleMenu(false); toggleConvMenu(false); searchMenu.style.top = ((toolsEl ? toolsEl.offsetTop + toolsEl.offsetHeight : 96) + 6) + "px"; renderSearchMenu(); }
+      searchMenu.hidden = !open;
+      applySearchLabel();
+    }
+    // 动态快捷问题：开面板 / 切语言 / 新建对话时向服务端拉一次，覆盖写死的默认五连。
+    // Dynamic suggestions: pulled from the server on open / language switch / new chat,
+    // replacing the hardcoded default five.
+    async function loadSuggestions() {
+      if (panel.hidden) return;
+      let lang = currentLang() === "en" ? "en" : "zh";
+      let t2 = LANG[lang];
+      try {
+        let response = await fetch("/api/ai/suggestions?lang=" + lang + "&symbol=" + encodeURIComponent(aiCoin()));
+        if (!response.ok) return;
+        let data = await response.json();
+        if (!Array.isArray(data.questions) || !data.questions.length) return;
+        quick.innerHTML = "";
+        data.questions.slice(0, 6).forEach(function (text) {
+          let chip = document.createElement("button");
+          chip.type = "button";
+          chip.className = "btc-ai-chip";
+          chip.textContent = text;
+          chip.onclick = function () { ask(text); };
+          quick.appendChild(chip);
+        });
+      } catch (e) { /* 网络抖动就保留写死的兜底问题 / keep the static fallback on a transient failure */ }
     }
     function renderStyleMenu() {
       if (!styleMenu) return;
@@ -1626,6 +1727,7 @@
       try { localStorage.setItem(ACTIVE_KEY, convId); } catch (e) { /* 隐私模式 / private mode */ }
       log.innerHTML = "";
       addMessage("bot", t.greeting);
+      loadSuggestions();
       updateConvBadge();
       if (had) flashStatus(t.newChatDone);
       input.focus();
@@ -2044,6 +2146,15 @@
             applyStyleLabel();
           }
         }
+        // 检索条数选项与默认值：本地已存过就用本地的，否则用服务端默认值。
+        // Search-limit options + default: keep the local value if set, else use the server default.
+        if (payload.webSearch) {
+          if (Array.isArray(payload.webSearch.limitOptions) && payload.webSearch.limitOptions.length) searchLimitOptions = payload.webSearch.limitOptions.slice();
+          if (Number.isFinite(Number(payload.webSearch.defaultLimit)) && !localStorage.getItem("btc_ai_search_limit")) {
+            searchLimit = Number(payload.webSearch.defaultLimit);
+            applySearchLabel();
+          }
+        }
       } catch (error) {
         // 服务端可能只是还没起来 / 正在重启（本项目 8787 会被反复 kickstart），
         // 一次网络抖动就把按钮永久隐藏的话，用户看到的就是「AI 助手按钮不见了」。
@@ -2252,7 +2363,7 @@
         let response = await fetch("/api/ai/chat?symbol=" + encodeURIComponent(aiCoin()), {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ question: question, history: apiHistory(), stream: true, lang: currentLang(), thinking: thinking, style: answerStyle, search: webEnabled, context: pageContext || collectPageContext() })
+          body: JSON.stringify({ question: question, history: apiHistory(), stream: true, lang: currentLang(), thinking: thinking, style: answerStyle, search: webEnabled, searchLimit: searchLimit, context: pageContext || collectPageContext() })
         });
         let type = response.headers.get("content-type") || "";
         if (!response.ok) {
@@ -2361,6 +2472,7 @@
       toggleModelMenu(false);
       toggleStyleMenu(false);
       toggleConvMenu(false);
+      toggleSearchMenu(false);
       if (!panel.hidden && !panel.contains(event.target) && event.target !== launch && !launch.contains(event.target)) {
         panel.hidden = true;
         syncLaunchDock();
@@ -2393,6 +2505,11 @@
     if (zoomInBtn) zoomInBtn.onclick = function () { zoomStep(1); input.focus(); };
     if (zoomVal) zoomVal.onclick = function () { setFontScale(1); input.focus(); };
     if (shotBtn) shotBtn.onclick = function () { shootLong(); };
+    // 检索条数按钮：点开/收起浮层，并阻止冒泡（否则会被「点别处收起」立刻关掉）。
+    // Search-count button: toggle the overlay and stop propagation so it isn't instantly dismissed.
+    let searchLimitBtn = panel.querySelector('[data-act="search-limit"]');
+    if (searchLimitBtn) searchLimitBtn.onclick = function (event) { event.stopPropagation(); toggleSearchMenu(); };
+    if (searchMenu) searchMenu.onclick = function (event) { event.stopPropagation(); };
     // 历史浮层内部的点击不冒泡到「点别处收起」，否则删一条就整层关掉。
     // Clicks inside the history overlay must not bubble to the dismiss handler.
     if (convMenu) convMenu.onclick = function (event) { event.stopPropagation(); };
@@ -2416,6 +2533,7 @@
         if (!log.childElementCount) addMessage("bot", t.greeting);
         loadConfig();
         loadQuota();
+        loadSuggestions();
         input.focus();
       } else {
         scheduleLaunchIdle();
@@ -2446,6 +2564,7 @@
       if (!panel.hidden) {
         try { renderConversation(); } catch (e) {}
         try { loadQuota(); } catch (e) {}
+        try { loadSuggestions(); } catch (e) {}
       }
     }).observe(document.documentElement, { attributes: true, attributeFilter: ["lang"] });
   }

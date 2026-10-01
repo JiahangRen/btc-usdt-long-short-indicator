@@ -298,6 +298,13 @@ export function normalizeStyle(style) {
 // own search plugin, so the pipeline never hinges on one endpoint supporting enable_search.
 const WEB_TTL = 10 * 60_000;   // 同一问题 10 分钟内复用检索结果 / reuse results for 10 min
 const WEB_ITEM_LIMIT = 12;     // 注入提示词的最大条数（控制 token 预算）/ cap injected rows
+// 面板可调「检索条数」，服务端按 1–50 夹紧，避免极端值把提示词撑爆或把额度烧光。
+// The panel can adjust how many items to pull; the server clamps to 1–50.
+function clampSearchLimit(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return WEB_ITEM_LIMIT;
+  return Math.max(1, Math.min(50, Math.round(n)));
+}
 const WEB_FETCH_TIMEOUT = 9_000;
 const WEB_UA = 'Mozilla/5.0 (compatible; BTC-Indicator-AI/1.0; +local research assistant)';
 const webCache = new Map();
@@ -471,7 +478,7 @@ function dedupeNews(items) {
 }
 // 检索一次外部信息。失败不算致命：返回 attempted=true、items=[]，提示词照常构建。
 // A failed search is never fatal: it returns attempted=true with no items.
-async function webSearch(question, { lang = 'zh', signal } = {}) {
+async function webSearch(question, { lang = 'zh', signal, limit } = {}) {
   const built = buildSearchQueries(question, lang);
   const queries = built.queries;
   const cacheKey = queries.map(q => q.query).join('|');
@@ -495,7 +502,7 @@ async function webSearch(question, { lang = 'zh', signal } = {}) {
   const merged = relevant.length >= 6 ? relevant : dedupeNews(scored);
   const ranked = merged
     .sort((a, b) => (b.score || 0) - (a.score || 0) || (b.publishedAt || 0) - (a.publishedAt || 0))
-    .slice(0, WEB_ITEM_LIMIT);
+    .slice(0, clampSearchLimit(limit));
   const value = {
     items:ranked,
     attempted:true,
@@ -513,6 +520,131 @@ async function webSearch(question, { lang = 'zh', signal } = {}) {
   if (webCache.size > 60) for (const key of [...webCache.keys()].slice(0, webCache.size - 60)) webCache.delete(key);
   return value;
 }
+// ---------- 动态快捷问题 / Dynamic suggested questions ----------
+// 基于「服务端当前快照状态 + 实时 BTC 热点新闻」生成因人而异、随行情变的提问建议，
+// 取代前端写死的固定五连。状态类问题永远最相关；热点新闻类反映当下真实话题；
+// BTC 常青话题池按小时级种子旋转，保证同一时段稳定、跨时段会换。
+// Suggested questions driven by the live snapshot plus real-time BTC headlines,
+// so they vary with the market instead of being a hardcoded five.
+const SUGGEST_TTL = 2 * 60_000;
+const suggestCache = new Map();
+
+// 每小时换一次种子，让常青话题池稳定一小段时间后再轮换，避免每次开面板都全变。
+// Reseed hourly so the evergreen pool stays stable for a while, then rotates.
+function suggestSeed() { return Math.floor(Date.now() / 3_600_000); }
+function rotateArray(arr, seed) {
+  const a = arr.slice();
+  let s = (seed % 2_147_483_646) + 1;
+  for (let i = a.length - 1; i > 0; i -= 1) {
+    s = (s * 48_271) % 2_147_483_647;
+    const j = s % (i + 1);
+    const tmp = a[i]; a[i] = a[j]; a[j] = tmp;
+  }
+  return a;
+}
+function minutesToWords(minutes, zh) {
+  if (minutes == null || minutes < 0) return '';
+  const d = Math.floor(minutes / 1440);
+  const h = Math.floor((minutes % 1440) / 60);
+  const m = minutes % 60;
+  if (d > 0) return zh ? `${d} 天${h ? ' ' + h + ' 小时' : ''}` : `${d}d${h ? ' ' + h + 'h' : ''}`;
+  if (h > 0) return zh ? `${h} 小时${m ? ' ' + m + ' 分' : ''}` : `${h}h${m ? ' ' + m + 'm' : ''}`;
+  return (Math.max(1, m)) + (zh ? ' 分钟' : 'm');
+}
+// 取最近 BTC 头条（不依赖具体提问），转成「当前热点」类问题。
+// Pull the latest BTC headlines and turn them into "what's hot right now" questions.
+async function topBtcHeadlines(lang, signal) {
+  const locale = lang === 'en' ? 'en' : 'zh';
+  const query = locale === 'en' ? 'Bitcoin crypto when:1d' : '比特币 加密市场 when:1d';
+  const feed = await fetchNewsFeed({ label: 'Google News · Hot', url: googleNewsUrl(query, locale), signal });
+  return dedupeNews(feed).slice(0, 5).map(item => ({ title: item.title, source: item.source }));
+}
+function headlineToQuestion(head, zh) {
+  if (!head || !head.title) return null;
+  // 去掉常见的「标题 - 媒体名」尾巴，避免问题里塞进来源。
+  let topic = String(head.title).replace(/\s*[—–\-|:]\s*.{0,40}$/, '').trim();
+  topic = topic.length > 30 ? topic.slice(0, 29) + '…' : topic;
+  if (topic.length < 4) return null;
+  return zh
+    ? `「${topic}」这条新闻对 BTC 接下来怎么走有影响吗？`
+    : `News: "${topic}" — does it change where BTC goes next?`;
+}
+async function buildSuggestions(snapshot, lang, signal) {
+  const zh = lang !== 'en';
+  const q = [];
+  const seen = new Set();
+  const add = text => { if (text && !seen.has(text) && q.length < 6) { seen.add(text); q.push(text); } };
+  const price = snapshot.price || {};
+  const der = snapshot.derivatives || {};
+  const sent = snapshot.sentiment || {};
+  const macro = snapshot.macro || {};
+  const tf = snapshot.timeframes || {};
+
+  // 1) 快照状态驱动：当前行情里最该被问的那几件事。
+  if (typeof der.fundingRatePct === 'number') {
+    if (der.fundingRatePct >= 0.05) add(zh ? `当前资金费率 ${der.fundingRatePct}% 是不是多头过热了？` : `Funding rate ${der.fundingRatePct}% — are longs overheating?`);
+    else if (der.fundingRatePct <= -0.05) add(zh ? `资金费率 ${der.fundingRatePct}%（负值），空头是不是压太狠？` : `Funding rate ${der.fundingRatePct}% (negative) — are shorts overstretched?`);
+  }
+  if (typeof price.change24hPct === 'number') {
+    if (price.change24hPct >= 3) add(zh ? `24 小时已经涨了 ${price.change24hPct}%，现在还能追吗？` : `Up ${price.change24hPct}% in 24h — still safe to chase?`);
+    else if (price.change24hPct <= -3) add(zh ? `24 小时跌了 ${price.change24hPct}%，是抄底还是继续下？` : `Down ${price.change24hPct}% in 24h — dip or more downside?`);
+  }
+  if (typeof sent.fearGreedValue === 'number') {
+    if (sent.fearGreedValue <= 25) add(zh ? `恐惧贪婪指数只有 ${sent.fearGreedValue}（极度恐惧），是布局时机吗？` : `Fear & Greed just ${sent.fearGreedValue} (extreme fear) — time to accumulate?`);
+    else if (sent.fearGreedValue >= 75) add(zh ? `恐惧贪婪指数 ${sent.fearGreedValue}（极度贪婪），要不要先减仓？` : `Fear & Greed at ${sent.fearGreedValue} (extreme greed) — trim or hold?`);
+  }
+  const events = [
+    ...(Array.isArray(macro.federalReserve) ? macro.federalReserve : []),
+    ...(Array.isArray(macro.economicCalendar) ? macro.economicCalendar : [])
+  ].filter(e => e && typeof e.minutesUntil === 'number' && e.minutesUntil >= 0 && e.minutesUntil <= 4320)
+    .sort((a, b) => a.minutesUntil - b.minutesUntil);
+  if (events[0] && events[0].title) add(zh
+    ? `${events[0].title} 还有 ${minutesToWords(events[0].minutesUntil, true)} 公布，会怎么影响 BTC？`
+    : `${events[0].title} in ${minutesToWords(events[0].minutesUntil, false)} — how will it hit BTC?`);
+  const dScore = tf['1d'] && tf['1d'].score;
+  const hScore = tf['1h'] && tf['1h'].score;
+  if (typeof dScore === 'number' && typeof hScore === 'number' && dScore !== 0 && hScore !== 0 && Math.sign(dScore) !== Math.sign(hScore)) {
+    add(zh
+      ? `日线偏${dScore > 0 ? '多' : '空'}、小时线偏${hScore > 0 ? '多' : '空'}，多周期是不是打架了？`
+      : `Daily leans ${dScore > 0 ? 'long' : 'short'}, hourly ${hScore > 0 ? 'long' : 'short'} — timeframes conflicting?`);
+  }
+
+  // 2) 实时 BTC 热点新闻 → 转成问题（塞到状态问题之后、常青池之前）。
+  let headlines = [];
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 6_000);
+    try { headlines = await topBtcHeadlines(lang, signal || controller.signal); }
+    finally { clearTimeout(timer); }
+  } catch { headlines = []; }
+  headlines.map(h => headlineToQuestion(h, zh)).forEach(add);
+
+  // 3) BTC 常青话题池：按小时级种子旋转，补足到最多 6 条。
+  const poolZh = [
+    '最近比特币 ETF 资金是流入还是流出？',
+    '美联储下一步降息还是加息，对 BTC 意味着什么？',
+    '链上巨鲸最近在囤币还是抛售？',
+    '美国监管/法案对加密市场的最新动向是什么？',
+    '减半周期现在处在哪个阶段，影响还剩多少？',
+    '稳定币市值变化说明了什么？',
+    '美债收益率和美元指数怎么影响 BTC？',
+    '现货 ETF 获批以来机构到底买了多少？'
+  ];
+  const poolEn = [
+    'Are Bitcoin ETFs seeing inflows or outflows lately?',
+    'Is the Fed easing or hiking next — what does it mean for BTC?',
+    'Are on-chain whales accumulating or dumping right now?',
+    'What is the latest US regulation / bill news for crypto?',
+    'Where are we in the halving cycle and how much tailwind is left?',
+    'What does the stablecoin market cap tell us?',
+    'How do Treasury yields and the dollar index hit BTC?',
+    'How much have institutions actually bought since spot ETF approval?'
+  ];
+  rotateArray(zh ? poolZh : poolEn, suggestSeed()).forEach(add);
+
+  return q.slice(0, 6);
+}
+
 function beijingStamp(iso) {
   try {
     return new Date(iso).toLocaleString('zh-CN', { timeZone:'Asia/Shanghai', hour12:false, month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' });
@@ -1271,7 +1403,8 @@ title: 各周期 RSI14 对比
         available:true,
         defaultEnabled:true,
         ttlMs:WEB_TTL,
-        maxItems:WEB_ITEM_LIMIT,
+        defaultLimit:WEB_ITEM_LIMIT,
+        limitOptions:[10, 12, 20, 30],
         providers:['Google News RSS（中文）','Google News RSS（English）'],
         note:'服务端按你的问题去公开新闻源检索最近报道与分析，与本站快照数据一起交给模型；关闭后只读本地数据。'
       },
@@ -1332,6 +1465,9 @@ title: 各周期 RSI14 对比
       // 联网检索：默认开启，前端可显式关掉（payload.search === false）。
       // Web research is on by default; the client can switch it off explicitly.
       const wantSearch = payload.search !== false;
+      // 检索条数：面板可调（10/12/20/30），服务端夹紧到 1–50，控制 token 预算。
+      // Search item count: adjustable from the panel (10/12/20/30), clamped server-side to 1–50.
+      const searchLimit = clampSearchLimit(payload.searchLimit);
 
       let snapshot;
       try { snapshot = await buildSnapshot(payload.source || 'okx'); }
@@ -1361,7 +1497,7 @@ title: 各周期 RSI14 对比
         // Write the headers first so the UI can show the search phase immediately.
         if (!startSse(res, { model:credential.model || DEFAULT_MODEL, deepMode:thinking === 'deep' })) return true;
         try {
-          const web = wantSearch ? await webSearch(question, { lang:payload.lang, signal:controller.signal }) : null;
+          const web = wantSearch ? await webSearch(question, { lang:payload.lang, signal:controller.signal, limit:searchLimit }) : null;
           if (res.writableEnded) return true;
           // 检索回执：条数、来源、耗时都推给前端，界面上可核对，也方便排查源是否被墙。
           // Search receipt: count, outlets and latency go to the client for transparency.
@@ -1392,7 +1528,7 @@ title: 各周期 RSI14 对比
 
       let web = null;
       if (wantSearch) {
-        try { web = await webSearch(question, { lang:payload.lang, signal:controller.signal }); }
+        try { web = await webSearch(question, { lang:payload.lang, signal:controller.signal, limit:searchLimit }); }
         catch { web = null; }
       }
       const messages = buildMessages(snapshotWithContext, [...history, { role:'user', content:question }], payload.lang, thinking, style, web);
@@ -1414,10 +1550,34 @@ title: 各周期 RSI14 对比
         return true;
       } finally { clearTimeout(timer); }
     }
+    if (url.pathname === '/api/ai/suggestions') {
+      // 动态快捷问题：基于当前快照状态 + 实时 BTC 热点新闻生成，取代前端写死的固定五连。
+      // Dynamic suggested questions from the live snapshot plus real-time BTC headlines.
+      try {
+        const lang = url.searchParams.get('lang') === 'en' ? 'en' : 'zh';
+        const coin = (typeof currentCoin === 'function' ? currentCoin() : null) || 'BTC';
+        const cacheKey = `${lang}:${coin}`;
+        const now = Date.now();
+        const hit = suggestCache.get(cacheKey);
+        if (hit && now - hit.at < SUGGEST_TTL) { json(res, 200, { questions:hit.value }); return true; }
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 7_000);
+        try {
+          const snapshot = await buildSnapshot(url.searchParams.get('source') || 'okx');
+          const questions = await buildSuggestions(snapshot, lang, controller.signal);
+          suggestCache.set(cacheKey, { at:now, value:questions });
+          if (suggestCache.size > 30) for (const key of [...suggestCache.keys()].slice(0, suggestCache.size - 30)) suggestCache.delete(key);
+          json(res, 200, { questions });
+        } finally { clearTimeout(timer); }
+      } catch (error) {
+        json(res, 200, { questions:[], error:String(error && error.message || error) });
+      }
+      return true;
+    }
     return false;
   }
 
   // webSearch 一并导出，便于本地自检与后续复用（不依赖 HTTP 层）。
   // webSearch is exposed too, so it can be exercised without going through HTTP.
-  return { handle, buildSnapshot, webSearch, QWEN_MODELS, getQuotaState };
+  return { handle, buildSnapshot, webSearch, buildSuggestions, QWEN_MODELS, getQuotaState };
 }

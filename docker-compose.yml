@@ -25,6 +25,8 @@ services:
       FINNHUB_API_KEY: ${FINNHUB_API_KEY:-}
       EIA_API_KEY: ${EIA_API_KEY:-}
       COINGECKO_API_KEY: ${COINGECKO_API_KEY:-}
+      # Kronos 推理服务地址：站点的 /api/kronos/* 代理转发到此（同 compose 网络）
+      KRONOS_SERVICE_URL: http://kronos:8799
     expose:
       - "8787"
     ports:
@@ -93,6 +95,18 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+
+  kronos:
+    build: ./kronos-service
+    restart: unless-stopped
+    environment:
+      REDIS_URL: redis://redis:6379
+      KRONOS_CACHE_TTL: "3600"
+    expose:
+      - "8799"
+    depends_on:
+      redis:
+        condition: service_healthy
 
   caddy:
     image: caddy:2-alpine

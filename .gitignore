@@ -14,3 +14,19 @@ com.jeffereyreng.btc-indicator.plist.bak-*
 .backup-*/
 screenshot-*.png
 tools/
+
+# 本地工作产物：截图/验证图与编辑前备份目录（.bak-* 而非 .backup-，两者都要挡）。
+# Local-only: verification screenshots and pre-edit backup dirs.
+verify-*.png
+shot-*.png
+toggle-*.png
+.bak-*/
+.bak-*
+com.jeffereyreng.btc-kronos.plist
+BTC Indicator.app/Contents/MacOS/*.bak-*
+
+# Python 虚拟环境与字节码：kronos-service 只入库源码，.venv 约 500 MB。
+# Python venv and bytecode: only kronos-service sources are tracked.
+kronos-service/.venv/
+kronos-service/__pycache__/
+__pycache__/

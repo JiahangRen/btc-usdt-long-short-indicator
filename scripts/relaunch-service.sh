@@ -1,10 +1,11 @@
 #!/bin/zsh
 # 把 launchd 配置同步到「磁盘上的最新状态」。幂等：已是最新时什么都不做。
 #
-# 需要同步的两项：
+# 需要同步的三项：
 #   1. com.jeffereyreng.btc-indicator     —— 8787 服务，ProgramArguments 指向 serve-with-infra.sh
 #                                            （启动前先等 Postgres+Redis，消灭启动竞态）
 #   2. com.jeffereyreng.btc-alerts-infra  —— 云端告警依赖守护，登录即拉起 + 每 2 分钟巡检自愈
+#   3. com.jeffereyreng.btc-kronos        —— Kronos 推理服务（8799），为 AI 预测卡供数
 #
 # 为什么单独一个脚本：
 #   launchctl kickstart 只重启进程、**不会重读 plist**。改过 plist 后必须
@@ -18,9 +19,11 @@ set -u
 ROOT="/Users/jeffereyreng/ChatGPT/btc指示器"
 APP_LABEL="com.jeffereyreng.btc-indicator"
 INFRA_LABEL="com.jeffereyreng.btc-alerts-infra"
+KRONOS_LABEL="com.jeffereyreng.btc-kronos"
 LA_DIR="${HOME}/Library/LaunchAgents"
 APP_PLIST="${LA_DIR}/${APP_LABEL}.plist"
 INFRA_PLIST="${LA_DIR}/${INFRA_LABEL}.plist"
+KRONOS_PLIST="${LA_DIR}/${KRONOS_LABEL}.plist"
 TMP_PID_FILE="/tmp/btc-indicator-tmp.pid"
 UID_NUM="$(id -u)"
 LAUNCHCTL="/bin/launchctl"
@@ -70,7 +73,18 @@ if [[ "$app_info" != *"serve-with-infra.sh"* ]]; then
   fi
 fi
 
-# ── 2. 云端告警依赖守护：确保已注册 ──────────────────────────────────────────
+# ── 2. Kronos 推理服务：确保已注册 ───────────────────────────────────────────
+if [[ -f "$KRONOS_PLIST" ]]; then
+  kronos_info="$("$LAUNCHCTL" print "gui/${UID_NUM}/${KRONOS_LABEL}" 2>/dev/null)"
+  if [[ "$kronos_info" != *"start-kronos.sh"* ]]; then
+    reload "$KRONOS_LABEL" "$KRONOS_PLIST" \
+      || log "Kronos 服务注册失败（不致命：可手动 cd kronos-service && ./start-local.sh）"
+  fi
+else
+  log "缺少 ${KRONOS_PLIST}"
+fi
+
+# ── 3. 云端告警依赖守护：确保已注册 ──────────────────────────────────────────
 if ! "$LAUNCHCTL" print "gui/${UID_NUM}/${INFRA_LABEL}" >/dev/null 2>&1; then
   if [[ -f "$INFRA_PLIST" ]]; then
     reload "$INFRA_LABEL" "$INFRA_PLIST" \

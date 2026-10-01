@@ -670,6 +670,23 @@ header p {
     box-shadow: none;
   }
 }
+.region-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 12px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.region-mode select {
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--border-tertiary);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  cursor: pointer;
+}
 .controls {
   padding: 0;
   border: 0;
@@ -1885,6 +1902,21 @@ html[data-theme="light"] #chartTooltip {
 #selectionOverlay i {
   font-style: normal;
 }
+/* 框选「价差」（最高 − 最低）数学上恒为正数，无法自带方向；
+   配色因此跟随区间涨跌方向：涨用 --bull 绿、跌用 --bear 红，
+   与全站 .bull / .bear 单一真源一致（不要在这里另写颜色）。 */
+#selectionOverlay .spread.bull,
+.selection-stats .spread.bull {
+  color: var(--bull);
+}
+#selectionOverlay .spread.bear,
+.selection-stats .spread.bear {
+  color: var(--bear);
+}
+#selectionOverlay .spread.flat,
+.selection-stats .spread.flat {
+  color: var(--text-secondary);
+}
 .levels .help-dot,
 .toolbar .help-dot {
   display: inline-grid !important;
@@ -2030,6 +2062,8 @@ html[data-theme="light"] #chartTooltip {
 .res-verdict.conflict {
   color: #ffb020;
 }
+html[data-theme="light"] .res-summary.conflict,
+html[data-theme="light"] .res-verdict.conflict { color: #8a5e00; }
 .res-verdict.flat {
   color: var(--text-secondary);
 }
@@ -2206,36 +2240,44 @@ header p b {
     white-space: normal;
   }
 }
+/* 「多周期共振」这一行水平排布三块：标题组（标题 + 结论徽标 + 一句话短语）、
+   手动重算按钮、5 个周期标签。三块总宽在中窄屏下超过卡片可用宽度，
+   所以用 flex + wrap 让放不下的整块折到下一行。
+   早先这里是三层 grid 固定列：「auto」轨道按内容抢宽、中间 1fr 被挤成 0 宽，
+   而按钮 justify-self:end 挂在 0 宽列上 → 从列里向左溢出，压住标题与结论徽标；
+   同时 5 个标签在过窄的列里被挤成 3+2 并互相贴合。改成 flex 折行后，
+   各块要么本行放得下、要么整块换行，不可能再叠压。 */
 .optional {
-  display: grid;
-  grid-template-columns: minmax(290px, 1fr) 158px minmax(540px, auto);
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 18px;
+  justify-content: flex-start;
+  gap: 10px 16px;
 }
-.optional > button {
-  width: 158px;
-  min-width: 158px;
-  justify-self: center;
-  white-space: nowrap;
-}
-.optional > #resonance {
+/* 标题组按自身内容排布：宽度够就完整占一行不压缩，不够时整组收缩，
+   由 .resonance-head-top 自己的 flex-wrap 把一句话短语折到第二行。 */
+.optional > .resonance-head {
+  flex: 0 1 auto;
   min-width: 0;
-  justify-self: end;
 }
-/* The manual recalculation control is a compact action alongside the result
-   chips, rather than a wider primary action that dominates this row. */
-/* 标题区按内容自适应，中间那一列 1fr 只当留白，把「计算共振」推到最右侧、
-   紧挨着周期标签；周期标签继续靠右对齐。 */
-.optional {
-  grid-template-columns: minmax(0, auto) minmax(0, 1fr) auto;
-}
+/* 手动重算按钮：flex 下不再依赖 grid 的 justify-self，改用 auto 外边距
+   把它推到本行最右；周期标签放不下时会整体折到下一行。 */
 .optional > button {
+  flex: 0 0 auto;
   width: auto;
   min-width: 0;
   min-height: 34px;
   padding: 6px 10px;
   font-size: 12px;
-  justify-self: end;
+  margin-left: auto;
+  white-space: nowrap;
+}
+/* 5 个周期标签：整排约 485px，「要么整排放得下、要么整排折到下一行」——
+   flex-basis:auto 让折行判定按它的完整宽度算，折行后再伸展占满整行。 */
+.optional > #resonance {
+  flex: 1 1 auto;
+  min-width: 0;
+  justify-self: auto;
 }
 .chart-periods #changeTags small {
   font-size: 10px;
@@ -2476,6 +2518,7 @@ header p b {
   border-radius: 6px;
   background: rgba(3, 12, 23, 0.32);
 }
+html[data-theme="light"] .liq-prob-output > div { background: var(--bg-surface); }
 .liq-prob-output small {
   font-size: 9px;
   color: var(--text-muted);
@@ -2593,6 +2636,12 @@ header p b {
 .vwap-line {
   color: #ff5cd0;
 }
+html[data-theme="light"] .candle-series { color: #5b7186; }
+html[data-theme="light"] .ma20-line { color: #1e6fd0; }
+html[data-theme="light"] .ma50-line { color: #9a6b00; }
+html[data-theme="light"] .ma200-line { color: #6d3fc0; }
+html[data-theme="light"] .boll-line { color: #3f6da8; }
+html[data-theme="light"] .vwap-line { color: #c2188a; }
 .rsi-line {
   color: #f4f8ff;
 }
@@ -2634,23 +2683,22 @@ html[data-theme="light"] .rsi-line {
   color: var(--text-secondary);
 }
 @media (max-width: 1100px) {
-  .optional {
-    grid-template-columns: minmax(260px, 1fr) 158px;
-  }
+  /* flex 折行本身已能按可用宽度决定排布，这里只固定「周期标签独占一行」：
+     中窄屏下卡片较窄，让 5 个标签整排对齐，而不是被标题组与按钮挤散。 */
   .optional > #resonance {
-    grid-column: 1/-1;
-    justify-self: start;
+    flex: 1 1 100%;
   }
 }
 @media (max-width: 680px) {
   .optional {
-    grid-template-columns: 1fr;
+    flex-direction: column;
+    align-items: stretch;
   }
   .optional > button {
-    justify-self: start;
+    margin-left: 0;
   }
   .optional > #resonance {
-    grid-column: auto;
+    flex: 0 0 auto;
   }
 }
 @media (max-width: 900px) {
@@ -2996,10 +3044,10 @@ html[data-theme="light"] {
   --text-primary: #162235;
   --text-secondary: #43566d;
   --text-muted: #566779;
-  --bull: #007f69;
-  --bear: #c3344f;
+  --bull: #007a66;
+  --bear: #b21f3a;
   --warn: #9b6200;
-  --accent-cyan: #007f9d;
+  --accent-cyan: #006b8f;
 }
 html[data-theme="light"] main > header {
   border-color: rgba(68, 89, 116, 0.24);
@@ -3067,10 +3115,10 @@ html[data-theme="light"] #selectionOverlay {
     --text-primary: #162235;
     --text-secondary: #43566d;
     --text-muted: #566779;
-    --bull: #007f69;
-    --bear: #c3344f;
+    --bull: #007a66;
+    --bear: #b21f3a;
     --warn: #9b6200;
-    --accent-cyan: #007f9d;
+    --accent-cyan: #006b8f;
   }
   html[data-theme="auto"] main > header {
     border-color: rgba(68, 89, 116, 0.24);
@@ -3487,6 +3535,16 @@ html[data-theme="light"] #selectionOverlay {
 .chart-pattern-legend span + span b {
   background: rgba(255, 195, 91, 0.16);
   color: #ffc35b;
+}
+html[data-theme="light"] .chart-pattern-legend b {
+  color: #1a63c0;
+  background: var(--bg-surface);
+  border: 1px solid rgba(26, 99, 192, 0.35);
+}
+html[data-theme="light"] .chart-pattern-legend span + span b {
+  color: #8a5e00;
+  background: var(--bg-surface);
+  border: 1px solid rgba(138, 94, 0, 0.35);
 }
 .signal-indicator {
   font: inherit;
@@ -4820,7 +4878,8 @@ html[data-theme="light"] .fear-greed-reading strong {
   margin: 7px 0 0;
   color: var(--text-muted);
 }
-.fed-monitor-head > span {
+.fed-monitor-head > span,
+.fed-monitor-head .fed-check-pill {
   font:
     700 12px "SF Mono",
     monospace;
@@ -4888,10 +4947,12 @@ html[data-theme="light"] .fear-greed-reading strong {
   .fed-monitor-head {
     display: block;
   }
-  .fed-monitor-head > span {
+  .fed-monitor-head > span,
+  .fed-monitor-head .fed-check-pill {
     display: inline-block;
     margin-top: 10px;
   }
+  .fed-head-right { flex-wrap: wrap; }
   .fed-event-grid {
     grid-template-columns: 1fr;
   }
@@ -5198,11 +5259,11 @@ html[data-theme="light"] .range-extreme {
   box-shadow: none !important;
 }
 .personal-side-picker button.active[data-entry-side="long"] {
-  background: rgba(0, 212, 170, 0.16) !important;
+  background: rgba(0, 212, 170, 0.10) !important;
   color: var(--bull) !important;
 }
 .personal-side-picker button.active[data-entry-side="short"] {
-  background: rgba(255, 77, 106, 0.16) !important;
+  background: rgba(255, 77, 106, 0.10) !important;
   color: var(--bear) !important;
 }
 .personal-entry-value {
@@ -5676,12 +5737,15 @@ html[data-theme="light"] .range-extreme {
     font-size: 14px;
   }
   .optional {
-    display: grid;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
     gap: 10px;
   }
   .optional button {
     width: 100%;
     min-height: 40px;
+    margin-left: 0;
   }
   .pattern-head {
     display: block !important;
@@ -7275,11 +7339,11 @@ main > #marketClocks #exchangeMeta .exchange-row {
   box-shadow: none !important;
 }
 .personal-side-picker button.active[data-entry-side="long"] {
-  background: rgba(0, 212, 170, 0.16) !important;
+  background: rgba(0, 212, 170, 0.10) !important;
   color: var(--bull) !important;
 }
 .personal-side-picker button.active[data-entry-side="short"] {
-  background: rgba(255, 77, 106, 0.16) !important;
+  background: rgba(255, 77, 106, 0.10) !important;
   color: var(--bear) !important;
 }
 .personal-entry-slot > small {
@@ -7656,280 +7720,6 @@ main > #marketClocks #exchangeMeta .exchange-row {
   flex: 0 0 auto;
   color: var(--warn);
 }
-.research-scorecard {
-  display: grid;
-  gap: 8px;
-  margin-top: 12px;
-  padding: 11px;
-  border: 1px solid rgba(88, 166, 255, 0.32);
-  border-radius: 8px;
-  background: linear-gradient(
-    135deg,
-    rgba(44, 88, 138, 0.12),
-    var(--bg-surface-2) 60%
-  );
-}
-.research-scorecard h3 {
-  margin: 0;
-  font-size: 12px;
-}
-.research-scorecard > p {
-  margin: 0;
-  color: var(--text-muted);
-  font-size: 9px;
-  line-height: 1.45;
-}
-.research-scorecard > div {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 7px;
-}
-.research-scorecard article {
-  display: grid;
-  gap: 4px;
-  padding: 8px;
-  border-radius: 6px;
-  background: rgba(3, 12, 23, 0.25);
-}
-.research-scorecard article > b {
-  font:
-    700 10px "SF Mono",
-    "JetBrains Mono",
-    monospace;
-  color: var(--accent-cyan);
-}
-.research-scorecard article > span {
-  color: var(--text-secondary);
-  font:
-    9px/1.45 "SF Mono",
-    "JetBrains Mono",
-    monospace;
-}
-.research-ab-evaluation {
-  display: grid;
-  gap: 8px;
-  margin-top: 12px;
-  padding: 11px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 8px;
-  background: var(--bg-surface-2);
-}
-.research-ab-evaluation h3 {
-  margin: 0;
-  font-size: 12px;
-}
-.research-ab-evaluation.yellow {
-  border-color: rgba(245, 197, 78, 0.36);
-}
-.research-ab-evaluation.green {
-  border-color: rgba(0, 212, 170, 0.38);
-}
-.research-ab-evaluation.red {
-  border-color: rgba(255, 77, 106, 0.38);
-}
-.research-ab-verdict {
-  display: grid;
-  gap: 3px;
-}
-.research-ab-verdict > b {
-  font-size: 12px;
-}
-.research-ab-evaluation.yellow .research-ab-verdict > b {
-  color: var(--warn);
-}
-.research-ab-evaluation.green .research-ab-verdict > b {
-  color: var(--bull);
-}
-.research-ab-evaluation.red .research-ab-verdict > b {
-  color: var(--bear);
-}
-.research-ab-verdict span,
-.research-ab-evaluation > small {
-  color: var(--text-muted);
-  font-size: 9px;
-  line-height: 1.45;
-}
-.research-ab-summary,
-.research-ab-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 7px;
-}
-.research-ab-summary span,
-.research-ab-grid article {
-  display: grid;
-  gap: 3px;
-  padding: 7px;
-  border-radius: 6px;
-  background: rgba(3, 12, 23, 0.25);
-  color: var(--text-muted);
-  font-size: 9px;
-}
-.research-ab-summary b,
-.research-ab-grid b {
-  color: var(--text-secondary);
-  font:
-    700 10px "SF Mono",
-    "JetBrains Mono",
-    monospace;
-}
-.research-ab-grid article > span {
-  font:
-    9px/1.35 "SF Mono",
-    "JetBrains Mono",
-    monospace;
-  color: var(--text-secondary);
-}
-.ab-center-head {
-  display: grid;
-  gap: 8px;
-}
-.ab-center-head h2 {
-  margin: 0;
-  font-size: 14px;
-}
-.ab-center-head > p {
-  margin: 0;
-  color: var(--text-muted);
-  font-size: 10px;
-  line-height: 1.5;
-}
-.ab-experiment-registry {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 7px;
-}
-.ab-experiment-registry span {
-  display: grid;
-  gap: 3px;
-  padding: 8px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 7px;
-  background: var(--bg-surface-2);
-  color: var(--text-muted);
-  font-size: 9px;
-}
-.ab-experiment-registry b {
-  color: var(--text-secondary);
-  font-size: 10px;
-}
-.ab-experiment-registry span.active {
-  border-color: rgba(0, 212, 170, 0.34);
-}
-.ab-experiment-registry span.active b {
-  color: var(--bull);
-}
-.ab-experiment-registry span.na {
-  opacity: 0.72;
-}
-.ab-experiment-registry .ab-experiment {
-  display: grid;
-  gap: 4px;
-  min-width: 0;
-  padding: 9px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 7px;
-  background: var(--bg-surface-2);
-}
-.ab-experiment-registry .ab-experiment > b {
-  color: var(--text-primary);
-  font-size: 10px;
-}
-.ab-experiment-registry .ab-experiment > span {
-  min-width: 0;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: 9px;
-  line-height: 1.35;
-}
-.ab-experiment-registry .ab-experiment > small {
-  color: var(--text-muted);
-  font:
-    9px/1.35 "SF Mono",
-    "JetBrains Mono",
-    monospace;
-}
-.ab-experiment.yellow {
-  border-color: rgba(245, 197, 78, 0.36);
-}
-.ab-experiment.green {
-  border-color: rgba(0, 212, 170, 0.42);
-}
-.ab-experiment.green > b {
-  color: var(--bull);
-}
-.ab-experiment.red {
-  border-color: rgba(255, 77, 106, 0.42);
-}
-.ab-experiment.red > b {
-  color: var(--bear);
-}
-.ab-experiment.flat {
-  border-style: dashed;
-  opacity: 0.82;
-}
-.research-governance {
-  display: grid;
-  gap: 8px;
-  margin-top: 12px;
-  padding: 11px;
-  border: 1px solid rgba(245, 197, 78, 0.24);
-  border-radius: 8px;
-  background: rgba(245, 197, 78, 0.04);
-}
-.research-governance h3 {
-  margin: 0;
-  font-size: 12px;
-}
-.research-governance > div {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-}
-.research-governance span {
-  display: grid;
-  gap: 3px;
-  color: var(--text-muted);
-  font-size: 9px;
-}
-.research-governance b {
-  color: var(--text-secondary);
-  font:
-    700 10px "SF Mono",
-    "JetBrains Mono",
-    monospace;
-}
-.research-governance small {
-  font-size: 9px;
-  line-height: 1.4;
-}
-.research-governance .research-training-status {
-  display: grid;
-  grid-column: 1/-1;
-  gap: 3px;
-  padding-top: 8px;
-  border-top: 1px solid rgba(245, 197, 78, 0.18);
-}
-.research-training-status > b {
-  color: var(--warn);
-}
-.research-training-status > small {
-  color: var(--text-muted);
-}
-/* `.research-governance span` 是网格容器，会把这里的四个周期各自变成网格项而竖排；
-   这里必须显式回到行内流，并整行占满，进度才能读成一行。 */
-.research-training-status .research-horizon-progress {
-  grid-column: 1/-1;
-  display: block;
-  color: var(--text-muted);
-  font-size: 10px;
-  line-height: 1.5;
-}
-.research-training-status .research-horizon-progress b {
-  font-weight: 700;
-}
 .research-outlook-card footer {
   margin-top: 11px;
   padding-top: 10px;
@@ -7968,11 +7758,6 @@ main > #marketClocks #exchangeMeta .exchange-row {
     margin-top: 10px;
   }
   .research-derivatives > div,
-  .research-scorecard > div,
-  .research-governance > div,
-  .research-ab-summary,
-  .research-ab-grid,
-  .ab-experiment-registry,
   .research-news-windows {
     grid-template-columns: 1fr;
   }
@@ -9748,16 +9533,24 @@ html[data-theme="dark"] .signal-basis-chip { color: #0b1220; }
 @media (prefers-color-scheme: dark) {
   html[data-theme="auto"] .signal-basis-chip { color: #0b1220; }
 }
-html[data-theme="light"] .signal-basis-chip[data-tone="bull"],
-html[data-theme="light"] .signal-basis-chip[data-tone="bear"],
+html[data-theme="light"] .signal-basis-chip[data-tone="bull"] {
+  color: var(--bull);
+}
+html[data-theme="light"] .signal-basis-chip[data-tone="bear"] {
+  color: var(--bear);
+}
 html[data-theme="light"] .signal-basis-chip[data-tone="flat"] {
-  color: #fff;
+  color: var(--text-muted);
 }
 @media (prefers-color-scheme: light) {
-  html[data-theme="auto"] .signal-basis-chip[data-tone="bull"],
-  html[data-theme="auto"] .signal-basis-chip[data-tone="bear"],
+  html[data-theme="auto"] .signal-basis-chip[data-tone="bull"] {
+    color: var(--bull);
+  }
+  html[data-theme="auto"] .signal-basis-chip[data-tone="bear"] {
+    color: var(--bear);
+  }
   html[data-theme="auto"] .signal-basis-chip[data-tone="flat"] {
-    color: #fff;
+    color: var(--text-muted);
   }
 }
 html[data-theme="dark"] body:before,
@@ -9885,15 +9678,18 @@ main > header {
   background: rgba(17, 112, 122, 0.32) !important;
   color: #49e1d1 !important;
 }
+html[data-theme="light"] .toolbar #ranges button.active {
+  background: rgba(0, 107, 143, 0.12) !important;
+  color: var(--accent-cyan) !important;
+  border-color: var(--accent-cyan) !important;
+}
 .metric,
 .change-card span,
 .microstructure-item,
 .corr-stat,
 .fear-greed-compact-tile,
 .research-window,
-.research-scorecard,
 .research-derivatives,
-.research-ab-evaluation,
 .fed-event,
 .fed-market-signal,
 .notification-rule-list article {
@@ -12337,13 +12133,21 @@ html[data-theme="light"] .microstructure-conclusion {
 html[data-theme="light"] .microstructure-conclusion p {
   color: var(--text-secondary) !important;
 }
-html[data-theme="light"] .microstructure-item.bull > div:first-child i,
-html[data-theme="light"] .microstructure-item.bull b .microstructure-value-main {
+html[data-theme="light"] #okxMicrostructureCard .microstructure-item.bull > div:first-child i,
+html[data-theme="light"] #okxMicrostructureCard .microstructure-item.bull b .microstructure-value-main {
   color: var(--bull) !important;
+  background: var(--bg-surface) !important;
 }
-html[data-theme="light"] .microstructure-item.bear > div:first-child i,
-html[data-theme="light"] .microstructure-item.bear b .microstructure-value-main {
+html[data-theme="light"] #okxMicrostructureCard .microstructure-item.bear > div:first-child i,
+html[data-theme="light"] #okxMicrostructureCard .microstructure-item.bear b .microstructure-value-main {
   color: var(--bear) !important;
+  background: var(--bg-surface) !important;
+}
+html[data-theme="light"] #okxMicrostructureCard .microstructure-item > b {
+  color: var(--text-primary) !important;
+}
+html[data-theme="light"] #okxMicrostructureCard .microstructure-item > small {
+  color: var(--text-secondary) !important;
 }
 html[data-theme="light"] #okxMicrostructureCard .microstructure-neutral-toggle {
   background: var(--bg-surface-2) !important;
@@ -12580,13 +12384,21 @@ html[data-theme="light"] #okxMicrostructureCard .microstructure-neutral-toggle:f
   html[data-theme="auto"] .microstructure-conclusion p {
     color: var(--text-secondary) !important;
   }
-  html[data-theme="auto"] .microstructure-item.bull > div:first-child i,
-  html[data-theme="auto"] .microstructure-item.bull b .microstructure-value-main {
+  html[data-theme="auto"] #okxMicrostructureCard .microstructure-item.bull > div:first-child i,
+  html[data-theme="auto"] #okxMicrostructureCard .microstructure-item.bull b .microstructure-value-main {
     color: var(--bull) !important;
+    background: var(--bg-surface) !important;
   }
-  html[data-theme="auto"] .microstructure-item.bear > div:first-child i,
-  html[data-theme="auto"] .microstructure-item.bear b .microstructure-value-main {
+  html[data-theme="auto"] #okxMicrostructureCard .microstructure-item.bear > div:first-child i,
+  html[data-theme="auto"] #okxMicrostructureCard .microstructure-item.bear b .microstructure-value-main {
     color: var(--bear) !important;
+    background: var(--bg-surface) !important;
+  }
+  html[data-theme="auto"] #okxMicrostructureCard .microstructure-item > b {
+    color: var(--text-primary) !important;
+  }
+  html[data-theme="auto"] #okxMicrostructureCard .microstructure-item > small {
+    color: var(--text-secondary) !important;
   }
   html[data-theme="auto"] #okxMicrostructureCard .microstructure-neutral-toggle {
     background: var(--bg-surface-2) !important;
@@ -12601,6 +12413,33 @@ html[data-theme="light"] #okxMicrostructureCard .microstructure-neutral-toggle:f
     border-color: var(--accent-cyan) !important;
     color: var(--text-primary) !important;
   }
+  html[data-theme="auto"] .candle-series { color: #5b7186; }
+  html[data-theme="auto"] .ma20-line { color: #1e6fd0; }
+  html[data-theme="auto"] .ma50-line { color: #9a6b00; }
+  html[data-theme="auto"] .ma200-line { color: #6d3fc0; }
+  html[data-theme="auto"] .boll-line { color: #3f6da8; }
+  html[data-theme="auto"] .vwap-line { color: #c2188a; }
+  html[data-theme="auto"] .chart-pattern-legend b {
+    color: #1a63c0;
+    background: var(--bg-surface);
+    border: 1px solid rgba(26, 99, 192, 0.35);
+  }
+  html[data-theme="auto"] .chart-pattern-legend span + span b {
+    color: #8a5e00;
+    background: var(--bg-surface);
+    border: 1px solid rgba(138, 94, 0, 0.35);
+  }
+  html[data-theme="auto"] .res-summary.conflict,
+  html[data-theme="auto"] .res-verdict.conflict { color: #8a5e00; }
+  html[data-theme="auto"] .liq-prob-output > div { background: var(--bg-surface); }
+  html[data-theme="auto"] .toolbar #ranges button.active {
+    background: rgba(0, 107, 143, 0.12) !important;
+    color: var(--accent-cyan) !important;
+    border-color: var(--accent-cyan) !important;
+  }
+  html[data-theme="auto"] .investment-calendar-card .ic-range.active { color: #06141b !important; }
+  html[data-theme="auto"] .personal-side-picker button.active[data-entry-side="long"],
+  html[data-theme="auto"] .personal-side-picker button.active[data-entry-side="short"] { background: var(--bg-surface) !important; }
 }
 
 /* BTC investment calendar: a table-first risk window, intentionally separate
@@ -12759,6 +12598,9 @@ html[data-theme="light"] #okxMicrostructureCard .microstructure-neutral-toggle:f
 .ic-range { font:inherit; font-size:12.5px; font-weight:650; color:var(--cal-text-2); background:transparent; border:1px solid var(--cal-line-2); padding:5px 13px; border-radius:999px; cursor:pointer; transition:all .15s; }
 .ic-range:hover { color:var(--cal-text); border-color:var(--cal-accent); }
 .ic-range.active { color:#06141b; background:var(--cal-accent); border-color:var(--cal-accent); box-shadow:0 0 14px rgba(56,223,196,.28); }
+html[data-theme="light"] .investment-calendar-card .ic-range.active { color: #06141b !important; }
+html[data-theme="light"] .personal-side-picker button.active[data-entry-side="long"],
+html[data-theme="light"] .personal-side-picker button.active[data-entry-side="short"] { background: var(--bg-surface) !important; }
 .ic-filter-toggle { display:inline-flex; align-items:center; gap:6px; font:inherit; font-size:12px; font-weight:650; color:var(--cal-accent); background:rgba(34,211,238,.09); border:1px solid rgba(34,211,238,.3); padding:5px 11px; border-radius:8px; cursor:pointer; }
 .ic-filter-toggle:hover { background:rgba(34,211,238,.16); }
 .ic-caret { width:0; height:0; border-left:4px solid transparent; border-right:4px solid transparent; border-top:5px solid currentColor; transition:transform .15s; }
@@ -13998,351 +13840,6 @@ main > header.is-smart-bar.is-stowed {
   }
 }
 
-/* v2.11.10 历史回放面板：把已存 K 线重放成与实时同口径的三分类样本。
-   文字一律 color:inherit 再靠 opacity 分层，避免全局 p/span 规则在深色主题下把它压成不可读。 */
-.research-replay {
-  margin-top: 14px;
-  padding: 14px 16px;
-  border: 1px solid rgba(128, 128, 128, 0.28);
-  border-radius: 12px;
-}
-.research-replay h3 {
-  margin: 0 0 10px;
-  font-size: 14px;
-  font-weight: 600;
-  color: inherit;
-}
-.research-replay-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  margin-bottom: 10px;
-}
-.research-replay-head small {
-  flex: 1 1 320px;
-}
-.research-replay-head small,
-.research-replay-result small {
-  font-size: 12px;
-  line-height: 1.6;
-  color: inherit;
-  opacity: 0.72;
-}
-.research-replay-result small {
-  display: block;
-}
-.research-replay-grid {
-  display: grid;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-.research-replay-grid article {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 14px;
-  padding: 8px 10px;
-  border: 1px solid rgba(128, 128, 128, 0.24);
-  border-radius: 8px;
-  font-size: 12px;
-  color: inherit;
-}
-.research-replay-grid article b {
-  min-width: 34px;
-}
-.research-replay-grid article span {
-  display: inline;
-}
-/* v2.11.26：因子消融面板。判定结论要一眼可见，所以把 ΔM 与结论放在同一行并带色，而不是让读者自己
-   在两列数字之间做心算。内联文字一律 color:inherit 再靠 opacity 分层，避免全局 p/span 规则在深色
-   主题下把它压成不可读。 */
-.research-ablation {
-  margin: 0 0 12px;
-}
-.research-ablation h3 {
-  margin: 0 0 8px;
-  font-size: 14px;
-  font-weight: 600;
-  color: inherit;
-}
-.research-ablation-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 10px;
-}
-.research-ablation-head small {
-  flex: 1 1 320px;
-  min-width: 0;
-  opacity: 0.75;
-  font-size: 12px;
-  line-height: 1.6;
-  color: inherit;
-}
-.research-ablation-result {
-  font-size: 12px;
-  color: inherit;
-}
-.research-ablation-result > small {
-  display: block;
-  opacity: 0.75;
-  font-size: 11px;
-  line-height: 1.6;
-}
-.research-ablation-grid {
-  display: grid;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-/* 卡片从「一个周期一行读数」改成「一个因子一张卡，卡内每周期一行」，因此卡片本身纵向堆叠，
-   行内再横向排列。栏宽交给外层 grid，卡内不再自己排流。 */
-/* One card per factor with a row per horizon, so the card stacks vertically and each row flows
-   horizontally. Outer grid owns the columns; the card no longer lays itself out. */
-.research-ablation-grid article {
-  display: block;
-  font-size: 12px;
-  color: inherit;
-}
-.research-ablation-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 6px 14px;
-  padding: 3px 0;
-}
-.research-ablation-row > b {
-  min-width: 34px;
-}
-/* 子选择器限定 `>`：span 里还嵌着结论用的 `<b>`，用后代会把它也撑成固定宽度。 */
-.research-ablation-row > span {
-  display: inline;
-  white-space: nowrap;
-}
-/* 标题行用一条分隔线与读数分开，否则因子名看起来只是第一行数据的标签。 */
-.research-ablation-title {
-  margin-bottom: 4px;
-  padding-bottom: 6px;
-  border-bottom: 1px solid rgba(127, 127, 127, 0.25);
-}
-.research-ablation-title > b {
-  font-size: 13px;
-  font-weight: 600;
-}
-/* 一个周期两行读数（方向 + 波动）。分组容器只负责把两行绑在一起，本身不参与横向排流 ——
-   让它变成 flex/grid 会把两行并排，而不是上下叠。 */
-/* Two readings per horizon (direction and volatility). The group only ties the two lines together
-   and must not lay itself out: making it flex or grid puts the two lines side by side. */
-.research-ablation-horizon {
-  display: block;
-}
-/* 波动行整体降一级：它是同一个周期的第二个问题，不是新的一行周期。左侧细竖线让「两行同属一个
-   周期」一眼可见，不必去数行。 */
-/* The volatility line sits one level down: it is a second question about the same horizon, not a new
-   horizon. The thin rule on its left makes that visible without counting lines. */
-.research-ablation-vol {
-  padding-left: 8px;
-  margin-bottom: 4px;
-  border-left: 2px solid rgba(127, 127, 127, 0.35);
-  opacity: 0.92;
-}
-.research-ablation-dir {
-  padding-left: 8px;
-  margin-bottom: 6px;
-  border-left: 2px solid rgba(64, 156, 255, 0.45);
-  opacity: 0.94;
-}
-/* 第三档语气：既不是「好」也不是「坏」，而是「还不能判」。用 amber 而不是红/绿，是为了让「前后段反向」
-   一眼区别于「有损害」—— 它说的是证据本身分裂，不是这个因子有害。 */
-/* A third tone: neither good nor bad, but "not decidable yet". Amber rather than red or green so that
-   "the halves disagree" cannot be misread as "this factor hurts" - the complaint is about the evidence,
-   not about the factor. */
-.research-ablation .warn {
-  color: var(--warn, #e0a33a);
-  font-weight: 600;
-}
-.research-ablation-howto {
-  margin: 8px 0 0;
-  font-size: 11.5px;
-  opacity: 0.85;
-}
-.research-ablation-howto > summary {
-  cursor: pointer;
-  font-weight: 600;
-}
-.research-ablation-howto > ol {
-  margin: 6px 0 0;
-  padding-left: 20px;
-  display: grid;
-  gap: 4px;
-}
-.research-ablation-howto li {
-  line-height: 1.55;
-}
-.research-ablation-method {
-  margin: 8px 0 0;
-  padding-left: 18px;
-  opacity: 0.75;
-  font-size: 11px;
-  line-height: 1.7;
-}
-
-/* ===================== 参数与门槛（阶段 4）：单一配置源 =====================
-   配置项按组铺开，每组一张卡，组内每项一行「路径 值」。被环境变量覆盖的项染成涨色并显式标注，
-   这样「这次跑的和上次跑的规则不一样」是看得见的，不必只靠比对指纹才能察觉。
-   子选择器限定 `>`，否则 span 里嵌的 `<b>` 也会被撑成固定宽度。 */
-.research-tuning {
-  margin: 0 0 12px;
-}
-.research-tuning h3 {
-  margin: 0 0 8px;
-  font-size: 14px;
-  font-weight: 600;
-  color: inherit;
-}
-.research-tuning-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 10px;
-}
-.research-tuning-head small {
-  flex: 1 1 320px;
-  min-width: 0;
-  opacity: 0.75;
-  font-size: 12px;
-  line-height: 1.6;
-  color: inherit;
-}
-.research-tuning-result {
-  font-size: 12px;
-  color: inherit;
-}
-.research-tuning-summary {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 16px;
-  margin-bottom: 10px;
-}
-.research-tuning-summary > span {
-  display: inline;
-  white-space: nowrap;
-}
-.research-tuning-grid {
-  /* 卡片高度差异极大（「震荡带」3 项 vs 「周期定义」24 项）。用 grid 时同一行的行高由该行最高的
-     那张卡决定，短卡下方会留下与它内容无关的大片空白 —— 单纯 `align-items: start` 只能阻止卡片
-     被拉伸，挡不住这种行高空白。改成多列流动，卡片按内容高度依次排列，空白随之消失。 */
-  /* Card heights differ wildly (3 leaves vs 24), and a grid row is as tall as its tallest card, so
-     short cards leave a large gap that has nothing to do with their content. `align-items: start`
-     stops the stretch but not the row height. Multi-column flow removes the gap entirely. */
-  columns: 3 240px;
-  column-gap: 8px;
-}
-.research-tuning-grid article {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  padding: 8px 10px;
-  border-radius: 8px;
-  background: rgba(127, 127, 127, 0.08);
-  font-size: 12px;
-  line-height: 1.5;
-  color: inherit;
-  /* 卡片不可跨列断开：一张卡被劈成两半会让「组名 + 它的项」分家。 */
-  break-inside: avoid;
-  margin-bottom: 8px;
-}
-/* 长路径不折行，超出就横向滚动：折行会让「路径 = 值」的对应关系变得难读。 */
-.research-tuning-grid article > span {
-  display: block;
-  white-space: nowrap;
-  overflow-x: auto;
-  font-variant-numeric: tabular-nums;
-}
-
-/* ===================== 宏观事件因子（阶段 2）：CPI / 非农 / FOMC =====================
-   每类事件一行，字段多、且末尾带一段精度说明，所以用 flex-wrap 自适应而不做固定列。
-   子选择器限定 `>` ，否则 span 里的 `<small>n=…</small>` 也会吃到整行宽度。 */
-.research-macro {
-  margin: 0 0 12px;
-}
-.research-macro h3 {
-  font-size: 14px;
-  margin: 0 0 8px;
-  color: inherit;
-}
-.research-macro-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 12px;
-  margin-bottom: 10px;
-}
-.research-macro-head small {
-  flex: 1 1 320px;
-  min-width: 0;
-  opacity: 0.75;
-  font-size: 11px;
-  line-height: 1.5;
-  color: inherit;
-}
-.research-macro-result {
-  font-size: 12px;
-  color: inherit;
-}
-.research-macro-result > small {
-  display: block;
-  opacity: 0.75;
-  font-size: 11px;
-  line-height: 1.6;
-  margin-top: 8px;
-  color: inherit;
-}
-.research-macro-grid {
-  display: grid;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-.research-macro-grid article {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 14px;
-  padding: 8px 10px;
-  border: 1px solid rgba(128, 128, 128, 0.24);
-  border-radius: 8px;
-  font-size: 12px;
-  color: inherit;
-}
-.research-macro-grid article b {
-  min-width: 88px;
-}
-.research-macro-grid article > span {
-  display: inline;
-  white-space: nowrap;
-}
-.research-macro-grid article > small {
-  flex: 1 1 100%;
-  opacity: 0.7;
-  font-size: 11px;
-  line-height: 1.5;
-  color: inherit;
-}
-.research-macro-result details {
-  margin-top: 10px;
-  font-size: 11px;
-  color: inherit;
-}
-.research-macro-result details summary {
-  cursor: pointer;
-  opacity: 0.8;
-}
-.research-macro-result details ul {
-  margin: 6px 0 0;
-  padding-left: 18px;
-  line-height: 1.6;
-  opacity: 0.8;
-}
 
 /* ===================== v2.11.16 宏观事件列表：展开 / 收起控制条 ===================== */
 
@@ -14572,70 +14069,44 @@ main > header.is-smart-bar.is-stowed {
     0 0 10px rgba(75, 159, 255, 0.32) !important;
 }
 
-/* ══ 多币种：模式开关 + 币种切换器 ══════════════════════════════════════════
-   只新增两类元素，不改动任何既有规则，因此比特币模式下的观感与之前完全一致。 */
+/* ══ 多币种：顶栏币种下拉 + 市场条滚动器 ════════════════════════════════════
+   v2.12.54：单币种（比特币）模式移除，顶栏「₿ 比特币 / 多币种」模式开关删除；
+   币种下拉从市场条右侧上移到顶栏最左，配色对齐顶栏紫胶囊。 */
 /* ⚠️ 高度必须盯住顶栏其它药丸（`main > header .controls > button` 的 height:36px）：
-   本控件是 div 而非 button，吃不到那条 36px，只会从内部按钮继承 `min-height: 34px`，
-   于是自己算出 40px（34 + 2×2 padding + 2×1 border）—— 比旁边的 EN/全屏/深色/齿轮/多分屏
-   各高出 4px，上下各冒 2px，整排看着参差。这里显式锁 36px，并把按钮交给 stretch 撑高。 */
-.controls #coinModeToggle {
+   .csw-coin-pick 是 div 而非 button，吃不到那条 36px，必须自己锁高（v2.12.15 的教训：
+   不锁就会从内部按钮继承 min-height 再叠 padding 算出 40px，比邻居高出 4px）。 */
+.controls .csw-coin-pick {
+  position: relative;
+  flex: none;
   display: inline-flex;
-  align-items: stretch;
+  align-items: center;
   box-sizing: border-box;
   height: 36px;
   min-height: 36px;
-  gap: 1px;
-  padding: 2px;
-  /* v2.12.24：配色对齐顶栏紫胶囊。原先吃 `--border-subtle` / `--bg-surface-2`
-     是深黑底（#0d1524），摆在 EN/全屏/深色/齿轮/多分屏 那排紫胶囊里明显不是一家人。 */
+  padding: 0 2px;
+}
+.controls .csw-coin-btn {
+  height: 36px;
+  min-height: 36px;
+  padding: 0 12px;
   border: 1px solid rgba(176, 159, 223, 0.3);
   background: rgba(111, 83, 159, 0.2);
-  border-radius: 999px;
-  white-space: nowrap;
-  line-height: 1;
+  color: #e7eafb;
 }
-.controls #coinModeToggle button {
-  flex: 1 1 auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  /* 覆盖 `main > header .controls button { min-height: 34px }`：高度由容器给定，
-     上下内边距改为 0，文字用 flex 居中 —— 否则 34px 最小高会把容器重新顶回 40px。 */
-  min-height: 0;
-  appearance: none;
-  border: 0;
-  background: transparent;
-  color: rgba(231, 234, 251, 0.72);
-  font-size: 12px;
-  line-height: 1;
-  padding: 0 11px;
-  border-radius: 999px;
-  cursor: pointer;
-  transition: background .15s ease, color .15s ease, box-shadow .15s ease, transform .15s ease;
+.controls .csw-coin-btn:hover {
+  background: rgba(111, 83, 159, 0.32);
+  border-color: rgba(176, 159, 223, 0.5);
 }
-.controls #coinModeToggle button:hover {
-  color: var(--text-primary, #e6edf3);
-  transform: translateY(-0.5px);
-}
-.controls #coinModeToggle button.is-active {
-  /* 用顶栏描边同源的淡紫（#b09fdf）提高不透明度做选中块：比原来那个深黑 `--bg-elevated`
-     更"凸"、也更贴合这排紫胶囊。 */
-  background: rgba(176, 159, 223, 0.34);
-  color: #fff;
-  font-weight: 600;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, .18), 0 0 0 1px rgba(255, 255, 255, .06) inset;
-}
-html[data-theme="light"] .controls #coinModeToggle button.is-active {
-  background: #fff;
-  color: #24364d;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, .12), 0 0 0 1px rgba(64, 88, 119, .18) inset;
-}
-html[data-theme="light"] .controls #coinModeToggle {
+html[data-theme="light"] .controls .csw-coin-btn {
   background: rgba(255, 255, 255, 0.72);
   border-color: rgba(64, 88, 119, 0.22);
+  color: #24364d;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.95);
 }
-html[data-theme="light"] .controls #coinModeToggle button { color: #56616e; }
-html[data-theme="light"] .controls #coinModeToggle button:hover { color: #1a1d23; }
+html[data-theme="light"] .controls .csw-coin-btn:hover {
+  background: #fff;
+  color: #1a1d23;
+}
 .coin-switcher {
   display: flex;
   align-items: stretch;
@@ -14748,4 +14219,922 @@ main > header .controls #headerSettingsPanel #appVersion {
     left: 0;
     max-width: calc(100vw - 24px);
   }
+}
+
+/* ── Kronos 预测卡板块（绿涨红跌 · 国际惯例） ───────────────────── */
+.get-app-card { display: flex; flex-direction: column; gap: 12px; }
+
+.forecast-card {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 18px;
+  border-radius: 14px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+}
+.kf-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.kf-head h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 800;
+  color: var(--text-primary);
+}
+.kf-exchange {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  padding: 3px 10px;
+  border-radius: 999px;
+  color: var(--accent-cyan);
+  background: rgba(34, 211, 238, .12);
+}
+.kf-refresh-control {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0 2px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.kf-refresh-control label {
+  white-space: nowrap;
+}
+.kf-refresh-input {
+  width: 72px;
+  padding: 4px 8px;
+  font-size: 13px;
+  border-radius: 8px;
+  border: 1px solid var(--border-color, rgba(255, 255, 255, .14));
+  background: var(--input-bg, rgba(255, 255, 255, .06));
+  color: var(--text-primary);
+  outline: none;
+}
+.kf-refresh-input:focus {
+  border-color: var(--accent-cyan);
+}
+.kf-refresh-btn {
+  padding: 4px 14px;
+  font-size: 13px;
+  font-weight: 700;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  color: #04121a;
+  background: var(--accent-cyan);
+  cursor: pointer;
+  transition: filter .15s ease;
+}
+.kf-refresh-btn:hover {
+  filter: brightness(1.08);
+}
+.kf-refresh-hint {
+  font-size: 11px;
+  color: var(--text-tertiary, rgba(154, 164, 178, .85));
+  line-height: 1.4;
+}
+
+.kf-probability-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 14px;
+}
+.kf-prob-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 16px;
+  border-radius: 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  transition: border-color .2s ease;
+}
+.kf-prob-card.kf-up { border-color: rgba(0, 212, 170, .35); }
+.kf-prob-card.kf-down { border-color: rgba(255, 77, 106, .35); }
+.kf-prob-card.kf-neutral { border-color: rgba(154, 164, 178, .35); }
+.kf-prob-card.kf-vol-low { border-color: rgba(154, 164, 178, .35); }
+.kf-prob-card.kf-vol-mid { border-color: rgba(255, 193, 74, .35); }
+.kf-prob-card.kf-vol-high { border-color: rgba(255, 159, 69, .35); }
+.kf-prob-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.kf-prob-value {
+  font-size: 38px;
+  font-weight: 800;
+  letter-spacing: -1px;
+  line-height: 1;
+  margin: 4px 0;
+}
+.kf-prob-desc {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+
+.kf-forecast-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.kf-forecast-section h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 800;
+  color: var(--text-primary);
+}
+.kf-forecast-section > p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+.kf-chart-title {
+  font-size: 12px;
+  font-weight: 700;
+  text-align: center;
+  color: var(--text-primary);
+  margin: 6px 0 4px;
+}
+.kf-chart-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.kf-chart {
+  width: 100%;
+  display: block;
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+}
+.kf-price-chart { height: 260px; }
+.kf-volume-chart { height: 130px; }
+.kf-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--text-muted);
+  flex-wrap: wrap;
+}
+.kf-disclaimer { font-style: italic; }
+
+/* ── 历史准确度回测区块 ─────────────────────────────────────────── */
+.kf-backtest {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 14px;
+  border-top: 1px dashed var(--border-subtle);
+}
+.kf-backtest-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.kf-backtest-head h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 800;
+  color: var(--text-primary);
+}
+.kf-backtest-exchange {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  padding: 3px 10px;
+  border-radius: 999px;
+  color: var(--accent-cyan);
+  background: rgba(34, 211, 238, .12);
+}
+.kf-backtest-note {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+.kf-backtest-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+}
+.kf-backtest-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 10px;
+  border-radius: 10px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  text-align: center;
+}
+.kf-backtest-value {
+  font-size: 22px;
+  font-weight: 800;
+  line-height: 1;
+  color: var(--text-primary);
+}
+.kf-backtest-card.kf-bt-good { border-color: rgba(0, 212, 170, .4); }
+.kf-backtest-card.kf-bt-good .kf-backtest-value { color: #00d4aa; }
+.kf-backtest-card.kf-bt-bad { border-color: rgba(255, 77, 106, .4); }
+.kf-backtest-card.kf-bt-bad .kf-backtest-value { color: #ff4d6a; }
+.kf-backtest-label {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.kf-forecast-shape-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin: -4px 0 2px;
+}
+.kf-forecast-shape-bar strong {
+  color: var(--accent-cyan);
+  font-weight: 700;
+}
+.kf-backtest-chart {
+  height: 150px;
+}
+.kf-backtest-chart-wrap {
+  position: relative;
+  width: 100%;
+}
+.kf-bt-tooltip {
+  position: absolute;
+  display: none;
+  pointer-events: none;
+  z-index: 10;
+  min-width: 160px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .22);
+}
+.kf-bt-tooltip-date {
+  font-weight: 700;
+  margin-bottom: 4px;
+  color: var(--accent-cyan);
+}
+.kf-bt-tooltip-key {
+  color: var(--text-muted);
+}
+.kf-price-chart-wrap {
+  position: relative;
+  width: 100%;
+}
+.kf-price-tooltip {
+  position: absolute;
+  display: none;
+  pointer-events: none;
+  z-index: 10;
+  min-width: 150px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .22);
+}
+.kf-price-tooltip-date {
+  font-weight: 700;
+  margin-bottom: 4px;
+  color: var(--accent-cyan);
+}
+.kf-price-tooltip-key {
+  color: var(--text-muted);
+}
+.kf-backtest-foot {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+@media (max-width: 680px) {
+  .forecast-card { padding: 14px; gap: 14px; }
+  .kf-probability-grid { grid-template-columns: 1fr; }
+  .kf-prob-value { font-size: 32px; }
+  .kf-price-chart { height: 220px; }
+  .kf-volume-chart { height: 110px; }
+  .kf-backtest-grid { grid-template-columns: repeat(2, 1fr); }
+  .kf-backtest-value { font-size: 19px; }
+}
+
+/* ===== v2.12.46 宏观预警滚动条（K 线上方）+ 自动关注卡控制条 ==========
+   滚动条位于「我的持仓 / 实时价格」与「K 线 / 当前规则信号」之间那条空带。
+   配色只用覆盖层 rgba + 全站文本 token，深浅两套主题都能读。 */
+.macro-ticker {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  height: 40px;
+  margin: 0 0 14px;
+  padding: 0;
+  border-radius: 11px;
+  border: 1px solid rgba(245, 177, 48, .3);
+  background: linear-gradient(90deg, rgba(245, 177, 48, .14), rgba(255, 77, 106, .08) 42%, rgba(56, 223, 196, .08));
+  overflow: hidden;
+  position: relative;
+}
+/* 容器写了 display 就必须补 [hidden] 守卫，否则 JS 的 el.hidden 完全失效。 */
+.macro-ticker[hidden] { display: none !important; }
+
+.mt-live {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 13px;
+  font-size: 11.5px;
+  font-weight: 800;
+  letter-spacing: .04em;
+  color: #3a2a06;
+  background: linear-gradient(180deg, #ffd166, #f5b130);
+}
+.mt-live i { width: 7px; height: 7px; border-radius: 50%; background: #7a2b00; animation: mtLivePulse 1.4s ease-in-out infinite; }
+@keyframes mtLivePulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .35; transform: scale(.7); } }
+
+.mt-viewport {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 26px, #000 calc(100% - 26px), transparent 100%);
+  mask-image: linear-gradient(90deg, transparent 0, #000 26px, #000 calc(100% - 26px), transparent 100%);
+}
+.mt-track { display: flex; width: max-content; animation: mtScroll linear infinite; }
+.mt-viewport:hover .mt-track { animation-play-state: paused; }
+@keyframes mtScroll { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+@media (prefers-reduced-motion: reduce) { .mt-track { animation: none !important; } }
+
+.mt-item {
+  appearance: none;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 38px;
+  padding: 0 15px;
+  margin: 0;
+  border: 0;
+  border-right: 1px solid rgba(137, 166, 199, .18);
+  background: transparent;
+  font: inherit;
+  color: var(--text-primary);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background .15s;
+}
+.mt-item:hover { background: rgba(255, 255, 255, .07); }
+html[data-theme="light"] .mt-item:hover { background: rgba(15, 42, 74, .06); }
+.mt-item.is-imminent { animation: mtImminent 1.6s ease-in-out infinite; }
+@keyframes mtImminent { 0%, 100% { background: transparent; } 50% { background: rgba(255, 77, 106, .18); } }
+@media (prefers-reduced-motion: reduce) { .mt-item.is-imminent { animation: none; background: rgba(255, 77, 106, .1); } }
+
+.mt-flag { flex: none; font-style: normal; font-size: 14px; line-height: 1; }
+.mt-flag-code { font-size: 9.5px; font-weight: 800; letter-spacing: .04em; color: var(--text-muted); }
+.mt-title { font-size: 12.5px; font-weight: 700; }
+.mt-act { font-size: 11.5px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.mt-act b { color: var(--text-primary); }
+.mt-when { font-size: 10.5px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.mt-cd b { font-size: 12px; font-weight: 800; color: #f5b130; font-variant-numeric: tabular-nums; }
+.mt-item.is-released .mt-cd b { color: var(--text-muted); font-weight: 700; }
+
+.mt-tag { font-style: normal; font-size: 10px; font-weight: 800; padding: 2px 7px; border-radius: 999px; border: 1px solid transparent; white-space: nowrap; }
+.mt-tag.bull { color: var(--bull); background: rgba(0, 212, 170, .14); border-color: rgba(0, 212, 170, .34); }
+.mt-tag.bear { color: var(--bear); background: rgba(255, 77, 106, .16); border-color: rgba(255, 77, 106, .36); }
+.mt-tag.est, .mt-tag.flat { color: var(--text-muted); background: rgba(137, 166, 199, .14); border-color: rgba(137, 166, 199, .3); }
+
+.mt-close {
+  flex: none;
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 12px;
+  cursor: pointer;
+  transition: background .15s, color .15s;
+}
+.mt-close:hover { color: var(--text-primary); background: rgba(255, 255, 255, .08); }
+
+/* —— 顶部「关注宏观事件实时数据」的自动 / 手动控制条 —— */
+.macro-pin-bar { position: relative; display: flex; align-items: center; gap: 8px; margin: 0 0 8px; }
+.macro-pin-mode {
+  margin-right: auto;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  padding: 2px 9px;
+}
+.macro-pin-mode.is-manual { color: #f5b130; border-color: rgba(245, 177, 48, .45); background: rgba(245, 177, 48, .1); }
+.macro-pin-act {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  padding: 3px 10px;
+  cursor: pointer;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.macro-pin-act:hover { color: var(--text-primary); border-color: var(--accent-cyan, #38dfc4); background: rgba(56, 223, 196, .08); }
+.macro-pin-act.is-quiet:hover { border-color: rgba(255, 77, 106, .5); background: rgba(255, 77, 106, .1); color: var(--bear); }
+
+/* 「更换」浮层复用日历的 .ic-menu 外壳，但那张卡的 --cal-* 变量在卡作用域内，
+   浮层挂在关注卡上必须自带一份（外壳底色本来就是深色 #0b1626）。 */
+.macro-picker.ic-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  left: auto;
+  width: min(456px, calc(100vw - 36px));
+  z-index: 60;
+  --cal-text: #e9effb;
+  --cal-text-2: #9db0c9;
+  --cal-text-3: #6b7d97;
+  --cal-line: rgba(137, 166, 199, .16);
+  --cal-line-2: rgba(137, 166, 199, .3);
+  --cal-surface: rgba(6, 14, 25, .5);
+  --cal-surface-2: rgba(255, 255, 255, .045);
+  --cal-bull: #2ecc91;
+  --cal-bear: #ff4d6a;
+  --cal-warn: #f5b130;
+  --cal-accent: #38dfc4;
+}
+.macro-picker[hidden] { display: none !important; }
+.macro-pick-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.macro-pick-head span { font-size: 11px; font-weight: 700; color: var(--cal-text-3); }
+.macro-pick-head button {
+  appearance: none;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--cal-accent);
+  cursor: pointer;
+  padding: 0;
+}
+.macro-pick-head button:hover { text-decoration: underline; }
+/* 列表：只留纵向滚动；横向一律裁掉（行内已有 ellipsis，不会截内容）。
+   滚动条美化：细条 + 圆角 + 半透明，hover 才加深。 */
+.macro-pick-list {
+  max-height: 300px;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(137, 166, 199, .35) transparent;
+}
+.macro-pick-list::-webkit-scrollbar { width: 6px; height: 6px; }
+.macro-pick-list::-webkit-scrollbar-track { background: transparent; }
+.macro-pick-list::-webkit-scrollbar-thumb {
+  background: rgba(137, 166, 199, .28);
+  border-radius: 999px;
+}
+.macro-pick-list::-webkit-scrollbar-thumb:hover { background: rgba(137, 166, 199, .5); }
+.macro-pick-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  appearance: none;
+  border: 0;
+  background: none;
+  padding: 7px 8px;
+  border-radius: 7px;
+  font: inherit;
+  font-size: 11.5px;
+  color: var(--cal-text-2);
+  cursor: pointer;
+}
+.macro-pick-row:hover { background: var(--cal-surface-2); color: var(--cal-text); }
+.macro-pick-row.is-current { background: rgba(56, 223, 196, .13); color: var(--cal-text); }
+.macro-pick-row.is-hidden { opacity: .5; }
+.macro-pick-row .cal-flag { transform: scale(.92); }
+.macro-pick-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.macro-pick-when { font-size: 10px; color: var(--cal-text-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.macro-pick-row em { font-style: normal; font-size: 10px; font-weight: 800; color: var(--cal-text-3); white-space: nowrap; }
+.macro-pick-foot { padding: 8px 10px; border-top: 1px solid var(--cal-line); text-align: right; }
+.macro-pick-foot button {
+  appearance: none;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--cal-accent);
+  cursor: pointer;
+}
+.macro-pick-foot button:hover { text-decoration: underline; }
+
+/* 「更换 / 不显示」定位到的卡片闪一下，让用户知道看的是这一条 */
+.fear-greed-gauge-card.is-flash { animation: macroPinFlash 1.6s ease-out; }
+@keyframes macroPinFlash {
+  0% { box-shadow: 0 0 0 0 rgba(56, 223, 196, .55); }
+  100% { box-shadow: 0 0 0 14px rgba(56, 223, 196, 0); }
+}
+
+/* —— 宏观事件中枢：折叠行 / 工具栏图标 / 次级展开链接 —— */
+.cal-fold { list-style: none; margin: 6px 0 2px; }
+.cal-fold-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 12px;
+  border: 1px dashed var(--cal-line-2);
+  border-radius: 9px;
+  background: var(--cal-surface);
+  color: var(--cal-text-2);
+  font: inherit;
+  font-size: 11.5px;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color .15s, background .15s, color .15s;
+}
+.cal-fold-btn:hover { border-color: var(--cal-accent); background: var(--cal-surface-2); color: var(--cal-text); }
+.cal-fold-btn b { font-size: 12px; font-weight: 800; color: var(--cal-text); }
+.cal-fold-btn span { color: var(--cal-text-3); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 展开态：从「虚线待点开」变成「实线已展开」，一眼看出这是可收起的 */
+.cal-fold-btn.is-open { border-style: solid; border-color: var(--cal-accent); background: var(--cal-surface-2); }
+.cal-fold-btn.is-open b { color: var(--cal-accent); }
+
+.ic-toolbar-right { display: flex; align-items: center; gap: 8px; }
+.ic-range-icon { display: inline-flex; align-items: center; justify-content: center; padding: 5px 10px; }
+.ic-range-icon svg { display: block; }
+
+.investment-calendar-card .ic-more-link {
+  appearance: none;
+  border: 0;
+  background: none;
+  padding: 2px;
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 650;
+  color: var(--cal-text-2);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.investment-calendar-card .ic-more-link:hover { color: var(--cal-accent); text-decoration: underline; }
+
+/* 被顶部关注卡挑中的那一行，在列表里同色标出，两处口径一致 */
+.cal-event.is-pinned { background: rgba(56, 223, 196, .07); border-color: rgba(56, 223, 196, .28); }
+.cal-event.is-pinned::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 9px;
+  bottom: 9px;
+  width: 3px;
+  border-radius: 999px;
+  background: var(--cal-accent);
+}
+
+@media (max-width: 900px) {
+  .macro-ticker { height: 38px; margin-bottom: 12px; }
+  .mt-live { padding: 0 9px; font-size: 10.5px; }
+  .mt-item { height: 36px; padding: 0 11px; gap: 6px; }
+  .mt-when { display: none; }
+  .mt-title { font-size: 12px; }
+}
+
+/* v2.12.46 补：滚动条标题过长时截断（东方财富式标题可达 25+ 字） */
+.mt-title { max-width: 32ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 900px) { .mt-title { max-width: 20ch; } }
+
+/* —— 浅色主题：预警条与「关注」控制条的次级文字压到 AA 对比度 ——
+   这几处用的是主题变量 --text-muted(#808ca6)：深底上 6.5:1，换到浅底只剩 3.0:1。
+   两套都补：显式 light 与 auto+系统浅色。
+   ⚠️ 不要顺手把 .cal-fold-btn 也加进来 —— 它在 .investment-calendar-card 里，
+   那张卡是「强制深色」（--cal-text:#e9effb 等卡级变量锁定），跟外层主题无关，
+   按浅底去改反而会把深底上的 12.5:1 拉低到 3.5:1。 */
+html[data-theme="light"] .macro-pin-mode,
+html[data-theme="light"] .macro-pin-act,
+html[data-theme="light"] .mt-act,
+html[data-theme="light"] .mt-close { color: #5a6a80; }
+html[data-theme="light"] .macro-pin-act:hover,
+html[data-theme="light"] .mt-close:hover { color: #33415a; }
+@media (prefers-color-scheme: light) {
+  html[data-theme="auto"] .macro-pin-mode,
+  html[data-theme="auto"] .macro-pin-act,
+  html[data-theme="auto"] .mt-act,
+  html[data-theme="auto"] .mt-close { color: #5a6a80; }
+  html[data-theme="auto"] .macro-pin-act:hover,
+  html[data-theme="auto"] .mt-close:hover { color: #33415a; }
+}
+
+/* ===== v2.12.47 尾部空白平衡（宏观事件中枢联动的自适应布局） =====
+   背景：右列（侧栏 = 当前规则信号 + 指标明细 + 关注宏观事件实时数据）比左列
+   （K 线 + OKX 微观结构 + 周期涨幅）高时，两列的高度差会在左列底部留下空白 ——
+   宏观事件卡内容一多，这个差值能到 200px 以上，看起来就像「周期涨幅」和
+   「多周期共振」之间被挖空了一块。
+   做法：由 app.js 的 syncTailBalance() 量出差值后，把余量交给「周期涨幅」卡
+   吸收。它的柱状图本来就是百分比高度（.period-return-bar > i { height:100% }），
+   卡片变高时柱子等比变长，视觉上就是一张更高的柱状图，不会出现空块。
+   ⚠️ 高度链上任何一环写成 auto 都会让余量卡住，四层都要能 stretch。 */
+.chart-column.is-tail-balanced {
+  align-content: stretch;
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
+/* 「多周期共振」上移到左列末尾时，多占一行 —— 吸收位仍在周期涨幅那一行。 */
+.chart-column.is-tail-balanced.is-tail-with-tail {
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+}
+.chart-column.is-tail-balanced > #periodChangeCard {
+  display: grid !important;
+  grid-template-rows: auto minmax(0, 1fr) !important;
+  align-self: stretch;
+}
+.chart-column.is-tail-balanced > #periodChangeCard > #changeTags {
+  align-content: stretch !important;
+  grid-auto-rows: minmax(0, 1fr) !important;
+  min-height: 0 !important;
+}
+
+/* ===== v2.12.53 宏观实况滚动条（宏观卡顶 + 顶部币种区）+ 币种下拉 ==========
+   两处滚动条都复用 .mt-* 无缝滚动骨架（v2.12.46 宏观预警条）：
+   .mt-plain = 不可点的展示条目（去手型、去 hover 底色）；
+   .mt-live-cyan = 青色系标签（区别于宏观预警条的琥珀色）。 */
+.mt-live-cyan {
+  color: #062a26;
+  background: linear-gradient(180deg, #4be3c4, #1fbf9f);
+}
+.mt-item.mt-plain { cursor: default; }
+.mt-item.mt-plain:hover { background: transparent; }
+/* v2.12.56：实况条指标可点击 —— 点击跳到宏观卡综合指标并脉冲对应卡片。 */
+.mt-item[data-sig-key] { cursor: pointer; }
+.mt-item[data-sig-key]:hover { background: rgba(75, 227, 196, .12); }
+html[data-theme="light"] .mt-item[data-sig-key]:hover { background: rgba(31, 143, 120, .1); }
+.mt-gear {
+  flex: none;
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 4px 0 10px;
+  cursor: pointer;
+  transition: background .15s, color .15s;
+}
+.mt-gear:hover { color: var(--text-primary); background: rgba(255, 255, 255, .08); }
+html[data-theme="light"] .mt-gear { color: #5a6a80; }
+html[data-theme="light"] .mt-gear:hover { color: #33415a; }
+/* 综合指标卡脉冲提示：放大缩小两拍 + 青色描边，1.8s 后由 JS 摘除 sig-pulse。 */
+.fed-market-signal.sig-pulse { animation: fedSigPulse .9s ease-in-out 2; }
+@keyframes fedSigPulse {
+  0%, 100% { transform: scale(1); box-shadow: none; }
+  50% { transform: scale(1.05); box-shadow: 0 0 0 2px rgba(75, 227, 196, .55), 0 0 18px rgba(75, 227, 196, .35); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .fed-market-signal.sig-pulse { animation: none; box-shadow: 0 0 0 2px rgba(75, 227, 196, .55); }
+}
+/* v2.12.57：关注卡锁定后，点顶部预警条 → 宏观事件中枢对应事件行放大缩小高亮。 */
+.cal-event.is-jump-pulse { animation: calJumpPulse .9s ease-in-out 2; }
+@keyframes calJumpPulse {
+  0%, 100% { transform: scale(1); box-shadow: none; }
+  50% { transform: scale(1.03); box-shadow: 0 0 0 2px rgba(75, 227, 196, .55), 0 0 18px rgba(75, 227, 196, .35); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cal-event.is-jump-pulse { animation: none; box-shadow: 0 0 0 2px rgba(75, 227, 196, .55); }
+  .macro-pin-act.is-denied { animation: none; }
+}
+/* 锁定按钮：锁定态用金色描边 + 微底色，与「手动」徽标同一家族。 */
+.macro-pin-act.is-locked {
+  color: var(--warn, #f5b130);
+  border-color: rgba(245, 177, 48, .45);
+  background: rgba(245, 177, 48, .12);
+}
+/* v2.12.58：锁定期间「更换」冻结 —— 置灰、悬停不点亮；点击时左右抖动提示被拒。 */
+.macro-pin-act.is-frozen { color: var(--text-muted); opacity: .55; cursor: not-allowed; }
+.macro-pin-act.is-frozen:hover { color: var(--text-muted); border-color: var(--border-subtle); background: transparent; }
+.macro-pin-act.is-frozen .ic-caret { opacity: .5; }
+@keyframes pinDenied { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-3px); } 75% { transform: translateX(3px); } }
+.macro-pin-act.is-denied { animation: pinDenied .25s ease; }
+.mt-val { font-size: 12.5px; font-weight: 800; font-variant-numeric: tabular-nums; color: var(--text-primary); }
+.mt-chg { font-style: normal; font-size: 11px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.mt-chg.bull { color: var(--bull); }
+.mt-chg.bear { color: var(--bear); }
+.mt-chg.flat { color: var(--text-muted); }
+
+/* —— v2.12.55 顶部双条统一：宏观实况（cyan 标签）+ 宏观预警（琥珀标签）——————
+   两条同为 40px 高 / 11px 圆角 / 同一套 .mt-* 骨架，宏观预警条紧贴实况条下方，
+   两条都位于「我的持仓 / 实时价格」上方。标签底色保留青/琥珀差异用于区分性质。 */
+.mt-item.mt-hot {
+  /* 宏观实况条：日内波动 ≥±1% 的指标 —— 金色呼吸闪烁 + 数值高亮。 */
+  animation: mtHot 1.1s ease-in-out infinite;
+}
+.mt-item.mt-hot .mt-val { color: #ffd166; text-shadow: 0 0 8px rgba(255, 209, 102, .45); }
+.mt-item.mt-hot .mt-chg { text-shadow: 0 0 8px rgba(255, 209, 102, .3); }
+@keyframes mtHot { 0%, 100% { background: transparent; box-shadow: none; } 50% { background: rgba(255, 209, 102, .16); box-shadow: inset 0 0 12px rgba(255, 209, 102, .18); } }
+@media (prefers-reduced-motion: reduce) {
+  .mt-item.mt-hot { animation: none; background: rgba(255, 209, 102, .12); }
+  .mt-item.mt-hot .mt-val { text-shadow: none; }
+}
+.mt-item.is-soon {
+  /* 宏观预警条：未来 24 小时内即将公布的事件 —— 琥珀色呼吸闪烁。 */
+  animation: mtSoon 2.4s ease-in-out infinite;
+}
+@keyframes mtSoon { 0%, 100% { background: transparent; } 50% { background: rgba(245, 177, 48, .16); } }
+@media (prefers-reduced-motion: reduce) { .mt-item.is-soon { animation: none; background: rgba(245, 177, 48, .1); } }
+
+/* —— 宏观卡头部右侧：实况条开关 + 检查节奏药丸 —— */
+.fed-head-right { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
+.fed-monitor-head .fed-check-pill {
+  font: 700 12px "SF Mono", monospace;
+  color: var(--text-muted);
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.fed-monitor-head .fed-live-toggle {
+  appearance: none;
+  font: 700 12px inherit;
+  font-family: inherit;
+  color: var(--text-secondary, #9aa4b2);
+  padding: 6px 12px;
+  border: 1px solid rgba(75, 227, 196, .34);
+  border-radius: 999px;
+  background: rgba(75, 227, 196, .08);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background .15s, color .15s, border-color .15s;
+}
+.fed-monitor-head .fed-live-toggle:hover {
+  color: var(--text-primary);
+  background: rgba(75, 227, 196, .16);
+  border-color: rgba(75, 227, 196, .55);
+}
+
+/* —— 综合指标标题行：实况条设置按钮 + 浮层 —— */
+.fed-market-head-right { display: inline-flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.fed-market-panel > div:first-child { position: relative; }
+.fed-live-cog {
+  appearance: none;
+  font-family: inherit;
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--text-secondary, #9aa4b2);
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background .15s, color .15s, border-color .15s;
+}
+.fed-live-cog:hover { color: var(--text-primary); background: rgba(255, 255, 255, .06); border-color: var(--border-strong, #3a434f); }
+.fed-live-settings {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 70;
+  min-width: 224px;
+  max-width: 300px;
+  padding: 11px 13px;
+  display: grid;
+  gap: 2px;
+  border-radius: 12px;
+  border: 1px solid var(--border-strong, #3a434f);
+  background: var(--bg-surface-2, #10161f);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, .38);
+}
+.fed-live-settings[hidden] { display: none !important; }
+.fed-live-settings b { font-size: 12px; color: var(--text-primary); margin-bottom: 5px; }
+.fed-live-settings label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 2px;
+  font-size: 12.5px;
+  color: var(--text-secondary, #9aa4b2);
+  cursor: pointer;
+}
+.fed-live-settings label:hover { color: var(--text-primary); }
+.fed-live-settings label em { font-style: normal; font-size: 10.5px; color: var(--text-muted); }
+.fed-live-settings label input { accent-color: #4be3c4; }
+.fed-live-settings small { margin-top: 6px; font-size: 10.5px; line-height: 1.5; color: var(--text-muted); }
+html[data-theme="light"] .fed-live-settings { background: #fff; box-shadow: 0 14px 30px rgba(15, 42, 74, .18); }
+html[data-theme="light"] .fed-live-cog:hover { background: rgba(15, 42, 74, .06); }
+
+/* —— 综合指标卡标题：中英结合命名的英文短名 —— */
+.fed-market-signal .fed-sig-en {
+  font-style: normal;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: .02em;
+  color: var(--text-muted);
+  margin-left: 5px;
+  white-space: nowrap;
+}
+
+/* —— 顶部币种区：宏观实况滚动条 + 紧凑币种下拉 —— */
+.coin-switcher.coin-switcher-ticker {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  flex-wrap: nowrap;
+  height: 40px;
+  margin: 4px 0 8px;
+  border-radius: 11px;
+  border: 1px solid rgba(75, 227, 196, .24);
+  background: linear-gradient(90deg, rgba(75, 227, 196, .09), rgba(111, 83, 159, .1));
+  overflow: hidden; /* v2.12.56：币种下拉已移入顶栏，不再需要溢出 —— 裁出标签左圆角，与宏观预警条一致 */
+  position: relative;
+}
+.coin-switcher.coin-switcher-ticker[hidden] { display: none !important; }
+.coin-switcher.coin-switcher-ticker .mt-viewport { border-radius: 10px; } /* v2.12.54：币种下拉移入顶栏，滚动条通栏圆角 */
+.coin-switcher.coin-switcher-ticker .mt-item { height: 38px; }
+.csw-live-label { font-weight: 800; letter-spacing: .04em; }
+.csw-coin-pick { position: relative; flex: none; display: flex; align-items: center; padding-right: 6px; }
+.csw-coin-btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(75, 227, 196, .4);
+  background: rgba(75, 227, 196, .12);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+  transition: background .15s, border-color .15s;
+}
+.csw-coin-btn:hover { background: rgba(75, 227, 196, .2); border-color: rgba(75, 227, 196, .6); }
+.csw-coin-mark { font-weight: 800; letter-spacing: .04em; }
+.csw-coin-caret { font-size: 9px; opacity: .8; }
+.csw-coin-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 80;
+  min-width: 168px;
+  padding: 5px;
+  border-radius: 12px;
+  border: 1px solid var(--border-strong, #3a434f);
+  background: var(--bg-surface-2, #10161f);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, .38);
+}
+.csw-coin-menu[hidden] { display: none !important; }
+.csw-coin-opt {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary, #9aa4b2);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  text-align: left;
+}
+.csw-coin-opt:hover { background: rgba(255, 255, 255, .07); color: var(--text-primary); }
+html[data-theme="light"] .csw-coin-opt:hover { background: rgba(15, 42, 74, .07); }
+.csw-coin-opt .csw-coin-mark { min-width: 34px; color: var(--text-primary); }
+.csw-coin-opt .csw-coin-name { flex: 1; font-size: 11.5px; color: var(--text-muted, #5b6573); }
+.csw-coin-opt.is-active { color: var(--accent-cyan, #22d3ee); }
+.csw-coin-opt.is-active .csw-coin-mark,
+.csw-coin-opt.is-active .csw-coin-name { color: var(--accent-cyan, #22d3ee); }
+.csw-coin-check { font-size: 11px; color: var(--accent-cyan, #22d3ee); }
+@media (max-width: 640px) {
+  .coin-switcher.coin-switcher-ticker { height: 36px; }
+  .coin-switcher.coin-switcher-ticker .mt-item { height: 34px; padding: 0 10px; gap: 5px; }
+  .coin-switcher.coin-switcher-ticker .mt-val { font-size: 11.5px; }
 }

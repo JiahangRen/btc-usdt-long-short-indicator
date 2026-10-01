@@ -24,7 +24,7 @@ html.pre-boot .chart-box::after {
 }
 html.pre-boot #connection { opacity: .75; }
 @keyframes bootShimmer { from { background-position: 130% 0; } to { background-position: -30% 0; } }
-</style><link rel="icon" type="image/svg+xml" href="/btc-indicator-mark.svg?v=2.4.0" data-page-node-id="1T355LblmTATEn9T4Al3Ba"><link rel="stylesheet" href="/styles/tokens.css?v=2.4.0" data-page-node-id="eoKneBwRziGVdNWNXiUhNd"><link rel="stylesheet" href="/styles/base.css?v=2.4.0" data-page-node-id="Nh9ryzJnbj57shdW04wdbY"><link rel="stylesheet" href="/styles/layout.css?v=2.4.0" data-page-node-id="err2uugX0PyRHSUT53mnvp"><link rel="stylesheet" href="/styles/components.css?v=2.4.0" data-page-node-id="vkuW38kHdCRayOPJYzkk0z"><link rel="stylesheet" href="/styles/responsive.css?v=2.4.0" data-page-node-id="awjRieZMGPP3TQWpP2C2Cs"><link rel="preload" as="style" href="/styles.css?v=2.12.24.3" data-page-node-id="mPcLUMwucdyPqDtO0ZN1HH" onload="this.onload=null;this.rel='stylesheet'"><noscript><link rel="stylesheet" href="/styles.css?v=2.12.24.3"></noscript><link rel="stylesheet" href="/styles/foundation.css?v=2.4.22" data-page-node-id="KlAwPEcrZm2c5YT6P0WijX"><link rel="stylesheet" href="/styles/position-layout.css?v=17" data-page-node-id="LWEggfavjZCVfCoVtZXeeM">
+</style><link rel="icon" type="image/svg+xml" href="/btc-indicator-mark.svg?v=2.4.0" data-page-node-id="1T355LblmTATEn9T4Al3Ba"><link rel="stylesheet" href="/styles/tokens.css?v=2.4.0" data-page-node-id="eoKneBwRziGVdNWNXiUhNd"><link rel="stylesheet" href="/styles/base.css?v=2.4.0" data-page-node-id="Nh9ryzJnbj57shdW04wdbY"><link rel="stylesheet" href="/styles/layout.css?v=2.4.0" data-page-node-id="err2uugX0PyRHSUT53mnvp"><link rel="stylesheet" href="/styles/components.css?v=2.4.0" data-page-node-id="vkuW38kHdCRayOPJYzkk0z"><link rel="stylesheet" href="/styles/responsive.css?v=2.4.0" data-page-node-id="awjRieZMGPP3TQWpP2C2Cs"><link rel="preload" as="style" href="/styles.css?v=20261001g" data-page-node-id="mPcLUMwucdyPqDtO0ZN1HH" onload="this.onload=null;this.rel='stylesheet'"><noscript><link rel="stylesheet" href="/styles.css?v=20261001g"></noscript><link rel="stylesheet" href="/styles/foundation.css?v=2.4.23" data-page-node-id="KlAwPEcrZm2c5YT6P0WijX"><link rel="stylesheet" href="/styles/position-layout.css?v=17" data-page-node-id="LWEggfavjZCVfCoVtZXeeM">
 <link rel="stylesheet" href="/styles/split.css?v=18" data-page-node-id="split-css"></head><body data-page-node-id="ZEpZuiujcIZDSyQnF6uKAY">
 <main data-page-node-id="g2FCwmTeTR1qbWRjQpbWNi">
 <header data-page-node-id="cuNmB5wLo23EkNtyEukZU7"><div data-page-node-id="LTKMAV4vImiAu8V6sH7ziq"><h1 data-page-node-id="gsCPtYdIFwFU1TfkGciUH4" data-zh="BTC/USDT 多空指标指示器" data-en="BTC/USDT Long/Short Indicator">BTC/USDT 多空指标指示器</h1><p data-page-node-id="nLk4JXJ1ICrIBXMY2xaY1R" data-zh="数据透明 · 按需加载 · 非投资建议" data-en="Transparent data · on-demand loading · not investment advice">数据透明 · 按需加载 · 非投资建议</p></div><div class="controls" data-page-node-id="HDwXE4WFUbBHSYsrHLxIBW"><label data-page-node-id="u20OKHDWOy8VEvXsgOAxA5"><span data-zh="优先源" data-en="Preferred source">优先源</span> <select id="source" data-page-node-id="IfnYra3m1UzqnWCprf7ZFE"><option value="okx" selected data-page-node-id="BrdbKnQiwWHDMWVMVCaGcJ">OKX</option><option value="binance" data-page-node-id="EdLHxfbyjQF3CO6TEJGwCX">Binance</option></select></label></div></header>
@@ -34,11 +34,74 @@ html.pre-boot #connection { opacity: .75; }
 <section class="grid" data-page-node-id="1YxwB24DV57BCsO097rMQz"><article class="card" data-page-node-id="X7Cecg04kn8gkrOtdlSEU7"><h2 data-page-node-id="mQvCMS02kHokNuxsGZ6Phj" data-zh="当前规则信号" data-en="Current rule signal">当前规则信号</h2><div class="signal" id="signal" data-page-node-id="HVeeDDb9eLoa9zzD80Mn3G">--</div><p id="signalReason" data-page-node-id="uAq6Ji0oAHAnMnnjVfKR0j" data-zh="等待有效 K 线数据。" data-en="Waiting for valid candle data.">等待有效 K 线数据。</p><section class="signal-validity" id="signalValidity" aria-live="polite" data-page-node-id="UzcgalvbqN3coa6hhcwzQh"></section></article><article class="card" data-page-node-id="LA7LexGCNc0lOsP8uOLwNw"><h2 data-page-node-id="KJ0Pon14LbtMqf0E1LmwJD" data-zh="指标明细" data-en="Indicator details">指标明细</h2><div id="indicators" class="metrics" data-page-node-id="R5oPJUEMJmp96m1EJpcTkX"></div></article></section>
 <section class="card optional" data-page-node-id="H6PV8Jb30oXdpVaIg7e4hA"><div class="resonance-head" data-page-node-id="6hMLCZi4WJyCCjfHSjjKCN"><div class="resonance-head-top"><h2 data-page-node-id="bWZYbb7x8B2eDEUdXzzq6o" data-zh="多周期共振" data-en="Multi-timeframe resonance">多周期共振</h2><div id="resonanceSummary" class="resonance-summary-slot"></div><span id="resonanceVerdict" class="res-verdict" hidden></span></div></div><button id="loadResonance" data-page-node-id="vhtkDaSx1muXAHVZWk5CVG" data-zh="计算共振" data-en="Compute resonance">计算共振</button><div id="resonance" data-page-node-id="FYbGZKPsVwpEWpJPNEzpcv" data-zh="尚未计算" data-en="Not computed yet">尚未计算</div></section>
 <section class="card" data-page-node-id="TlwygkeNAXlG8X8PDSAzXw"><h2 data-page-node-id="k5dtNr1O4f1wiQTviuETIp" data-zh="数据诊断" data-en="Data diagnostics">数据诊断</h2><pre id="diagnostics" data-page-node-id="Ra62AWTSl3sBZ2ZbSrI4OT">--</pre></section>
+<section class="card get-app-card" data-page-node-id="kronosGetApp">
+  <div id="kronos-forecast-card" class="forecast-card">
+    <div class="kf-head">
+      <h2 data-zh="KRONOS AI预测" data-en="KRONOS AI Forecast">KRONOS AI预测</h2>
+      <span class="kf-exchange" id="kf-exchange">OKX</span>
+    </div>
+    <div class="kf-refresh-control">
+      <label for="kf-refresh-min" data-zh="自动刷新间隔（分钟）：" data-en="Auto-refresh interval (min): ">自动刷新间隔（分钟）：</label>
+      <input id="kf-refresh-min" class="kf-refresh-input" type="number" min="0.5" step="0.5" value="60" inputmode="decimal" />
+      <button id="kf-refresh-apply" class="kf-refresh-btn" type="button" data-zh="应用" data-en="Apply">应用</button>
+      <span class="kf-refresh-hint" data-zh="（服务端缓存约 1 小时，低于此值会重复读取同一份预测，直到服务端缓存刷新）" data-en="(server cache ~1h; lower values re-read the same forecast until server cache refreshes)">（服务端缓存约 1 小时，低于此值会重复读取同一份预测，直到服务端缓存刷新）</span>
+    </div>
+    <div class="kf-probability-grid">
+      <div class="kf-prob-card" id="kf-up-card">
+        <div class="kf-prob-title" data-zh="上涨概率（未来 24 小时）" data-en="Probability of Up (Next 24h)">上涨概率（未来 24 小时）</div>
+        <div class="kf-prob-value" id="kf-up-prob">--</div>
+        <div class="kf-prob-desc" data-zh="该模型对24小时后价格高于上次已知价格的置信度。" data-en="The model's confidence that the price will be higher than the last known price after 24 hours.">该模型对24小时后价格高于上次已知价格的置信度。</div>
+      </div>
+      <div class="kf-prob-card" id="kf-vol-card">
+        <div class="kf-prob-title" data-zh="波动性放大（未来24小时）" data-en="Volatility Amplification (Next 24h)">波动性放大（未来24小时）</div>
+        <div class="kf-prob-value" id="kf-vol-prob">--</div>
+        <div class="kf-prob-desc" data-zh="预测未来 24 小时内波动率超过近期历史波动率的概率。" data-en="Probability that volatility in the next 24 hours will exceed recent historical volatility.">预测未来 24 小时内波动率超过近期历史波动率的概率。</div>
+      </div>
+    </div>
+    <div class="kf-forecast-shape-bar">
+      <span class="kf-forecast-shape-label" data-zh="24h 预测走势：" data-en="24h Predicted Path: ">24h 预测走势：</span>
+      <strong id="kf-forecast-shape">--</strong>
+    </div>
+    <div class="kf-forecast-section">
+      <h3 data-zh="24小时概率预报" data-en="24-Hour Probabilistic Forecast">24小时概率预报</h3>
+      <p data-zh="下图显示了历史价格（蓝色）和概率预测（橙色）。橙色线是多次蒙特卡罗模拟的平均值，阴影区域代表预测结果的全部范围，表明预测的不确定性。" data-en="The chart below shows historical prices (blue) and probabilistic forecasts (orange). The orange line is the average of multiple Monte Carlo simulations, and the shaded area represents the full range of forecast outcomes, indicating prediction uncertainty.">下图显示了历史价格（蓝色）和概率预测（橙色）。橙色线是多次蒙特卡罗模拟的平均值，阴影区域代表预测结果的全部范围，表明预测的不确定性。</p>
+      <div class="kf-chart-title" data-zh="BTCUSDT 概率价格与成交量预报（未来 24 小时）" data-en="BTCUSDT Probabilistic Price & Volume Forecast (Next 24 Hours)">BTCUSDT 概率价格与成交量预报（未来 24 小时）</div>
+      <div class="kf-chart-wrap">
+        <div class="kf-price-chart-wrap">
+          <canvas id="kf-price-chart" class="kf-chart kf-price-chart"></canvas>
+          <div class="kf-price-tooltip" id="kf-price-tooltip"></div>
+        </div>
+        <canvas id="kf-volume-chart" class="kf-chart kf-volume-chart"></canvas>
+      </div>
+    </div>
+    <div class="kf-backtest" id="kf-backtest">
+      <div class="kf-backtest-head">
+        <h3 data-zh="历史准确度回测" data-en="Historical Accuracy Backtest">历史准确度回测</h3>
+        <span class="kf-backtest-exchange" id="kf-backtest-exchange">OKX</span>
+      </div>
+      <p class="kf-backtest-note" id="kf-backtest-note">回测计算中…</p>
+      <div class="kf-backtest-grid" id="kf-backtest-grid">
+        <div class="kf-backtest-card"><div class="kf-backtest-value" id="kf-bt-acc">--</div><div class="kf-backtest-label" data-zh="方向准确率" data-en="Direction Accuracy">方向准确率</div></div>
+        <div class="kf-backtest-card"><div class="kf-backtest-value" id="kf-bt-brier">--</div><div class="kf-backtest-label" data-zh="Brier 分数" data-en="Brier Score">Brier 分数</div></div>
+        <div class="kf-backtest-card"><div class="kf-backtest-value" id="kf-bt-vol">--</div><div class="kf-backtest-label" data-zh="波动放大命中率" data-en="Vol Amplify Hit">波动放大命中率</div></div>
+        <div class="kf-backtest-card"><div class="kf-backtest-value" id="kf-bt-samples">--</div><div class="kf-backtest-label" data-zh="回测样本数" data-en="Backtest Samples">回测样本数</div></div>
+      </div>
+      <div class="kf-chart-title" data-zh="各历史锚点预测上涨概率（绿=实际上涨，红=实际下跌；柱顶箭头=预测方向；日期下方 ✓=判断正确，✗=判断错误）" data-en="Predicted Up Probability per Anchor (green=actual up, red=actual down; top arrow=predicted direction; below date ✓=correct, ✗=wrong)">各历史锚点预测上涨概率（绿=实际上涨，红=实际下跌；柱顶箭头=预测方向；日期下方 ✓=判断正确，✗=判断错误）</div>
+      <div class="kf-backtest-chart-wrap">
+        <canvas id="kf-backtest-chart" class="kf-chart kf-backtest-chart"></canvas>
+        <div class="kf-bt-tooltip" id="kf-bt-tooltip"></div>
+      </div>
+      <div class="kf-backtest-foot"><span id="kf-backtest-updated">--</span></div>
+    </div>
+    <div class="kf-foot"><span id="kf-updated">--</span><span class="kf-disclaimer" data-zh="模型预测仅供参考，非投资建议" data-en="Model forecast for reference only, not investment advice">模型预测仅供参考，非投资建议</span></div>
+  </div>
+</section>
 </main>
 <script defer src="/core/panel-registry.js?v=2.4.0"></script>
 <script defer src="/secure-local-vault.js?v=1"></script><script defer src="/migrate-notice.js?v=1"></script>
-<script type="module" src="/app.js?v=2.12.25.1"></script>
-<script type="module" src="/split-mode.js?v=22"></script>
+<script type="module" src="/app.js?v=20261001u"></script>
+<script type="module" src="/split-mode.js?v=20261001a"></script>
+<script type="module" src="/src/modules/kronos-forecast.js?v=20260926n"></script>
 <script defer src="/notification.js?v=2.12.5"></script>
 <script defer src="/cloud-alerts.js?v=2.12.7"></script>
 <script>/* 骨架兜底：即使 app.js 加载/执行失败，pre-boot 的 shimmer 占位最多保留 8 秒。 */setTimeout(function(){document.documentElement.classList.remove("pre-boot");},8000);</script>

@@ -67,11 +67,11 @@ function dispatch() {
 }
 
 // Drop-in async replacement for trainFusionModel for callers that do NOT need the
-// predictAt / predictBigAt closures (researchOutlook, trainResearchCandidate).
-// Callers that need those closures (walkForwardBackfill) should import
+// predictAt / predictBigAt closures (researchOutlook).
+// Callers that need those closures should import
 // trainFusionModel directly from ./ml-train.mjs and run it in-process.
-// 对不需要 predictAt / predictBigAt 闭包的调用方（researchOutlook、trainResearchCandidate）
-// 的、可原位替换 trainFusionModel 的异步版本。需要这些闭包的调用方（walkForwardBackfill）
+// 对不需要 predictAt / predictBigAt 闭包的调用方（researchOutlook）
+// 的、可原位替换 trainFusionModel 的异步版本。需要这些闭包的调用方
 // 应直接从 ./ml-train.mjs 导入 trainFusionModel 并在主线程运行。
 export function trainFusionModelAsync(candles, horizon, options = {}) {
   return new Promise((resolve, reject) => {

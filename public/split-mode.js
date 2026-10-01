@@ -1230,7 +1230,16 @@ function fitDetail() {
   const s = Math.min(sh / DETAIL_H, 0.9);
   detail.frame.style.width = Math.round(sw / s) + 'px';
   detail.frame.style.height = Math.round(sh / s) + 'px';
-  detail.frame.style.transform = 'scale(' + s + ')';
+  // v2.12.30：改用 zoom 缩放。Chrome 原生 <select> 下拉弹层的定位不含 transform
+  // 缩放，浮层里的「信号基准」等下拉会按未缩放坐标弹出、整体飘离控件；
+  // zoom 参与布局计算，弹层锚点正确。不支持 zoom 的引擎回落 transform:scale。
+  if ('zoom' in detail.frame.style) {
+    detail.frame.style.zoom = String(s);
+    detail.frame.style.transform = 'none';
+  } else {
+    detail.frame.style.zoom = '';
+    detail.frame.style.transform = 'scale(' + s + ')';
+  }
 }
 
 function closeDetail() {
@@ -1258,10 +1267,11 @@ function injectButton() {
   btn.textContent = '⊞ ' + tx('多分屏', 'Split');
   btn.title = tx('开启多分屏模式（2~4 个币种同屏）', 'Open multi-split view (2-4 coins)');
   btn.addEventListener('click', (e) => { e.stopPropagation(); openOverlay(); });
-  // v2.12.24：固定排在顶栏最左（「₿ 比特币 / 多币种」切换组之前），原先 appendChild 落在最右。
-  // 币种切换组由 app.js 末尾的 IIFE 注入并坚持自己「排第一」，那边已改成以本按钮为锚，
-  // 两边都只在位置不对时才动 DOM，因此 MutationObserver 能收敛。
-  controls.insertBefore(btn, controls.firstElementChild);
+  // v2.12.54：币种下拉（.csw-coin-pick）顶栏最左，「多分屏」紧随其后 —— 与旧「多分屏 → 模式开关」
+  // 互让约定的方向相反。下拉由 multi-coin.js 注入、可能晚于本段执行：此时先排最左，
+  // 那边的 MutationObserver 会把下拉插到本按钮之前。两边都只在位置不对时才动 DOM，能收敛。
+  const pick = controls.querySelector('.csw-coin-pick');
+  controls.insertBefore(btn, pick ? pick.nextElementSibling : controls.firstElementChild);
 }
 
 function init() {

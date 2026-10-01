@@ -24,6 +24,7 @@ ROOT="/Users/jeffereyreng/ChatGPT/btc指示器"
 URL="http://127.0.0.1:8787/"
 HEALTH_URL="${URL}api/alerts/health"
 LABEL="com.jeffereyreng.btc-indicator"
+KRONOS_LABEL="com.jeffereyreng.btc-kronos"
 SYNC_SCRIPT="${ROOT}/scripts/relaunch-service.sh"
 INFRA_SCRIPT="${ROOT}/scripts/ensure-alerts-infra.sh"
 LAUNCHER_LOG="${ROOT}/btc-launcher.log"
@@ -177,7 +178,24 @@ if ! port_up 5432 || ! port_up 6379; then
 fi
 log "infra 就绪"
 
-# ── 2. 8787 + 云端告警挂载 ──────────────────────────────────────────────────
+# ── 2. Kronos 推理服务（8799）就绪 ───────────────────────────────────────────
+# launchd 已在步骤 0 通过 relaunch-service.sh 纳管；这里等它首次把模型权重拉起来。
+if ! port_up 8799; then
+  log "Kronos 服务未就绪，尝试 kickstart"
+  "$LAUNCHCTL" kickstart -k "gui/$(id -u)/${KRONOS_LABEL}" >/dev/null 2>&1
+  for _ in {1..60}; do
+    port_up 8799 && break
+    sleep 2
+  done
+fi
+if ! port_up 8799; then
+  log "Kronos 服务仍未就绪（AI 预测卡会显示 404）"
+  notify "Kronos 推理服务未启动，AI 预测暂时不可用"
+else
+  log "Kronos 服务就绪"
+fi
+
+# ── 3. 8787 + 云端告警挂载 ──────────────────────────────────────────────────
 if ! ready; then
   log "8787 未就绪或云端告警未挂上，重启 8787"
   "$LAUNCHCTL" kickstart -k "gui/$(id -u)/${LABEL}" >/dev/null 2>&1

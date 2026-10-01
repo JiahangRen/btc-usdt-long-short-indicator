@@ -1,0 +1,12 @@
+# Kronos 推理服务依赖。torch 在 Dockerfile 中以 CPU 版单独安装（体积更小），
+# 这里的 torch>=2.0.0 仅作版本下限声明，已装 CPU 版时不会重装 GPU 版。
+torch>=2.0.0
+huggingface_hub
+einops
+pandas
+numpy
+safetensors
+requests
+fastapi
+uvicorn[standard]
+redis
