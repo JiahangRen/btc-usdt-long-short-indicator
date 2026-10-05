@@ -8975,7 +8975,10 @@ body.voice-grid-resizing {
   display: none;
 }
 .alert-notice {
-  z-index: 1001;
+  /* 「规则测试已发送」提示在消息推送中心（.push-settings-modal 1004）、
+     语音规则编辑（.voice-rule-composer 1005）等弹层内触发，
+     z-index 必须压过所有业务弹层（与 .app-dialog 的 1200 同级），否则被盖住。 */
+  z-index: 1200;
   align-items: center;
 }
 .alert-notice > section {
@@ -9013,7 +9016,9 @@ body.voice-grid-resizing {
 
 /* Shared confirmation and information dialog. */
 .app-dialog {
-  z-index: 1002;
+  /* 提示框必须压过所有业务弹层（推送设置 1004 / 添加预警 1005 / 1150 一级），
+     否则在弹层内触发校验时提示被盖住，用户得先关弹层才看得到。 */
+  z-index: 1200;
 }
 .app-dialog .notice-body > span {
   background: rgba(85, 161, 213, 0.16);
@@ -9107,6 +9112,20 @@ body.voice-grid-resizing {
 .notification-rule-list .cloud-managed {
   color: var(--accent-cyan);
   font-weight: 800;
+}
+/* 三种本机推送模式（整数位 / 自定义网格 / 波动窗口）：左侧色条区分，触发文案加粗更醒目 */
+.alert-composer form [data-mode-fields] {
+  display: grid;
+  gap: 13px;
+}
+.alert-composer form [data-mode-fields][hidden] {
+  display: none !important;
+}
+.notification-rule-list article.rule-new-mode {
+  border-left: 2px solid var(--accent-cyan);
+}
+.notification-rule-list .notification-triggered {
+  font-weight: 700;
 }
 .cloud-alert-login {
   min-height: 28px;
@@ -12572,7 +12591,7 @@ html[data-theme="light"] #okxMicrostructureCard .microstructure-neutral-toggle:f
   padding: 22px 24px 20px;
   --cal-text: #e9effb;
   --cal-text-2: #9db0c9;
-  --cal-text-3: #6b7d97;
+  --cal-text-3: #7d8fa8;
   --cal-line: rgba(137, 166, 199, .16);
   --cal-line-2: rgba(137, 166, 199, .3);
   --cal-surface: rgba(6, 14, 25, .5);
@@ -14677,7 +14696,7 @@ html[data-theme="light"] .mt-item:hover { background: rgba(15, 42, 74, .06); }
   z-index: 60;
   --cal-text: #e9effb;
   --cal-text-2: #9db0c9;
-  --cal-text-3: #6b7d97;
+  --cal-text-3: #7d8fa8;
   --cal-line: rgba(137, 166, 199, .16);
   --cal-line-2: rgba(137, 166, 199, .3);
   --cal-surface: rgba(6, 14, 25, .5);
@@ -15137,4 +15156,553 @@ html[data-theme="light"] .csw-coin-opt:hover { background: rgba(15, 42, 74, .07)
   .coin-switcher.coin-switcher-ticker { height: 36px; }
   .coin-switcher.coin-switcher-ticker .mt-item { height: 34px; padding: 0 10px; gap: 5px; }
   .coin-switcher.coin-switcher-ticker .mt-val { font-size: 11.5px; }
+}
+
+/* ── 消息推送中心：顶栏铃铛弹层（v2.12.56）────────────────────────
+   卡片 #wechatAlertCard 原样搬进弹层，不再作为主页面底部卡片。
+   外壳复用 .alert-composer + .push-settings-modal 的居中修饰；
+   内层卡片的外观中和掉（弹层 section 自己就是面板），避免双框。 */
+.notification-center-modal > section {
+  width: min(720px, 100%);
+}
+.notification-center-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.notification-center-head b {
+  font-size: 15px;
+}
+.notification-center-head button {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  min-width: 30px;
+  min-height: 30px;
+  padding: 0;
+  border-radius: 8px;
+  font-size: 15px;
+  line-height: 1;
+}
+.notification-center-modal .wechat-alert-card {
+  margin: 0 !important;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
+}
+.notification-center-modal .forecast-head h2 {
+  display: none; /* 弹层头部已有标题，卡片内保留元素供 i18n 更新但不重复显示 */
+}
+
+/* =================================================================
+   Light-mode contrast patch（浅色主题对比度修复，2026-10-04）
+   根因：约 L9705 的共享深色渐变（.metric/.change-card span/.corr-stat/
+   .research-window/.fed-event/.fed-market-signal 等，带 !important）压住了
+   L11929 起没有 !important 的浅色覆盖 → 浅色主题下「深色底 + 主题深色文字」。
+   本块用 !important + 更高特异度压回；auto 主题的浅色分支（prefers light）同步。
+   ================================================================= */
+
+/* —— 1) 内嵌深色面板 → 浅色表面（文字走主题变量，底变浅即自愈） —— */
+html[data-theme="light"] .metric,
+html[data-theme="light"] .change-card span,
+html[data-theme="light"] .chart-periods span,
+html[data-theme="light"] .microstructure-item,
+html[data-theme="light"] .corr-stat,
+html[data-theme="light"] .fear-greed-compact-tile,
+html[data-theme="light"] .research-window,
+html[data-theme="light"] .research-derivatives,
+html[data-theme="light"] .fed-event,
+html[data-theme="light"] .fed-market-signal,
+html[data-theme="light"] .notification-rule-list article,
+html[data-theme="light"] .ms-pin,
+html[data-theme="light"] .signal-validity {
+  background: var(--bg-surface-2) !important;
+  border-color: var(--border-subtle) !important;
+  color: var(--text-primary) !important;
+}
+
+/* —— 2) 信号有效区间：浅底下的方向标签与说明 —— */
+html[data-theme="light"] .signal-validity-label.redeem em { color: var(--bull) !important; }
+html[data-theme="light"] .signal-validity-label.invalid em { color: var(--bear) !important; }
+html[data-theme="light"] .signal-validity-head > span { color: var(--bull) !important; }
+html[data-theme="light"] .signal-validity-foot small { color: var(--text-secondary) !important; }
+
+/* —— 3) 顶部宏观实况条 / 预警条：金色在浅底上换深琥珀 —— */
+html[data-theme="light"] .mt-item.mt-hot .mt-val {
+  color: #8a5f00 !important;
+  text-shadow: none !important;
+}
+html[data-theme="light"] .mt-cd b { color: #96650a !important; }
+html[data-theme="light"] .macro-pin-mode.is-manual { color: #96650a !important; }
+
+/* —— 4) OKX 微观结构卡：琥珀警语 —— */
+html[data-theme="light"] #okxMicrostructureCard .microstructure-alert {
+  color: #8a5f00 !important;
+}
+
+/* —— 5) 信号投影：琥珀时长估算 —— */
+html[data-theme="light"] mark.duration-estimate.duration-caution {
+  color: #7a5200 !important;
+  background: rgba(240, 184, 76, 0.18) !important;
+  box-shadow: inset 0 0 0 1px rgba(154, 98, 0, 0.4) !important;
+}
+
+/* —— 6) 投资日历卡：light 全局 button 白底规则会冲刷卡内按钮的自身配色，
+      这里统一收回到卡级变量（具体色值由下方「浅色卡面」补丁给出）。 —— */
+html[data-theme="light"] .investment-calendar-card button:not(.active) {
+  background: var(--cal-surface) !important;
+  border-color: var(--cal-line-2) !important;
+  color: var(--cal-text-2) !important;
+}
+html[data-theme="light"] .investment-calendar-card button:not(.active):hover {
+  color: var(--cal-text) !important;
+  border-color: var(--cal-accent) !important;
+}
+html[data-theme="light"] .investment-calendar-card .ic-tz-btn.active {
+  color: var(--cal-text) !important;
+  border-color: #5b3ec4 !important;
+  background: rgba(91, 62, 196, 0.12) !important;
+}
+/* 「更换」浮层（.macro-picker.ic-menu）同样自带一份 --cal-*，随卡一起变浅 */
+html[data-theme="light"] .macro-picker.ic-menu button:not(.active) {
+  background: transparent !important;
+  color: var(--cal-accent) !important;
+}
+
+/* —— 7) KRONOS 卡：硬编码红/绿大数字在浅底上对比不足 —— */
+html[data-theme="light"] .kf-backtest-card.kf-bt-good .kf-backtest-value { color: var(--bull) !important; }
+html[data-theme="light"] .kf-backtest-card.kf-bt-bad .kf-backtest-value { color: var(--bear) !important; }
+html[data-theme="light"] .kf-refresh-hint { color: var(--text-secondary) !important; }
+
+/* —— 8) 强平计算器「计算」按钮：浅紫渐变端白字对比不足（仅浅色主题加深） —— */
+html[data-theme="light"] .liq-prob-actions .liq-prob-compute {
+  background: linear-gradient(135deg, #6f58ee, #5b46dd 46%, #4736c4) !important;
+  color: #fff !important;
+}
+
+/* —— 9) 补充修复（第二轮）： —— */
+/* 日历卡标题/描述被 html[data-theme="light"] .card h2/p 压成深色字 → 深卡上不可读，恢复 --cal-* */
+html[data-theme="light"] .investment-calendar-card .ic-title h2 { color: var(--cal-text) !important; }
+html[data-theme="light"] .investment-calendar-card .ic-title p { color: var(--cal-text-2) !important; }
+/* 关注宏观事件卡的倒计时行：深色半透明底在浅色下换浅底 */
+html[data-theme="light"] .ms-pin-when {
+  background: var(--bg-elevated) !important;
+}
+/* 指标明细「看多/偏弱」小徽标：浅底下 --bull 不够 4.5，加深一档 */
+html[data-theme="light"] .badge.bull {
+  color: #00584a !important;
+  background: rgba(0, 212, 170, 0.1) !important;
+}
+
+/* —— auto 主题（跟随系统浅色）同步以上修复 —— */
+@media (prefers-color-scheme: light) {
+  html[data-theme="auto"] .investment-calendar-card .ic-title h2 { color: var(--cal-text) !important; }
+  html[data-theme="auto"] .investment-calendar-card .ic-title p { color: var(--cal-text-2) !important; }
+  html[data-theme="auto"] .ms-pin-when { background: var(--bg-elevated) !important; }
+  html[data-theme="auto"] .badge.bull {
+    color: #00584a !important;
+    background: rgba(0, 212, 170, 0.1) !important;
+  }
+}
+
+/* —— auto 主题（跟随系统浅色）同步第 1–8 块 —— */
+@media (prefers-color-scheme: light) {
+  html[data-theme="auto"] .metric,
+  html[data-theme="auto"] .change-card span,
+  html[data-theme="auto"] .chart-periods span,
+  html[data-theme="auto"] .microstructure-item,
+  html[data-theme="auto"] .corr-stat,
+  html[data-theme="auto"] .fear-greed-compact-tile,
+  html[data-theme="auto"] .research-window,
+  html[data-theme="auto"] .research-derivatives,
+  html[data-theme="auto"] .fed-event,
+  html[data-theme="auto"] .fed-market-signal,
+  html[data-theme="auto"] .notification-rule-list article,
+  html[data-theme="auto"] .ms-pin,
+  html[data-theme="auto"] .signal-validity {
+    background: var(--bg-surface-2) !important;
+    border-color: var(--border-subtle) !important;
+    color: var(--text-primary) !important;
+  }
+  html[data-theme="auto"] .signal-validity-label.redeem em { color: var(--bull) !important; }
+  html[data-theme="auto"] .signal-validity-label.invalid em { color: var(--bear) !important; }
+  html[data-theme="auto"] .signal-validity-head > span { color: var(--bull) !important; }
+  html[data-theme="auto"] .signal-validity-foot small { color: var(--text-secondary) !important; }
+  html[data-theme="auto"] .mt-item.mt-hot .mt-val { color: #8a5f00 !important; text-shadow: none !important; }
+  html[data-theme="auto"] .mt-cd b { color: #96650a !important; }
+  html[data-theme="auto"] .macro-pin-mode.is-manual { color: #96650a !important; }
+  html[data-theme="auto"] #okxMicrostructureCard .microstructure-alert { color: #8a5f00 !important; }
+  html[data-theme="auto"] mark.duration-estimate.duration-caution {
+    color: #7a5200 !important;
+    background: rgba(240, 184, 76, 0.18) !important;
+    box-shadow: inset 0 0 0 1px rgba(154, 98, 0, 0.4) !important;
+  }
+  html[data-theme="auto"] .investment-calendar-card button:not(.active) {
+    background: var(--cal-surface) !important;
+    border-color: var(--cal-line-2) !important;
+    color: var(--cal-text-2) !important;
+  }
+  html[data-theme="auto"] .investment-calendar-card button:not(.active):hover {
+    color: var(--cal-text) !important;
+    border-color: var(--cal-accent) !important;
+  }
+  html[data-theme="auto"] .investment-calendar-card .ic-tz-btn.active {
+    color: var(--cal-text) !important;
+    border-color: #5b3ec4 !important;
+    background: rgba(91, 62, 196, 0.12) !important;
+  }
+  html[data-theme="auto"] .macro-picker.ic-menu button:not(.active) {
+    background: transparent !important;
+    color: var(--cal-accent) !important;
+  }
+  html[data-theme="auto"] .kf-backtest-card.kf-bt-good .kf-backtest-value { color: var(--bull) !important; }
+  html[data-theme="auto"] .kf-backtest-card.kf-bt-bad .kf-backtest-value { color: var(--bear) !important; }
+  html[data-theme="auto"] .kf-refresh-hint { color: var(--text-secondary) !important; }
+  html[data-theme="auto"] .liq-prob-actions .liq-prob-compute {
+    background: linear-gradient(135deg, #6f58ee, #5b46dd 46%, #4736c4) !important;
+    color: #fff !important;
+  }
+}
+
+/* ==========================================================================
+   宏观事件中枢（.investment-calendar-card）：浅色主题改为浅色卡面
+   —— 该卡原本是「强制深色」设计：卡底深色渐变（!important）+ 卡级 --cal-*
+      变量锁定浅字。浅色主题下整卡仍是深底，与周围卡片割裂。
+      这里把卡底与卡级变量一起翻成浅色系，卡内 90% 的样式走变量，自动跟随；
+      剩下的硬编码色（下拉菜单、国旗底、分类徽章等）逐条覆盖。
+   深色主题不受影响（本块全部限定在 light / auto-light 作用域内）。
+   ========================================================================== */
+
+/* —— 卡面本体 + 卡级变量重映射 —— */
+html[data-theme="light"] .investment-calendar-card {
+  background: linear-gradient(145deg, #ffffff, #f2f6fa) !important;
+  border-color: rgba(0, 107, 143, 0.26) !important;
+  box-shadow: 0 10px 30px rgba(20, 40, 66, 0.06) !important;
+  --cal-text: #162235;
+  --cal-text-2: #43566d;
+  --cal-text-3: #566779;
+  --cal-line: rgba(22, 34, 53, 0.14);
+  --cal-line-2: rgba(22, 34, 53, 0.26);
+  --cal-surface: #f5f8fb;
+  --cal-surface-2: rgba(22, 34, 53, 0.05);
+  --cal-bull: #007a66;
+  --cal-bear: #b21f3a;
+  --cal-warn: #9b6200;
+  --cal-accent: #006b8f;
+}
+
+/* —— 时间范围 chips：选中态青底改深青 + 白字（原深字对比不足） —— */
+html[data-theme="light"] .investment-calendar-card .ic-range.active,
+html[data-theme="light"] .investment-calendar-card .ic-range-icon.active {
+  color: #fff !important;
+  background: var(--cal-accent) !important;
+  border-color: var(--cal-accent) !important;
+  box-shadow: none !important;
+}
+
+/* —— 来源徽标 / 筛选器开关 / 已选下拉：半透明青底改深青系 —— */
+html[data-theme="light"] .investment-calendar-card .ic-source,
+html[data-theme="light"] .investment-calendar-card .ic-filter-toggle {
+  color: var(--cal-accent) !important;
+  background: rgba(0, 107, 143, 0.08) !important;
+  border-color: rgba(0, 107, 143, 0.3) !important;
+}
+html[data-theme="light"] .investment-calendar-card .ic-filter-toggle:hover {
+  background: rgba(0, 107, 143, 0.14) !important;
+}
+html[data-theme="light"] .investment-calendar-card .ic-select.has-value {
+  color: var(--cal-accent) !important;
+  border-color: rgba(0, 107, 143, 0.45) !important;
+  background: rgba(0, 107, 143, 0.07) !important;
+}
+
+/* —— 下拉菜单：外壳原为硬编码 #0b1626 —— */
+html[data-theme="light"] .investment-calendar-card .ic-menu,
+html[data-theme="light"] .macro-picker.ic-menu {
+  background: #ffffff !important;
+  border-color: var(--cal-line-2) !important;
+  box-shadow: 0 18px 40px rgba(20, 40, 66, 0.14) !important;
+}
+html[data-theme="light"] .investment-calendar-card .ic-menu-head,
+html[data-theme="light"] .macro-picker.ic-menu .ic-menu-head {
+  background: rgba(22, 34, 53, 0.03) !important;
+  border-bottom-color: var(--cal-line) !important;
+}
+html[data-theme="light"] .investment-calendar-card .ic-opt input,
+html[data-theme="light"] .macro-picker.ic-menu .ic-opt input {
+  accent-color: #006b8f;
+}
+/* 「更换」浮层自带一份 --cal-*，跟着一起翻浅 */
+html[data-theme="light"] .macro-picker.ic-menu {
+  --cal-text: #162235;
+  --cal-text-2: #43566d;
+  --cal-text-3: #566779;
+  --cal-line: rgba(22, 34, 53, 0.14);
+  --cal-line-2: rgba(22, 34, 53, 0.26);
+  --cal-surface: #f5f8fb;
+  --cal-surface-2: rgba(22, 34, 53, 0.05);
+  --cal-bull: #007a66;
+  --cal-bear: #b21f3a;
+  --cal-warn: #9b6200;
+  --cal-accent: #006b8f;
+}
+
+/* —— 国旗胶囊 / 日期输入：原半透明白底在浅卡上不可见 —— */
+html[data-theme="light"] .investment-calendar-card .cal-flag {
+  background: rgba(22, 34, 53, 0.05) !important;
+  border-color: rgba(22, 34, 53, 0.12) !important;
+}
+html[data-theme="light"] .investment-calendar-card .ic-custom input[type="date"] {
+  color-scheme: light !important;
+}
+
+/* —— 分类徽章：原亮色（#8ab6ff / #ffcb69 …）在浅底上对比不足，各降一档 —— */
+html[data-theme="light"] .investment-calendar-card .cal-cat.cat-macro {
+  color: #1b4fa8 !important;
+  background: rgba(59, 130, 246, 0.12) !important;
+  border-color: rgba(59, 130, 246, 0.34) !important;
+}
+html[data-theme="light"] .investment-calendar-card .cal-cat.cat-liquidity {
+  color: #8a5e00 !important;
+  background: rgba(245, 177, 48, 0.15) !important;
+  border-color: rgba(245, 177, 48, 0.4) !important;
+}
+html[data-theme="light"] .investment-calendar-card .cal-cat.cat-energy {
+  color: #00695f !important;
+  background: rgba(20, 184, 166, 0.14) !important;
+  border-color: rgba(20, 184, 166, 0.38) !important;
+}
+html[data-theme="light"] .investment-calendar-card .cal-cat.cat-risk {
+  color: #5b3ec4 !important;
+  background: rgba(139, 92, 246, 0.13) !important;
+  border-color: rgba(139, 92, 246, 0.36) !important;
+}
+html[data-theme="light"] .investment-calendar-card .cal-cat.cat-crypto,
+html[data-theme="light"] .investment-calendar-card .cal-cat.cat-chain {
+  color: #8a4b00 !important;
+  background: rgba(247, 147, 26, 0.15) !important;
+  border-color: rgba(247, 147, 26, 0.42) !important;
+}
+
+/* —— 「今天」徽标：琥珀底上的深字改白字 —— */
+html[data-theme="light"] .investment-calendar-card .cal-day-today {
+  color: #fff !important;
+}
+/* 「现在」分隔线：徽标描边/底色改用深琥珀 */
+html[data-theme="light"] .investment-calendar-card .cal-now span {
+  border-color: rgba(155, 98, 0, 0.45) !important;
+  background: rgba(245, 177, 48, 0.16) !important;
+}
+
+/* —— 勾选框里的对勾：深绿底上改白勾 —— */
+html[data-theme="light"] .investment-calendar-card .cal-pick input:checked + .cal-pick-ui {
+  background: var(--cal-bull) !important;
+  border-color: var(--cal-bull) !important;
+}
+html[data-theme="light"] .investment-calendar-card .cal-pick input:checked + .cal-pick-ui::after {
+  border-left-color: #fff !important;
+  border-bottom-color: #fff !important;
+}
+
+/* —— 「继续展开 N 条」按钮：青底改深青 —— */
+html[data-theme="light"] .investment-calendar-card .ic-list-more button,
+html[data-theme="light"] .investment-calendar-card .ic-more-btn {
+  color: var(--cal-accent) !important;
+  background: rgba(0, 107, 143, 0.08) !important;
+  border-color: rgba(0, 107, 143, 0.42) !important;
+}
+html[data-theme="light"] .investment-calendar-card .ic-list-more button:hover,
+html[data-theme="light"] .investment-calendar-card .ic-more-btn:hover {
+  background: rgba(0, 107, 143, 0.14) !important;
+  border-color: rgba(0, 107, 143, 0.7) !important;
+}
+
+/* —— 事件行状态底：淡红/淡绿保留，只把描边加深一点保持可辨 —— */
+html[data-theme="light"] .investment-calendar-card .cal-event.is-hot {
+  background: rgba(178, 31, 58, 0.07) !important;
+  border-color: rgba(178, 31, 58, 0.24) !important;
+}
+html[data-theme="light"] .investment-calendar-card .cal-event.is-picked {
+  background: rgba(0, 122, 102, 0.09) !important;
+  border-color: rgba(0, 122, 102, 0.3) !important;
+}
+html[data-theme="light"] .investment-calendar-card .ic-risk.is-hot {
+  background: rgba(178, 31, 58, 0.08) !important;
+  border-color: rgba(178, 31, 58, 0.28) !important;
+}
+html[data-theme="light"] .investment-calendar-card .ic-risk.is-safe {
+  background: rgba(0, 122, 102, 0.08) !important;
+  border-color: rgba(0, 122, 102, 0.26) !important;
+}
+
+/* —— 影响矩阵单元格 —— */
+html[data-theme="light"] .investment-calendar-card .ic-impact-matrix td.bull {
+  color: var(--cal-bull) !important;
+  background: rgba(0, 122, 102, 0.1) !important;
+}
+html[data-theme="light"] .investment-calendar-card .ic-impact-matrix td.bear {
+  color: var(--cal-bear) !important;
+  background: rgba(178, 31, 58, 0.1) !important;
+}
+html[data-theme="light"] .investment-calendar-card .ic-impact-matrix td.flat {
+  color: var(--cal-text-3) !important;
+  background: rgba(22, 34, 53, 0.05) !important;
+}
+
+/* —— auto 主题跟随系统浅色时同步 —— */
+@media (prefers-color-scheme: light) {
+  html[data-theme="auto"] .investment-calendar-card {
+    background: linear-gradient(145deg, #ffffff, #f2f6fa) !important;
+    border-color: rgba(0, 107, 143, 0.26) !important;
+    box-shadow: 0 10px 30px rgba(20, 40, 66, 0.06) !important;
+    --cal-text: #162235;
+    --cal-text-2: #43566d;
+    --cal-text-3: #566779;
+    --cal-line: rgba(22, 34, 53, 0.14);
+    --cal-line-2: rgba(22, 34, 53, 0.26);
+    --cal-surface: #f5f8fb;
+    --cal-surface-2: rgba(22, 34, 53, 0.05);
+    --cal-bull: #007a66;
+    --cal-bear: #b21f3a;
+    --cal-warn: #9b6200;
+    --cal-accent: #006b8f;
+  }
+  html[data-theme="auto"] .investment-calendar-card .ic-range.active,
+  html[data-theme="auto"] .investment-calendar-card .ic-range-icon.active {
+    color: #fff !important;
+    background: var(--cal-accent) !important;
+    border-color: var(--cal-accent) !important;
+    box-shadow: none !important;
+  }
+  html[data-theme="auto"] .investment-calendar-card .ic-source,
+  html[data-theme="auto"] .investment-calendar-card .ic-filter-toggle {
+    color: var(--cal-accent) !important;
+    background: rgba(0, 107, 143, 0.08) !important;
+    border-color: rgba(0, 107, 143, 0.3) !important;
+  }
+  html[data-theme="auto"] .investment-calendar-card .ic-filter-toggle:hover {
+    background: rgba(0, 107, 143, 0.14) !important;
+  }
+  html[data-theme="auto"] .investment-calendar-card .ic-select.has-value {
+    color: var(--cal-accent) !important;
+    border-color: rgba(0, 107, 143, 0.45) !important;
+    background: rgba(0, 107, 143, 0.07) !important;
+  }
+  html[data-theme="auto"] .investment-calendar-card .ic-menu,
+  html[data-theme="auto"] .macro-picker.ic-menu {
+    background: #ffffff !important;
+    border-color: var(--cal-line-2) !important;
+    box-shadow: 0 18px 40px rgba(20, 40, 66, 0.14) !important;
+  }
+  html[data-theme="auto"] .investment-calendar-card .ic-menu-head,
+  html[data-theme="auto"] .macro-picker.ic-menu .ic-menu-head {
+    background: rgba(22, 34, 53, 0.03) !important;
+    border-bottom-color: var(--cal-line) !important;
+  }
+  html[data-theme="auto"] .investment-calendar-card .ic-opt input,
+  html[data-theme="auto"] .macro-picker.ic-menu .ic-opt input {
+    accent-color: #006b8f;
+  }
+  html[data-theme="auto"] .macro-picker.ic-menu {
+    --cal-text: #162235;
+    --cal-text-2: #43566d;
+    --cal-text-3: #566779;
+    --cal-line: rgba(22, 34, 53, 0.14);
+    --cal-line-2: rgba(22, 34, 53, 0.26);
+    --cal-surface: #f5f8fb;
+    --cal-surface-2: rgba(22, 34, 53, 0.05);
+    --cal-bull: #007a66;
+    --cal-bear: #b21f3a;
+    --cal-warn: #9b6200;
+    --cal-accent: #006b8f;
+  }
+  html[data-theme="auto"] .investment-calendar-card .cal-flag {
+    background: rgba(22, 34, 53, 0.05) !important;
+    border-color: rgba(22, 34, 53, 0.12) !important;
+  }
+  html[data-theme="auto"] .investment-calendar-card .ic-custom input[type="date"] {
+    color-scheme: light !important;
+  }
+  html[data-theme="auto"] .investment-calendar-card .cal-cat.cat-macro {
+    color: #1b4fa8 !important;
+    background: rgba(59, 130, 246, 0.12) !important;
+    border-color: rgba(59, 130, 246, 0.34) !important;
+  }
+  html[data-theme="auto"] .investment-calendar-card .cal-cat.cat-liquidity {
+    color: #8a5e00 !important;
+    background: rgba(245, 177, 48, 0.15) !important;
+    border-color: rgba(245, 177, 48, 0.4) !important;
+  }
+  html[data-theme="auto"] .investment-calendar-card .cal-cat.cat-energy {
+    color: #00695f !important;
+    background: rgba(20, 184, 166, 0.14) !important;
+    border-color: rgba(20, 184, 166, 0.38) !important;
+  }
+  html[data-theme="auto"] .investment-calendar-card .cal-cat.cat-risk {
+    color: #5b3ec4 !important;
+    background: rgba(139, 92, 246, 0.13) !important;
+    border-color: rgba(139, 92, 246, 0.36) !important;
+  }
+  html[data-theme="auto"] .investment-calendar-card .cal-cat.cat-crypto,
+  html[data-theme="auto"] .investment-calendar-card .cal-cat.cat-chain {
+    color: #8a4b00 !important;
+    background: rgba(247, 147, 26, 0.15) !important;
+    border-color: rgba(247, 147, 26, 0.42) !important;
+  }
+  html[data-theme="auto"] .investment-calendar-card .cal-day-today { color: #fff !important; }
+  html[data-theme="auto"] .investment-calendar-card .cal-now span {
+    border-color: rgba(155, 98, 0, 0.45) !important;
+    background: rgba(245, 177, 48, 0.16) !important;
+  }
+  html[data-theme="auto"] .investment-calendar-card .cal-pick input:checked + .cal-pick-ui {
+    background: var(--cal-bull) !important;
+    border-color: var(--cal-bull) !important;
+  }
+  html[data-theme="auto"] .investment-calendar-card .cal-pick input:checked + .cal-pick-ui::after {
+    border-left-color: #fff !important;
+    border-bottom-color: #fff !important;
+  }
+  html[data-theme="auto"] .investment-calendar-card .ic-list-more button,
+  html[data-theme="auto"] .investment-calendar-card .ic-more-btn {
+    color: var(--cal-accent) !important;
+    background: rgba(0, 107, 143, 0.08) !important;
+    border-color: rgba(0, 107, 143, 0.42) !important;
+  }
+  html[data-theme="auto"] .investment-calendar-card .ic-list-more button:hover,
+  html[data-theme="auto"] .investment-calendar-card .ic-more-btn:hover {
+    background: rgba(0, 107, 143, 0.14) !important;
+    border-color: rgba(0, 107, 143, 0.7) !important;
+  }
+  html[data-theme="auto"] .investment-calendar-card .cal-event.is-hot {
+    background: rgba(178, 31, 58, 0.07) !important;
+    border-color: rgba(178, 31, 58, 0.24) !important;
+  }
+  html[data-theme="auto"] .investment-calendar-card .cal-event.is-picked {
+    background: rgba(0, 122, 102, 0.09) !important;
+    border-color: rgba(0, 122, 102, 0.3) !important;
+  }
+  html[data-theme="auto"] .investment-calendar-card .ic-risk.is-hot {
+    background: rgba(178, 31, 58, 0.08) !important;
+    border-color: rgba(178, 31, 58, 0.28) !important;
+  }
+  html[data-theme="auto"] .investment-calendar-card .ic-risk.is-safe {
+    background: rgba(0, 122, 102, 0.08) !important;
+    border-color: rgba(0, 122, 102, 0.26) !important;
+  }
+  html[data-theme="auto"] .investment-calendar-card .ic-impact-matrix td.bull {
+    color: var(--cal-bull) !important;
+    background: rgba(0, 122, 102, 0.1) !important;
+  }
+  html[data-theme="auto"] .investment-calendar-card .ic-impact-matrix td.bear {
+    color: var(--cal-bear) !important;
+    background: rgba(178, 31, 58, 0.1) !important;
+  }
+  html[data-theme="auto"] .investment-calendar-card .ic-impact-matrix td.flat {
+    color: var(--cal-text-3) !important;
+    background: rgba(22, 34, 53, 0.05) !important;
+  }
 }

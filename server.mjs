@@ -3068,9 +3068,10 @@ http.createServer((req, res) => {
     const user=await requireAlertUser(req,res); if(!user)return;
     try { if(req.method==='PUT'){await alertStore.setSendKey(user.id,(await readJson(req)).sendKey);json(res,204,{});return;} if(req.method==='DELETE'){await alertStore.deleteSendKey(user.id);json(res,204,{});return;} json(res,405,{error:'PUT or DELETE required'}); } catch(error) { json(res,error.statusCode||500,{error:error.message}); } return;
   }
-  if (url.pathname === '/api/alerts/test' && req.method === 'POST') {
+  // /api/alerts/test= 设置里的测试推送；/api/alerts/notify= 前端自定义消息（规则真实触发走 test:false）。
+  if ((url.pathname === '/api/alerts/test' || url.pathname === '/api/alerts/notify') && req.method === 'POST') {
     const user=await requireAlertUser(req,res); if(!user)return;
-    try { json(res,200,await alertStore.testPush(user.id,(await readJson(req)).price)); } catch(error) { json(res,error.statusCode||500,{error:error.message}); } return;
+    try { const body=await readJson(req); json(res,200,await alertStore.testPush(user.id,body.price,{...body,test:url.pathname==='/api/alerts/notify'?body.test!==false:true})); } catch(error) { json(res,error.statusCode||500,{error:error.message}); } return;
   }
   if (url.pathname === '/api/alerts/rules') {
     const user=await requireAlertUser(req,res); if(!user)return;

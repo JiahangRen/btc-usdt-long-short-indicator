@@ -116,7 +116,8 @@ export const CHANNEL_SENDERS = {
   async bark(config, message) {
     const response = await fetchWithTimeout(`${config.serverUrl}/push`, {
       method: 'POST', headers: { 'content-type': 'application/json; charset=utf-8' },
-      body: JSON.stringify({ device_key: config.deviceKey, title: message.title, body: message.body, group: 'btc-indicator' }),
+      // v2.12.62：Bark 无 markdown 渲染，降级成纯文本（剥 ** 加粗 / 链接转「文字：URL」）。
+      body: JSON.stringify({ device_key: config.deviceKey, title: message.title, body: `${message.title}\n${plainFromMarkdown(message.body)}`, group: 'btc-indicator' }),
     });
     const payload = await response.json().catch(() => ({}));
     return { ok: response.ok && Number(payload.code) === 200, status: response.status, payload };
@@ -140,9 +141,14 @@ export const CHANNEL_SENDERS = {
       const sign = encodeURIComponent(SIGN_HELPERS.dingtalkSign(config.secret, timestamp));
       url += `${url.includes('?') ? '&' : '?'}timestamp=${timestamp}&sign=${sign}`;
     }
+    // v2.12.62：钉钉从 text 改走 markdown 消息，** 加粗与链接才得以渲染。
+    // v2.12.64：换行策略改为段落空行（\n\n）。行尾双空格硬换行在钉钉客户端不稳定，
+    // 单 \n 会被折叠成空格导致所有字段挤成一行；\n\n 每个字段独占一行、行间留白，渲染稳定。
+    // 过滤空行避免出现连续空段。
+    const text = `#### ${message.title}\n\n${message.body.split('\n').filter(line => line.trim()).join('\n\n')}`;
     const response = await fetchWithTimeout(url, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ msgtype: 'text', text: { content: `${message.title}\n${message.body}` } }),
+      body: JSON.stringify({ msgtype: 'markdown', markdown: { title: message.title, text } }),
     });
     const payload = await response.json().catch(() => ({}));
     return { ok: response.ok && Number(payload.errcode) === 0, status: response.status, payload };
@@ -197,11 +203,31 @@ export function isMaskedConfig(type, input) {
 
 // ---- 消息文案 -------------------------------------------------------------
 // 告警类消息的统一文案组装，本地规则/云端规则/亏损联动共用同一套标题语义。
-export function buildAlertMessage({ categoryLabel = '价格', phrase, target, current, test = false, note = '' } = {}) {
-  const title = test ? `${categoryLabel}告警【测试】 ${phrase}` : `【${categoryLabel}】${phrase}`;
+// 站点链接（v2.12.62）：告警正文末尾附醒目蓝链（钉钉/飞书/Server酱 的 markdown 均渲染为可点蓝色链接）。
+export const SITE_LINK = '[🔗 jeffereyreng.site · 查看实时行情](https://jeffereyreng.site/)';
+// 把 markdown 文案降级成纯文本（Bark 无渲染，** 与 [t](u) 会裸露）。
+export const plainFromMarkdown = s => String(s || '')
+  .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '$1：$2')
+  .replace(/\*\*([^*]+)\*\*/g, '$1')
+  .replace(/(^|\n)#{1,6}\s*/g, '$1');
+export function buildAlertMessage({ categoryLabel = '价格', phrase, target, current, test = false, note = '', direction = null } = {}) {
+  // categoryLabel 允许传 '价格' 或 '价格告警'；统一成带「告警」的标签，避免重复（价格告警告警）或缺失（【价格】）。
+  const label = categoryLabel.endsWith('告警') ? categoryLabel : `${categoryLabel}告警`;
+  // 红跌绿涨色标（v2.12.63）：
+  //   优先用显式 direction（'up'绿/'down'红/'none'中立）—— 由调用方按告警语义给出，最准确；
+  //   未传时回退到短语方向词推断（兼容旧调用方）。爆仓语义修正：多头爆仓=价格下跌=红、空头爆仓=价格上涨=绿，
+  //   旧正则把「接近多头爆仓价」误判成绿色，本次一并修掉。
+  const dot = direction === 'up' ? '🟢'
+    : direction === 'down' ? '🔴'
+    : /空头爆仓|short liquidation|涨破|上涨|上破|升穿|逼近空头/.test(phrase) ? '🟢'
+    : /多头爆仓|long liquidation|跌破|下跌|下破|回落|逼近多头/.test(phrase) ? '🔴'
+    : '⚠️';
+  const title = test ? `${label}【测试】${dot} ${phrase}` : `【${label}】${dot} ${phrase}`;
   const short = target ? `BTC ${target} USDT` : `BTC 当前价格 ${current} USDT`;
-  const bodyParts = [title, '', `${phrase} USDT`];
-  if (current) bodyParts.push(`触发时市价 ${current} USDT`);
-  if (note) bodyParts.push('', note);
+  // note（客户端组装的完整明细）自带站点链接，不再重复拼接标题/短语；
+  // 无 note 时就地组装：当前价 → 站点链接（触发短语只保留在标题里，避免正文重复）。
+  const bodyParts = note
+    ? [note]
+    : [...(current ? [`当前价：**${current} USDT**`] : []), '', SITE_LINK];
   return { title, short, body: bodyParts.join('\n') };
 }

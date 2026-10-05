@@ -82,15 +82,26 @@ window.BTCNotification = {
         const coinPairPlain = () => (getCoin() === "BTC" ? "BTC/USDT" : getCoin() + "/USDT");
         const coinMark = () => (getCoin() === "BTC" ? "₿ " : "");
 
+        const LOCAL_ONLY_KINDS = ["round_number", "custom_grid", "volatility"];
+        const isValidRule = (x) =>
+          x && x.id && (Number(x.targetPrice) > 0 || LOCAL_ONLY_KINDS.includes(x.kind) || Number(x.basePrice) > 0 || Number(x.step) > 0 || Number(x.windowMinutes) > 0);
         const sanitize = (arr) =>
           (Array.isArray(arr) ? arr : [])
-            .filter((x) => x && x.id && Number(x.targetPrice) > 0)
+            .filter(isValidRule)
             .slice(0, 30)
             .map((x) => ({
               ...x,
               kind: x.kind || "price_reached",
               repeat: x.repeat === false ? false : true,
               cooldownMinutes: Math.max(1, Number(x.cooldownMinutes) || 5),
+              // 持久化新模式的评价状态，避免刷新/重载后重复触发或丢失进度
+              step: Number.isFinite(Number(x.step)) ? Number(x.step) : undefined,
+              basePrice: Number.isFinite(Number(x.basePrice)) ? Number(x.basePrice) : undefined,
+              windowMinutes: Number.isFinite(Number(x.windowMinutes)) ? Number(x.windowMinutes) : undefined,
+              threshold: Number.isFinite(Number(x.threshold)) ? Number(x.threshold) : undefined,
+              direction: x.direction || "both",
+              _roundLevel: Number.isFinite(Number(x._roundLevel)) ? Number(x._roundLevel) : undefined,
+              _gridIdx: Number.isFinite(Number(x._gridIdx)) ? Number(x._gridIdx) : undefined,
             }));
 
         const loadRules = async () => {
@@ -162,11 +173,7 @@ window.BTCNotification = {
         pushSettings = payload.settings || pushSettings;
       };
 
-      const card = document.createElement("section"),
-        details = document.createElement("details");
-      details.id = "wechatAlertDetails";
-      details.className = "position-details alert-details";
-      details.innerHTML = `<summary>${tx("消息推送", "Message alerts")}</summary>`;
+      const card = document.createElement("section");
       card.id = "wechatAlertCard";
       card.className = "card wechat-alert-card";
       /* v2.10.53 结构：标题行 → 总开关行（右侧「推送设置」入口）→ 推送规则区
@@ -176,7 +183,7 @@ window.BTCNotification = {
         + `<div id="pushMasterBody"><div class="alert-rule-toolbar"><b>${tx("推送规则", "Push rules")}<small>${coinMark()}${coinPairPlain()} · ${tx("永续", "Perpetual")}</small></b><div><button type="button" id="clearLocalAlerts" class="danger">${tx("批量全删", "Delete all")}</button><button type="button" id="openLocalAlert">＋ ${tx("添加预警", "Add alert")}</button></div></div><div id="localAlertList" class="wechat-alert-detail"></div>`
         + `<div id="lossPushSection" class="loss-push-box"><label class="push-switch push-switch-row"><input type="checkbox" id="lossPushEnabled"><span>${tx("亏损推送（联动持仓）", "Loss push (linked to positions)")}</span></label><div class="loss-push-fields"><label>${tx("警告 ROE ≤", "Warn ROE ≤")}<input id="lossWarnRoe" type="number" min="1" max="1000" step="1"></label><label>${tx("推送 ROE ≤", "Push ROE ≤")}<input id="lossLossRoe" type="number" min="1" max="1000" step="1"></label><label>${tx("冷却（分钟）", "Cooldown (min)")}<input id="lossCooldown" type="number" min="1" max="1440" step="1"></label><button type="button" id="lossPushSave">${tx("保存设置", "Save")}</button></div><small>${tx("以「我的持仓」中各笔持仓的保证金收益率（ROE = 价格变动% × 杠杆）计算；任一持仓触发即向所有启用渠道推送。", "Computed from each saved position's ROE (price move % × leverage); any position crossing a threshold pushes to all enabled channels.")}</small></div></div>`
         + `<div id="cloudAlertPanel" class="cloud-alert-panel"></div>`
-        + `<div id="localAlertModal" class="alert-composer" hidden><section><header><b>${tx("添加预警", "Add alert")}</b><button type="button" id="closeLocalAlert">×</button></header><p class="alert-symbol">${coinMark()}<b>${coinPairPlain()} ${tx("永续", "Perpetual")}</b></p><form id="localAlertForm"><label>${tx("预警类型", "Alert type")}<select name="kind"><option value="price_reached">${tx("价格达到", "Price reached")}</option><option value="price_above">${tx("价格上涨至", "Price rises to")}</option><option value="price_below">${tx("价格下跌至", "Price falls to")}</option><option value="long_liquidation">${tx("多头爆仓价", "Long liquidation")}</option><option value="short_liquidation">${tx("空头爆仓价", "Short liquidation")}</option></select></label><label>${tx("价格", "Price")}<span class="mark-price">${tx("市价", "Mark")} <button type="button" id="useLocalMark">--</button></span><input name="target" type="number" step="0.01" min="0" required placeholder="0.00"></label><div class="frequency-toggle"><button type="button" data-local-frequency="once" class="active">${tx("仅一次", "Once")}</button><button type="button" data-local-frequency="repeat">${tx("重复", "Repeat")}</button></div><label id="localCooldown" hidden>${tx("冷却时间（分钟）", "Cooldown (minutes)")}<input name="cooldown" type="number" min="1" step="1" value="5"></label><label class="voice-rule-toggle">${tx("同时语音播报", "Also announce by voice")}<input name="voiceEnabled" type="checkbox"></label><button class="alert-submit">${tx("保存预警", "Save alert")}</button></form></section></div>`
+        + `<div id="localAlertModal" class="alert-composer" hidden><section><header><b id="localAlertModalTitle">${tx("添加预警", "Add alert")}</b><button type="button" id="closeLocalAlert">×</button></header><p class="alert-symbol">${coinMark()}<b>${coinPairPlain()} ${tx("永续", "Perpetual")}</b></p><form id="localAlertForm"><label>${tx("推送模式", "Push mode")}<select name="mode"><option value="price">${tx("价格预警", "Price alert")}</option><option value="round_number">${tx("整数推送", "Round-number")}</option><option value="custom_grid">${tx("自定义推送", "Custom grid")}</option><option value="volatility">${tx("快速挣扎推送", "Volatility")}</option></select></label><div data-mode-fields="price"><label>${tx("预警类型", "Alert type")}<select name="kind"><option value="price_reached">${tx("价格达到", "Price reached")}</option><option value="price_above">${tx("价格上涨至", "Price rises to")}</option><option value="price_below">${tx("价格下跌至", "Price falls to")}</option><option value="long_liquidation">${tx("多头爆仓价", "Long liquidation")}</option><option value="short_liquidation">${tx("空头爆仓价", "Short liquidation")}</option></select></label><label>${tx("价格", "Price")}<span class="mark-price">${tx("市价", "Mark")} <button type="button" id="useLocalMark">--</button></span><input name="target" type="number" step="0.01" min="0" placeholder="0.00"></label><div class="frequency-toggle"><button type="button" data-local-frequency="once" class="active">${tx("仅一次", "Once")}</button><button type="button" data-local-frequency="repeat">${tx("重复", "Repeat")}</button></div></div><div data-mode-fields="round_number" hidden><label>${tx("整数步长", "Round step")}<input name="roundStep" type="number" min="1" step="1" value="100"></label><label>${tx("方向", "Direction")}<select name="roundDir"><option value="both">${tx("任一方向", "Either")}</option><option value="up">${tx("只向上", "Up only")}</option><option value="down">${tx("只向下", "Down only")}</option></select></label></div><div data-mode-fields="custom_grid" hidden><label>${tx("基准价格", "Base price")}<span class="mark-price">${tx("市价", "Mark")} <button type="button" id="useLocalMarkBase">--</button></span><input name="basePrice" type="number" step="0.01" min="0" placeholder="0.00"></label><label>${tx("间隔", "Step")}<input name="gridStep" type="number" min="1" step="1" value="50"></label><label>${tx("方向", "Direction")}<select name="gridDir"><option value="both">${tx("双向", "Both")}</option><option value="up">${tx("只向上", "Up only")}</option><option value="down">${tx("只向下", "Down only")}</option></select></label></div><div data-mode-fields="volatility" hidden><label>${tx("时间窗口（分钟）", "Window (min)")}<input name="volWindow" type="number" min="1" max="120" step="1" value="5"></label><label>${tx("波动阈值（USDT）", "Move threshold (USDT)")}<input name="volThreshold" type="number" min="1" step="1" value="300"></label><label>${tx("方向", "Direction")}<select name="volDir"><option value="both">${tx("双向", "Both")}</option><option value="up">${tx("只涨", "Up only")}</option><option value="down">${tx("只跌", "Down only")}</option></select></label></div><label id="localCooldown" hidden>${tx("冷却时间（分钟）", "Cooldown (minutes)")}<input name="cooldown" type="number" min="1" step="1" value="5"></label><label class="voice-rule-toggle">${tx("同时语音播报", "Also announce by voice")}<input name="voiceEnabled" type="checkbox"></label><button class="alert-submit">${tx("保存预警", "Save alert")}</button></form></section></div>`
         + `<div id="pushSettingsModal" class="alert-composer push-settings-modal" hidden><section><header><b>${tx("推送设置", "Push settings")}</b><button type="button" id="closePushSettings" aria-label="${tx("关闭", "Close")}">×</button></header><p class="push-settings-desc">${tx("每个渠道独立开关：打开后填写 API Key，点「确认并验证」会真实发送一条测试消息；验证通过后输入框自动收起，只留「重新编辑」。", "Each channel has its own switch: turn it on, fill in the API key, then “Save & verify” sends a real test message; inputs collapse once verified.")}</p><div id="pushSettingsBody"></div><div class="push-settings-footer"><button type="button" id="pushTestSend">${tx("发送测试推送（当前市价）", "Send test push (current price)")}</button><button type="button" id="donePushSettings" class="alert-submit">${tx("完成", "Done")}</button></div></section></div>`;
       const submitAlert = card.querySelector(".alert-submit"),
         alertActions = document.createElement("div");
@@ -190,8 +197,48 @@ window.BTCNotification = {
       notice.hidden = true;
       notice.innerHTML = `<section role="dialog" aria-modal="true" aria-labelledby="localRuleNoticeTitle"><header><b id="localRuleNoticeTitle">${tx("规则测试已发送", "Rule test sent")}</b><button type="button" id="closeLocalRuleNotice" aria-label="${tx("关闭", "Close")}">×</button></header><div class="notice-body"><span>✓</span><p>${tx("当前规则测试请求已发送。通知标题会标注“【测试】”，该规则不会被保存，也不会影响已有规则的冷却时间。", "The current-rule test was sent. Its notification is labeled “Test”; this rule is not saved and does not affect existing cooldowns.")}</p></div><button type="button" id="confirmLocalRuleNotice" class="alert-submit">${tx("我知道了", "Got it")}</button></section>`;
       document.body.append(notice);
-      details.append(card);
-      (main.querySelector("footer") || main.lastElementChild).before(details);
+      /* v2.12.56 起：卡片不再是主页面底部卡片，改为顶栏铃铛弹层。
+         外壳复用 .alert-composer + .push-settings-modal 的居中修饰类，
+         内容仍是完整的 #wechatAlertCard（所有设置原样保留）。 */
+      const shell = document.createElement("div");
+      shell.id = "notificationCenterModal";
+      shell.className = "alert-composer push-settings-modal notification-center-modal";
+      shell.hidden = true;
+      shell.innerHTML = `<section><header class="notification-center-head"><b>${tx("消息推送", "Message alerts")}</b><button type="button" id="closeNotificationCenter" aria-label="${tx("关闭", "Close")}">×</button></header></section>`;
+      shell.querySelector("section").append(card);
+      document.body.append(shell);
+      const openCenter = (open) => {
+        shell.hidden = !open;
+      };
+      document.getElementById("closeNotificationCenter").onclick = () => openCenter(false);
+      shell.addEventListener("click", (event) => {
+        if (event.target === shell) openCenter(false); // 点背板关闭
+      });
+      document.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && !shell.hidden) openCenter(false);
+      });
+      /* 顶栏铃铛按钮：插在设置齿轮之前（…全屏 → 主题 → 🔔 → 齿轮）。
+         齿轮由 app.js 的 IIFE 创建，加载时序不保证已就位 → 轮询等它出现。 */
+      const bell = document.createElement("button");
+      bell.id = "notificationBellToggle";
+      bell.type = "button";
+      bell.title = tx("消息推送", "Message alerts");
+      bell.setAttribute("aria-haspopup", "dialog");
+      bell.innerHTML = `<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>`;
+      bell.addEventListener("click", (event) => {
+        // 顶栏 document 级收起监听会把刚打开的浮层立刻关掉，必须阻断。
+        event.stopPropagation();
+        openCenter(true);
+      });
+      const placeBell = (tries = 0) => {
+        if (document.getElementById("notificationBellToggle")) return;
+        const controls = document.querySelector("main > header .controls"),
+          gear = document.getElementById("headerSettingsToggle");
+        if (controls && gear && gear.parentElement === controls) gear.before(bell);
+        else if (tries < 40) setTimeout(() => placeBell(tries + 1), 250);
+        else if (controls) controls.append(bell);
+      };
+      placeBell();
       const stateEl = $("localAlertState"),
         description = $("localAlertDescription"),
         master = $("pushMasterSwitch"),
@@ -202,8 +249,37 @@ window.BTCNotification = {
         list = $("localAlertList"),
         modal = $("localAlertModal"),
         form = $("localAlertForm");
+      let editingId = null; // 当前正在编辑的规则 id；null = 新建模式
       const localKey = () => (sessionStorage.getItem(keyStore) || "").trim(),
         localKeyOk = () => /^SCT/i.test(localKey());
+      // 「推送就绪」= 本机 Server酱有效，或已登录且云端有启用渠道（钉钉/飞书/Bark/Webhook 均算）。
+      const cloudReady = () =>
+        Boolean(cloudSession.loggedIn) &&
+        cloudChannels.some((c) => c && c.enabled);
+      // 云端 buildAlertMessage 的 categoryLabel 是短词（'价格'→'价格告警'）。
+      // v2.12.63：整数按方向拆分（up→整数上破 / down→整数下破），价格按方向拆分（上涨/下跌）。
+      const cloudCategoryLabel = (kind, up) =>
+        ({
+          long_liquidation: "爆仓",
+          short_liquidation: "爆仓",
+          round_number: up === true ? "整数上破" : up === false ? "整数下破" : "整数",
+          custom_grid: "网格",
+          volatility: "波动",
+          price_above: "上涨",
+          price_below: "下跌",
+        })[kind] || "价格";
+      // 无本机 SendKey 时走云端多渠道发送（服务端向所有启用渠道投递）。
+      // 走 /api/alerts/notify（语义=自定义消息），test:false 表示真实触发、标题不挂【测试】。
+      const sendCloudCustom = async (payload) => {
+        const response = await fetch("/api/alerts/notify", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || "云端推送失败");
+        return data;
+      };
       const showRuleNotice = (open) => {
         notice.hidden = !open;
       };
@@ -219,11 +295,27 @@ window.BTCNotification = {
           price_below: tx("价格下跌至", "Price falls to"),
           long_liquidation: tx("多头爆仓价", "Long liquidation"),
           short_liquidation: tx("空头爆仓价", "Short liquidation"),
+          round_number: tx("整数推送", "Round-number"),
+          custom_grid: tx("自定义推送", "Custom grid"),
+          volatility: tx("快速挣扎", "Volatility"),
         })[kind] || kind;
-      const alertCategory = (kind) =>
+      // v2.12.63：类别标签按方向细分，使「整数上破告警 / 整数下破告警」「上涨告警 / 下跌告警」一眼可辨。
+      const alertCategory = (kind, up) =>
         kind === "long_liquidation" || kind === "short_liquidation"
           ? tx("爆仓告警", "Liquidation alert")
-          : tx("价格告警", "Price alert");
+          : kind === "round_number"
+            ? up === true ? tx("整数上破告警", "Round-up alert")
+              : up === false ? tx("整数下破告警", "Round-down alert")
+              : tx("整数告警", "Round alert")
+          : kind === "custom_grid"
+            ? tx("网格告警", "Grid alert")
+            : kind === "volatility"
+              ? tx("波动告警", "Volatility alert")
+              : kind === "price_above"
+                ? tx("上涨告警", "Price-up alert")
+                : kind === "price_below"
+                  ? tx("下跌告警", "Price-down alert")
+                  : tx("价格告警", "Price alert");
       const alertPhrase = (kind, priceText) =>
         getLang() === "zh"
           ? ({
@@ -247,10 +339,26 @@ window.BTCNotification = {
           ? `【${tx("爆仓", "Liquidation")}】${phrase}`
           : `【${tx("价格", "Price")}】${phrase}`;
       };
-      const triggerText = (rule) =>
-        rule.lastTriggeredAt
-          ? `${new Date(rule.lastTriggeredAt).toLocaleString(getLang() === "zh" ? "zh-CN" : "en-US", { hour12: false })} · ${tx("实时", "Live")} ${Number.isFinite(Number(rule.lastTriggeredPrice)) ? `${fmt(rule.lastTriggeredPrice)} USDT` : "--"}`
-          : "";
+      const triggerText = (rule, withLevel = false) => {
+        if (!rule.lastTriggeredAt) return "";
+        const time = timeText(rule.lastTriggeredAt),
+          live = `${tx("实时", "Live")} ${Number.isFinite(Number(rule.lastTriggeredPrice)) ? `${fmt(rule.lastTriggeredPrice)} USDT` : "--"}`;
+        if (!withLevel || !Number.isFinite(Number(rule._eventLevel))) return `${time} · ${live}`;
+        const lvl = fmt(rule._eventLevel),
+          up = rule._eventDir !== "down",
+          arrow = up ? "↑" : "↓",
+          breakWord = up ? tx("上破", "broke up") : tx("下破", "broke down");
+        if (rule.kind === "custom_grid") {
+          const off = rule._eventLevel - rule.basePrice;
+          const offText = Math.abs(off) < 1e-9 ? tx("回到基准", "back to base") : `${off > 0 ? "+" : "-"}${fmt(Math.abs(off))}`;
+          return `${time} · ${arrow} ${tx("命中", "hit")} ${lvl}（${offText}） · ${live}`;
+        }
+        if (rule.kind === "volatility") {
+          const move = Number(rule._eventMove) || 0;
+          return `${time} · ${arrow} ${move >= 0 ? tx("涨", "up") : tx("跌", "down")} ${fmt(Math.abs(move))} · ${live}`;
+        }
+        return `${time} · ${arrow} ${breakWord} ${lvl} · ${live}`;
+      };
 
       // ---- 推送设置弹层：分渠道开关 + 表单（仿 8899 交互） ----
       const editing = {},
@@ -637,9 +745,25 @@ window.BTCNotification = {
             ? rules
                 .map((r) => {
                   const cloudManaged = Boolean(r.cloudManaged),
+                    newMode = isNewMode(r),
                     triggered =
                       !cloudManaged && r.repeat === false && r.lastTriggeredAt;
-                  return `<article class="${cloudManaged ? "cloud-managed-rule" : ""}"><span><b>${coinPairPlain()} ${tx("价格预警", "price alert")}</b><small>${label(r.kind)} ${fmt(r.targetPrice)} · ${r.repeat === false ? tx("仅提醒一次", "Once only") : tx(`重复提醒 · ${r.cooldownMinutes} 分钟冷却`, `Repeat · ${r.cooldownMinutes} min cooldown`)}</small>${triggered ? `<small class="notification-triggered">${tx("已触发执行：", "Triggered: ")}${triggerText(r)}</small>` : ""}</span><em class="${cloudManaged ? "cloud-managed" : triggered ? "flat" : "bull"}">${cloudManaged ? tx("云端接管", "Cloud-managed") : triggered ? tx("已执行", "Executed") : tx("本地触发", "Local")}</em><button type="button" data-remove-local-alert="${r.id}">${tx("删除", "Delete")}</button></article>`;
+                  /* 徽标只标「例外状态」：云端规则是默认形态不再逐行盖章；
+                     已执行（一次性触发）与登录后仍留在本机的规则才值得提示。 */
+                  const badge = triggered
+                    ? `<em class="flat">${tx("已执行", "Executed")}</em>`
+                    : !cloudManaged && cloudSession.loggedIn
+                      ? `<em class="muted">${tx("本地", "Local")}</em>`
+                      : "";
+                  // 新模式为重复型：用「最后触发」行展示时间与命中价，一次性规则沿用「已触发执行」
+                  const lastLine = r.lastTriggeredAt
+                    ? newMode
+                      ? `<small class="notification-triggered">${tx("最后触发：", "Last fired: ")}${triggerText(r, true)}</small>`
+                      : triggered
+                        ? `<small class="notification-triggered">${tx("已触发执行：", "Triggered: ")}${triggerText(r)}</small>`
+                        : ""
+                    : "";
+                  return `<article class="${cloudManaged ? "cloud-managed-rule" : ""} ${newMode ? "rule-new-mode" : ""}"><span><b>${coinPairPlain()} ${modeTitle(r)}</b><small>${ruleShort(r)}</small>${lastLine}</span>${badge}<button type="button" class="rule-edit" data-edit-local-alert="${r.id}">${tx("编辑", "Edit")}</button><button type="button" class="rule-test" data-test-local-alert="${r.id}">${tx("测试", "Test")}</button><button type="button" class="rule-remove" data-remove-local-alert="${r.id}">${tx("删除", "Delete")}</button></article>`;
                 })
                 .join("")
             : `<small>${tx("尚未添加推送规则。点击「＋ 添加预警」创建第一条 " + coinPairPlain() + " 规则。", "No push rules yet. Click “Add alert” to create the first " + coinPairPlain() + " rule.")}</small>`
@@ -652,6 +776,34 @@ window.BTCNotification = {
               render();
             }),
         );
+        list.querySelectorAll("[data-edit-local-alert]").forEach(
+          (b) =>
+            (b.onclick = () => {
+              const rule = rules.find((r) => r.id === b.dataset.editLocalAlert);
+              if (rule) openEdit(rule);
+            }),
+        );
+        list.querySelectorAll("[data-test-local-alert]").forEach(
+          (b) =>
+            (b.onclick = async () => {
+              const rule = rules.find((r) => r.id === b.dataset.testLocalAlert);
+              if (!rule) return;
+              const current = price();
+              if (!Number.isFinite(current)) {
+                alert(tx("实时价格尚未加载，请稍后重试。", "Live price not loaded yet, try again shortly."));
+                return;
+              }
+              b.disabled = true;
+              try {
+                await pushRuleTest(current, rule, true);
+                showRuleNotice(true);
+              } catch (error) {
+                alert(error.message);
+              } finally {
+                b.disabled = false;
+              }
+            }),
+        );
         syncSettingsInputs();
         if (!settingsModal.hidden) renderSettings();
       };
@@ -662,7 +814,8 @@ window.BTCNotification = {
           try { render(); } catch (e) {}
           const setText = (sel, s, e) => { const el = document.querySelector(sel); if (el) el.textContent = tx(s, e); };
           setText("#wechatAlertCard .forecast-head h2", "消息推送", "Message alerts");
-          setText("#wechatAlertDetails summary", "消息推送", "Message alerts");
+          setText("#notificationCenterModal .notification-center-head b", "消息推送", "Message alerts");
+          const bellBtn = document.getElementById("notificationBellToggle"); if (bellBtn) bellBtn.title = tx("消息推送", "Message alerts");
           const ps = document.querySelector("#openPushSettings"); if (ps) ps.textContent = "⚙ " + tx("推送设置", "Settings");
           const en = document.querySelector("#pushMasterSwitch")?.nextElementSibling; if (en) en.textContent = tx("启用消息推送", "Enable push");
           const add = document.querySelector("#openLocalAlert"); if (add) add.textContent = "＋ " + tx("添加预警", "Add alert");
@@ -696,40 +849,228 @@ window.BTCNotification = {
           );
         }
       };
-      const push = async (current, rule = null) => {
-        if (!localKeyOk()) throw new Error("请先在「推送设置」中保存有效的本机 SendKey。");
-        const currentText = fmt(current),
-          targetText = rule ? fmt(rule.targetPrice) : currentText,
-          phrase = rule
-            ? alertPhrase(rule.kind, targetText)
-            : `${coinPairPlain()} 当前价格 ${currentText}`,
-          title = rule
-            ? alertTitle(rule.kind, targetText)
-            : `价格告警【测试】 ${phrase}`,
-          short = rule
-            ? alertShort(rule.kind, targetText)
-            : `${coinPairPlain()} 当前价格 ${currentText} USDT`,
-          body = new URLSearchParams({
-            title,
-            short,
-            desp: rule
-              ? `${title}\n\n${phrase} USDT\n触发时市价 ${currentText} USDT`
-              : `${title}\n\n${phrase} USDT`,
-          });
-        await sendViaServerChan(body);
-      };
-      const pushRuleTest = async (current, rule) => {
-        if (!localKeyOk()) throw new Error("请先在「推送设置」中保存有效的本机 SendKey。");
-        const targetText = fmt(rule.targetPrice),
+      const timeText = (ts) =>
+        new Date(ts).toLocaleString(getLang() === "zh" ? "zh-CN" : "en-US", { hour12: false });
+      const dirText = (d) =>
+        ({ both: tx("双向", "Both"), up: tx("向上", "Up"), down: tx("向下", "Down") })[d] || tx("双向", "Both");
+      const modeTitle = (r) =>
+        ({
+          price_reached: tx("价格预警", "Price alert"), price_above: tx("价格预警", "Price alert"),
+          price_below: tx("价格预警", "Price alert"), long_liquidation: tx("爆仓预警", "Liquidation"),
+          short_liquidation: tx("爆仓预警", "Liquidation"), round_number: tx("整数推送", "Round-number"),
+          custom_grid: tx("自定义推送", "Custom grid"), volatility: tx("快速挣扎推送", "Volatility"),
+        })[r.kind] || tx("价格预警", "Price alert");
+      const ruleShort = (r) =>
+        r.kind === "round_number"
+          ? `${tx("步长", "step")} ${fmt(r.step)} · ${dirText(r.direction)}`
+          : r.kind === "custom_grid"
+            ? `${tx("基准", "base")} ${fmt(r.basePrice)} · ${tx("间隔", "step")} ${fmt(r.step)} · ${dirText(r.direction)}`
+            : r.kind === "volatility"
+              ? `${tx("窗口", "win")} ${r.windowMinutes}${tx("分", "m")} · ${tx("阈值", "thr")} ±${fmt(r.threshold)} · ${dirText(r.direction)}`
+              : `${label(r.kind)} ${fmt(r.targetPrice)} · ${r.repeat === false ? tx("仅一次", "Once") : tx(`重复 · ${r.cooldownMinutes} 分钟冷却`, `Repeat · ${r.cooldownMinutes} min`)}`;
+      /* 统一文案生成（按规则类型编排，v2.12.59）：
+         测试触发 → 标题挂【测试】、正文首行声明「模拟触发，非真实信号」；
+         真实触发 → 无任何测试字样，只给客观数据。
+         每种规则的正文字段不同（整数=步长/突破方向，网格=基准/偏移，波动=窗口/涨跌幅度…）。 */
+      const buildMessage = (rule, current, opts = {}) => {
+        const test = Boolean(opts.test),
+          event = opts.event || {},
+          lvl = Number.isFinite(Number(event.level)) ? Number(event.level) : Number(rule.targetPrice),
           currentText = fmt(current),
-          phrase = alertPhrase(rule.kind, targetText),
-          title = alertTitle(rule.kind, targetText, { test: true }),
-          body = new URLSearchParams({
-            title,
-            short: alertShort(rule.kind, targetText),
-            desp: `${title}\n\n${phrase} USDT\n当前市价 ${currentText} USDT\n\n该规则不会被保存。`,
+          zh = getLang() === "zh",
+          pair = coinPairPlain();
+        // 方向判定（红跌绿涨，v2.12.63）：爆仓语义固定 —— 多头爆仓=价跌(红)/空头爆仓=价涨(绿)；
+        // 其余按突破/波动方向；无方向信息（如价格达到）用中立 ⚠️。
+        const volMove = Number.isFinite(Number(event.move)) ? Number(event.move) : null;
+        const direction =
+          rule.kind === "long_liquidation" ? "down"
+          : rule.kind === "short_liquidation" ? "up"
+          : rule.kind === "volatility" ? (volMove === null ? (event.dir === "down" ? "down" : "up") : (volMove >= 0 ? "up" : "down"))
+          : rule.kind === "price_above" ? "up"
+          : rule.kind === "price_below" ? "down"
+          : rule.kind === "price_reached" ? (event.dir === "down" ? "down" : event.dir === "up" ? "up" : "none")
+          : event.dir === "down" ? "down" : event.dir === "up" ? "up" : "up";
+        const up = direction === "up",
+          arrow = direction === "up" ? "↑" : direction === "down" ? "↓" : "→",
+          dot = direction === "up" ? "🟢" : direction === "down" ? "🔴" : "⚠️",
+          cat = alertCategory(rule.kind, up);
+        let phrase,
+          facts = [];
+        if (rule.kind === "round_number") {
+          phrase = zh
+            ? `${pair} ${arrow} ${up ? "上破" : "下破"}整数位 ${fmt(lvl)}`
+            : `${pair} ${arrow} ${up ? "broke above" : "broke below"} round ${fmt(lvl)}`;
+          facts = [
+            [zh ? "整数步长" : "Step", `${fmt(Number(rule.step) || 0)} USDT`],
+            [zh ? "突破方向" : "Direction", up ? (zh ? "向上 ↑" : "up ↑") : (zh ? "向下 ↓" : "down ↓")],
+            [zh ? "命中整数位" : "Hit level", `**${fmt(lvl)} USDT**`],
+          ];
+        } else if (rule.kind === "custom_grid") {
+          const base = Number(rule.basePrice) || 0,
+            step = Number(rule.step) || 0,
+            off = lvl - base,
+            offText =
+              Math.abs(off) < 1e-9
+                ? zh ? "回到基准价" : "back to base"
+                : `${zh ? "较基准" : "vs base"} ${off > 0 ? "+" : "-"}${fmt(Math.abs(off))}`;
+          phrase = zh
+            ? `${pair} ${arrow} 触及网格线 ${fmt(lvl)}（${offText}）`
+            : `${pair} ${arrow} hit grid ${fmt(lvl)} (${offText})`;
+          facts = [
+            [zh ? "基准价" : "Base", `${fmt(base)} USDT`],
+            [zh ? "网格间隔" : "Grid step", `${fmt(step)} USDT`],
+            [zh ? "本次命中" : "Hit", `**${fmt(lvl)} USDT**`],
+            [zh ? "相对基准" : "Offset", offText],
+          ];
+        } else if (rule.kind === "volatility") {
+          const move = volMove === null ? 0 : volMove,
+            start = Number.isFinite(Number(event.start)) ? Number(event.start) : current,
+            win = Number(rule.windowMinutes) || 0,
+            pctText = start ? `${((move / start) * 100).toFixed(2)}%` : "--";
+          phrase = zh
+            ? `${pair} ${arrow} ${win} 分钟内${move >= 0 ? "上涨" : "下跌"} ${fmt(Math.abs(move))} USDT`
+            : `${pair} ${arrow} ${move >= 0 ? "rose" : "fell"} ${fmt(Math.abs(move))} USDT in ${win} min`;
+          facts = [
+            [zh ? "观察窗口" : "Window", `${win} ${zh ? "分钟" : "min"}`],
+            [zh ? "波动阈值" : "Threshold", `±${fmt(Number(rule.threshold) || 0)} USDT`],
+            [zh ? "窗口起点" : "From", `${fmt(start)} USDT`],
+            [zh ? "区间涨跌" : "Move", `**${move >= 0 ? "+" : "-"}${fmt(Math.abs(move))} USDT（${pctText}）**`],
+          ];
+        } else if (rule.kind === "long_liquidation" || rule.kind === "short_liquidation") {
+          const long = rule.kind === "long_liquidation";
+          phrase = zh
+            ? `${pair} ${arrow} 逼近${long ? "多头" : "空头"}爆仓价 ${fmt(lvl)}`
+            : `${pair} ${arrow} nears ${long ? "long" : "short"} liquidation ${fmt(lvl)}`;
+          const dist = Math.abs(current - lvl),
+            gapPct = current ? `${((dist / current) * 100).toFixed(2)}%` : "--";
+          facts = [
+            [zh ? "爆仓方向" : "Side", long ? (zh ? "多头（做多）" : "long") : (zh ? "空头（做空）" : "short")],
+            [zh ? "爆仓价" : "Liquidation", `**${fmt(lvl)} USDT**`],
+            [zh ? "距爆仓价" : "Distance", `${fmt(dist)} USDT`],
+            [zh ? "距爆仓幅度" : "Gap", gapPct],
+          ];
+        } else {
+          const kindText =
+            ({
+              price_reached: zh ? "到达" : "reached",
+              price_above: zh ? "涨破" : "broke above",
+              price_below: zh ? "跌破" : "broke below",
+            })[rule.kind] || (zh ? "价格触发" : "triggered");
+          phrase = zh ? `${pair} ${arrow} ${kindText} ${fmt(lvl)}` : `${pair} ${arrow} ${kindText} ${fmt(lvl)}`;
+          facts = [
+            [zh ? "触发类型" : "Trigger", kindText],
+            [zh ? "目标价" : "Target", `**${fmt(lvl)} USDT**`],
+          ];
+        }
+        /* v2.12.63：红跌绿涨色标（🟢 涨 / 🔴 跌 / ⚠️ 中立）+ 文案按类型重排（标题只带触发短语，正文纯明细 → 时间/交易对 → 站点链接）。
+           钉钉渠道已改 markdown 渲染（标题 h4 + 明细加粗 + 蓝色链接）；Bark 渠道发送端自动降级纯文本。 */
+        const badge = test ? `【${zh ? "测试" : "Test"}】` : "";
+        const title = `${badge}${cat.includes("】") ? cat : "【" + cat + "】"}${dot} ${phrase}`;
+        const desp = [
+          test
+            ? `**${zh ? "🧪 测试推送 · 模拟触发，非真实信号" : "🧪 Test push · simulated, not a real signal"}**`
+            : `${zh ? "当前价" : "Mark"}：**${currentText} USDT**`,
+          ...(test ? [`${zh ? "当前价" : "Mark"}：**${currentText} USDT**`] : []),
+          /* v2.12.64：字段值统一加粗（去掉各 fact 自带的零散 ** 再整体包裹），
+             与钉钉渲染的「标签常规 + 值加粗」版式一致。 */
+          ...facts.map(([k, v]) => `${k}：**${String(v).replace(/\*\*/g, "")}**`),
+          `${zh ? "🕒 触发时间" : "🕒 Triggered at"}：${timeText(Date.now())}`,
+          `${zh ? "💱 交易对" : "💱 Pair"}：${pair} · ${zh ? "永续" : "Perp"}`,
+          test
+            ? opts.savedRule
+              ? zh
+                ? "本条由规则列表的「测试」按钮发送，为模拟触发的测试数据；已保存的规则未受任何影响。"
+                : "Sent via the list Test button with simulated data; the saved rule is untouched."
+              : zh
+                ? "本条为弹窗草稿的测试推送（模拟数据），该规则不会被保存。"
+                : "Test push of the form draft (simulated data); this rule is not saved."
+            : "",
+          zh
+            ? "🔗 [查看实时行情 · jeffereyreng.site](https://jeffereyreng.site/)"
+            : "🔗 [Live dashboard · jeffereyreng.site](https://jeffereyreng.site/)",
+        ]
+          .filter(Boolean)
+          .join("\n");
+        return { title, short: phrase, desp, test, category: cat, direction };
+      };
+      const push = async (current, rule = null, event = null) => {
+        if (!localKeyOk() && !cloudReady())
+          throw new Error(
+            tx(
+              "请先在「推送设置」中配置并启用至少一个推送渠道（Server酱 / 钉钉 / 飞书 / Bark / Webhook 均可）。",
+              "Configure and enable at least one push channel in Settings first (ServerChan / DingTalk / Feishu / Bark / Webhook).",
+            ),
+          );
+        if (!rule) {
+          if (localKeyOk()) {
+            await sendViaServerChan(
+              new URLSearchParams({
+                title: `价格告警【测试】 ${coinPairPlain()} 当前价格 ${fmt(current)}`,
+                short: `${coinPairPlain()} 当前价格 ${fmt(current)} USDT`,
+                desp: `价格告警【测试】\n\n${coinPairPlain()} 当前价格 ${fmt(current)} USDT`,
+              }),
+            );
+          } else {
+            await sendCloudCustom({ price: current, test: true });
+          }
+          return;
+        }
+        const m = buildMessage(rule, current, { event });
+        if (localKeyOk())
+          await sendViaServerChan(new URLSearchParams({ title: m.title, short: m.short, desp: m.desp }));
+        else
+          await sendCloudCustom({
+            price: current,
+            categoryLabel: cloudCategoryLabel(rule.kind, m.direction === "up"),
+            phrase: m.short,
+            note: m.desp,
+            direction: m.direction,
+            test: false, // 真实触发：云端不得再挂【测试】
           });
-        await sendViaServerChan(body);
+      };
+      // 测试推送的模拟触发数据：按当前市价构造一次「如果现在触发会是什么样」的假想事件
+      const testEventFor = (rule, current) => {
+        if (rule.kind === "round_number") {
+          const step = Math.max(1, Number(rule.step) || 1),
+            dir = rule.direction === "down" ? "down" : "up";
+          return {
+            level: dir === "up" ? Math.floor(current / step) * step + step : Math.ceil(current / step) * step - step,
+            dir,
+          };
+        }
+        if (rule.kind === "custom_grid") {
+          const step = Math.max(1, Number(rule.step) || 1),
+            base = Number(rule.basePrice) || current,
+            dir = rule.direction === "down" ? "down" : "up",
+            idx = Math.round((current - base) / step);
+          return { level: base + (dir === "up" ? idx + 1 : idx - 1) * step, dir };
+        }
+        if (rule.kind === "volatility") {
+          const move = (rule.direction === "down" ? -1 : 1) * (Number(rule.threshold) || 0);
+          return { level: current, dir: move >= 0 ? "up" : "down", move, start: current - move };
+        }
+        return null;
+      };
+      const pushRuleTest = async (current, rule, saved = false) => {
+        if (!localKeyOk() && !cloudReady())
+          throw new Error(
+            tx(
+              "请先在「推送设置」中配置并启用至少一个推送渠道（Server酱 / 钉钉 / 飞书 / Bark / Webhook 均可）。",
+              "Configure and enable at least one push channel in Settings first (ServerChan / DingTalk / Feishu / Bark / Webhook).",
+            ),
+          );
+        const m = buildMessage(rule, current, { test: true, event: testEventFor(rule, current), savedRule: saved });
+        if (localKeyOk())
+          await sendViaServerChan(new URLSearchParams({ title: m.title, short: m.short, desp: m.desp }));
+        else
+          await sendCloudCustom({
+            price: current,
+            categoryLabel: cloudCategoryLabel(rule.kind, m.direction === "up"),
+            phrase: m.short,
+            note: m.desp,
+            direction: m.direction,
+            test: true, // 测试按钮：云端标题同样挂【测试】
+          });
       };
       const matched = (r, from, to) => {
         if (r.kind === "price_reached")
@@ -738,6 +1079,60 @@ window.BTCNotification = {
         return up
           ? from < r.targetPrice && to >= r.targetPrice
           : from > r.targetPrice && to <= r.targetPrice;
+      };
+      const isNewMode = (r) => LOCAL_ONLY_KINDS.includes(r.kind);
+      // 整数推送：跟踪当前整数位，价格跨越 step 边界即触发（向上/向下/双向）
+      const evalRound = (r, current) => {
+        if (!Number.isFinite(Number(r.step)) || r.step <= 0) return null;
+        if (!Number.isFinite(Number(r._roundLevel))) r._roundLevel = Math.floor(current / r.step) * r.step;
+        let hit = null,
+          dir = null;
+        while ((r.direction === "up" || r.direction === "both") && current >= r._roundLevel + r.step) {
+          r._roundLevel += r.step;
+          hit = r._roundLevel;
+          dir = "up";
+        }
+        while ((r.direction === "down" || r.direction === "both") && current <= r._roundLevel - r.step) {
+          r._roundLevel -= r.step;
+          hit = r._roundLevel;
+          dir = "down";
+        }
+        return hit == null ? null : { level: hit, dir };
+      };
+      // 自定义推送：相对基准价格，每跨越一个 step 网格触发（双向可只上/只下）
+      const evalGrid = (r, current) => {
+        if (!Number.isFinite(Number(r.basePrice)) || !Number.isFinite(Number(r.step)) || r.step <= 0) return null;
+        const idx = Math.round((current - r.basePrice) / r.step);
+        if (r._gridIdx === undefined) r._gridIdx = idx;
+        if (idx === r._gridIdx) return null;
+        if (idx > r._gridIdx && r.direction === "down") return null;
+        if (idx < r._gridIdx && r.direction === "up") return null;
+        const dir = idx > r._gridIdx ? "up" : "down";
+        r._gridIdx = idx;
+        return { level: r.basePrice + idx * r.step, dir };
+      };
+      // 快速挣扎推送：滚动窗口内的累计涨跌幅超阈值即触发
+      const evalVol = (r, current, now) => {
+        if (!Number.isFinite(Number(r.windowMinutes)) || r.windowMinutes <= 0 ||
+            !Number.isFinite(Number(r.threshold)) || r.threshold <= 0) return null;
+        r._volBuffer = Array.isArray(r._volBuffer) ? r._volBuffer : [];
+        r._volBuffer.push({ t: now, price: current });
+        const cutoff = now - r.windowMinutes * 60000;
+        while (r._volBuffer.length && r._volBuffer[0].t < cutoff) r._volBuffer.shift();
+        if (r._volBuffer.length < 2) return null;
+        const start = r._volBuffer[0],
+          move = current - start.price;
+        const hit = () => ({ level: current, move, start: start.price, dir: move >= 0 ? "up" : "down" });
+        if (r.direction === "up" && move >= r.threshold) return hit();
+        if (r.direction === "down" && move <= -r.threshold) return hit();
+        if (r.direction === "both" && Math.abs(move) >= r.threshold) return hit();
+        return null;
+      };
+      const evaluateMode = (r, current, now) => {
+        if (r.kind === "round_number") return evalRound(r, current);
+        if (r.kind === "custom_grid") return evalGrid(r, current);
+        if (r.kind === "volatility") return evalVol(r, current, now);
+        return null;
       };
       const syncMarkPrice = () => {
         const mark = $("useLocalMark"),
@@ -758,7 +1153,30 @@ window.BTCNotification = {
         }
         const now = Date.now();
         for (const r of rules) {
-          if (r.cloudManaged || (r.repeat === false && r.lastTriggeredAt)) continue;
+          if (r.cloudManaged) continue;
+          if (isNewMode(r)) {
+            /* 三种新模式：浏览器端滚动评价（整数位 / 基准网格 / 波动窗口），
+               命中即用冷却节流；波动模式每拍都采样以维持滚动窗口。 */
+            const ev = evaluateMode(r, current, now);
+            if (!ev) continue;
+            const newGap = Math.max(1, Number(r.cooldownMinutes) || 1) * 60_000;
+            if (r.lastTriggeredAt && now - r.lastTriggeredAt < newGap) continue;
+            r.lastTriggeredAt = now;
+            r.lastTriggeredPrice = current;
+            r._eventLevel = ev.level;
+            r._eventMove = ev.move;
+            r._eventStart = ev.start;
+            r._eventDir = ev.dir;
+            save();
+            render();
+            if (r.voiceEnabled)
+              window.dispatchEvent(
+                new CustomEvent("btc:voice-alert", { detail: { rule: r, price: current } }),
+              );
+            push(current, r, ev).catch(() => {});
+            continue;
+          }
+          if (r.repeat === false && r.lastTriggeredAt) continue;
           const gap =
             r.repeat === false
               ? 0
@@ -832,30 +1250,62 @@ window.BTCNotification = {
         }
       };
       $("localRuleTest").onclick = async () => {
-        const target = Number(form.elements.target.value),
-          current = price();
-        if (!Number.isFinite(target) || target <= 0) {
-          alert("请先填写有效的规则价格。");
-          return;
-        }
+        const current = price();
         if (!Number.isFinite(current)) {
           alert("实时价格尚未加载，请稍后重试。");
           return;
         }
         try {
-          await pushRuleTest(current, {
-            kind: form.elements.kind.value,
-            targetPrice: target,
-          });
+          await pushRuleTest(current, collectDraft());
           showRuleNotice(true);
         } catch (error) {
           alert(error.message);
         }
       };
+      // 模式切换：只显示当前模式需要的字段；非价格模式恒为重复型，冷却始终可见
+      const applyMode = () => {
+        const mode = form.elements.mode.value;
+        form.querySelectorAll("[data-mode-fields]").forEach((box) => {
+          box.hidden = box.dataset.modeFields !== mode;
+        });
+        $("localCooldown").hidden = mode === "price" ? !repeat : false;
+      };
+      // 从表单读取一份「规则草稿」（供保存与测试推送共用）
+      const collectDraft = () => {
+        const mode = form.elements.mode.value,
+          cooldown = Math.max(1, Number(form.elements.cooldown.value) || 5),
+          voiceEnabled = form.elements.voiceEnabled.checked,
+          base = { id: editingId || crypto.randomUUID(), repeat: mode === "price" ? repeat : true, cooldownMinutes: cooldown, voiceEnabled, lastTriggeredAt: null };
+        if (mode === "round_number") {
+          const step = Number(form.elements.roundStep.value);
+          if (!Number.isFinite(step) || step <= 0) throw new Error(tx("请填写有效的整数步长（> 0）。", "Enter a valid round step (> 0)."));
+          return { ...base, kind: "round_number", step, direction: form.elements.roundDir.value };
+        }
+        if (mode === "custom_grid") {
+          const basePrice = Number(form.elements.basePrice.value),
+            step = Number(form.elements.gridStep.value);
+          if (!Number.isFinite(basePrice) || basePrice <= 0) throw new Error(tx("请填写有效的基准价格。", "Enter a valid base price."));
+          if (!Number.isFinite(step) || step <= 0) throw new Error(tx("请填写有效的间隔（> 0）。", "Enter a valid step (> 0)."));
+          return { ...base, kind: "custom_grid", basePrice, step, direction: form.elements.gridDir.value };
+        }
+        if (mode === "volatility") {
+          const windowMinutes = Number(form.elements.volWindow.value),
+            threshold = Number(form.elements.volThreshold.value);
+          if (!Number.isFinite(windowMinutes) || windowMinutes <= 0) throw new Error(tx("请填写有效的时间窗口。", "Enter a valid window."));
+          if (!Number.isFinite(threshold) || threshold <= 0) throw new Error(tx("请填写有效的波动阈值。", "Enter a valid move threshold."));
+          return { ...base, kind: "volatility", windowMinutes, threshold, direction: form.elements.volDir.value };
+        }
+        const targetPrice = Number(form.elements.target.value);
+        if (!Number.isFinite(targetPrice) || targetPrice <= 0) throw new Error(tx("请先填写有效的规则价格。", "Enter a valid rule price."));
+        return { ...base, kind: form.elements.kind.value, targetPrice };
+      };
       const show = (open) => {
         modal.hidden = !open;
         if (open) {
+          editingId = null;
+          $("localAlertModalTitle").textContent = tx("添加预警", "Add alert");
           repeat = false;
+          form.elements.mode.value = "price";
           form
             .querySelectorAll("[data-local-frequency]")
             .forEach((button) =>
@@ -864,16 +1314,63 @@ window.BTCNotification = {
                 button.dataset.localFrequency === "once",
               ),
             );
-          $("localCooldown").hidden = true;
+          applyMode();
           syncMarkPrice();
         }
       };
+      // 编辑已有规则：回填表单并切换弹窗为「编辑预警」模式（提交时原位替换，不新增）
+      const openEdit = (rule) => {
+        show(true);
+        editingId = rule.id;
+        $("localAlertModalTitle").textContent = tx("编辑预警", "Edit alert");
+        const set = (name, v) => {
+          if (form.elements[name] && Number.isFinite(Number(v)))
+            form.elements[name].value = v;
+        };
+        if (isNewMode(rule)) {
+          form.elements.mode.value = rule.kind;
+          form.elements.mode.dispatchEvent(new Event("change"));
+          if (rule.kind === "round_number") {
+            set("roundStep", rule.step);
+            form.elements.roundDir.value = rule.direction || "both";
+          } else if (rule.kind === "custom_grid") {
+            set("basePrice", rule.basePrice);
+            set("gridStep", rule.step);
+            form.elements.gridDir.value = rule.direction || "both";
+          } else {
+            set("volWindow", rule.windowMinutes);
+            set("volThreshold", rule.threshold);
+            form.elements.volDir.value = rule.direction || "both";
+          }
+        } else {
+          form.elements.kind.value = rule.kind;
+          set("target", rule.targetPrice);
+          repeat = rule.repeat !== false;
+          form
+            .querySelectorAll("[data-local-frequency]")
+            .forEach((button) =>
+              button.classList.toggle(
+                "active",
+                (button.dataset.localFrequency === "repeat") === repeat,
+              ),
+            );
+          applyMode();
+        }
+        form.elements.voiceEnabled.checked = Boolean(rule.voiceEnabled);
+        form.elements.cooldown.value = Math.max(1, Number(rule.cooldownMinutes) || 5);
+      };
       $("openLocalAlert").onclick = () => show(true);
       $("closeLocalAlert").onclick = () => show(false);
+      form.elements.mode.onchange = applyMode;
       $("useLocalMark").onclick = () => {
         const current = price();
         if (Number.isFinite(current))
           form.elements.target.value = current.toFixed(2);
+      };
+      $("useLocalMarkBase").onclick = () => {
+        const current = price();
+        if (Number.isFinite(current))
+          form.elements.basePrice.value = current.toFixed(2);
       };
       form.querySelectorAll("[data-local-frequency]").forEach(
         (b) =>
@@ -882,28 +1379,35 @@ window.BTCNotification = {
             form
               .querySelectorAll("[data-local-frequency]")
               .forEach((x) => x.classList.toggle("active", x === b));
-            $("localCooldown").hidden = !repeat;
+            applyMode();
           }),
       );
       form.onsubmit = (e) => {
         e.preventDefault();
-        const target = Number(form.elements.target.value),
-          cooldown = Math.max(1, Number(form.elements.cooldown.value) || 1);
-        if (!Number.isFinite(target) || target <= 0) return;
-        rules.push({
-          id: crypto.randomUUID(),
-          kind: form.elements.kind.value,
-          targetPrice: target,
-          repeat,
-          cooldownMinutes: cooldown,
-          voiceEnabled: form.elements.voiceEnabled.checked,
-          lastTriggeredAt: null,
-        });
+        let rule;
+        try {
+          rule = collectDraft();
+        } catch (error) {
+          showAppDialog({ title: editingId ? tx("编辑预警", "Edit alert") : tx("添加预警", "Add alert"), message: error.message });
+          return;
+        }
+        if (editingId) {
+          // 原位替换：保留触发历史；编辑后参数变了，内部游标（_roundLevel/_gridIdx 等）天然不带过来，会按新参数重新锚定
+          const idx = rules.findIndex((r) => r.id === editingId);
+          if (idx >= 0)
+            rule = {
+              ...rule,
+              lastTriggeredAt: rules[idx].lastTriggeredAt,
+              lastTriggeredPrice: rules[idx].lastTriggeredPrice,
+            };
+          rules = idx >= 0 ? rules.map((r) => (r.id === editingId ? rule : r)) : [...rules, rule];
+          editingId = null;
+        } else {
+          rules.push(rule);
+        }
         save();
         form.reset();
         repeat = false;
-        $("localCooldown").hidden = true;
-        form.querySelector('[data-local-frequency="once"]').click();
         show(false);
         render();
       };

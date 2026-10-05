@@ -1,6 +1,6 @@
 import { createAlertStore } from './alert-store.mjs';
 // 多渠道发送与文案统一在 notification.mjs（v2.10.52 拆分）。
-import { buildAlertMessage } from './notification.mjs';
+import { buildAlertMessage, SITE_LINK } from './notification.mjs';
 // 告警穿越判定抽到共享模块（见 docs/CODE_AUDIT_REPORT.md F6），与 server 共用单一事实来源。
 import { evaluateAlertRule } from './shared/alert-rule-eval.mjs';
 
@@ -10,14 +10,17 @@ if (!store.enabled) throw new Error(`Server-side alert worker is disabled: ${sto
 let previousPrice = null;
 // 穿越判定语义原样保留在共享模块（cross 用途），见 shared/alert-rule-eval.mjs。
 const crossed = (rule, from, to) => evaluateAlertRule(rule, from, to, 'cross');
-const phrase = (kind, price) => ({ price_reached:`BTC价格达到 ${price}`,price_above:`BTC价格上涨至 ${price}`,price_below:`BTC价格下跌至 ${price}`,long_liquidation:`接近多头爆仓价 ${price}`,short_liquidation:`接近空头爆仓价 ${price}` }[kind] || `BTC价格 ${price}`);
-const category = kind => kind === 'long_liquidation' || kind === 'short_liquidation' ? '爆仓' : '价格';
+// v2.12.63：文案与前端 buildMessage 对齐（逼近多头/空头爆仓价、涨破/跌破），并显式给出方向用于精准着色。
+const phrase = (kind, price) => ({ price_reached:`BTC/USDT 到达 ${price}`,price_above:`BTC/USDT 涨破 ${price}`,price_below:`BTC/USDT 跌破 ${price}`,long_liquidation:`逼近多头爆仓价 ${price}`,short_liquidation:`逼近空头爆仓价 ${price}` }[kind] || `BTC/USDT 价格 ${price}`);
+const category = kind => kind === 'long_liquidation' || kind === 'short_liquidation' ? '爆仓' : kind === 'price_above' ? '上涨' : kind === 'price_below' ? '下跌' : '价格';
+// 红跌绿涨方向：多头爆仓=价跌(红)/空头爆仓=价涨(绿)；上涨绿、下跌红。
+const directionOf = kind => kind === 'long_liquidation' ? 'down' : kind === 'short_liquidation' ? 'up' : kind === 'price_above' ? 'up' : kind === 'price_below' ? 'down' : 'none';
 
 // ---- 云端规则投递：逐渠道发送，任一成功即算送达 --------------------------
 async function deliver(job) {
   const target = Number(job.rule.targetPrice).toLocaleString('en-US',{maximumFractionDigits:2});
   const current = Number(job.price).toLocaleString('en-US',{maximumFractionDigits:2});
-  const message = buildAlertMessage({ categoryLabel: category(job.rule.kind), phrase: phrase(job.rule.kind, target), target, current });
+  const message = buildAlertMessage({ categoryLabel: category(job.rule.kind), phrase: phrase(job.rule.kind, target), target, current, direction: directionOf(job.rule.kind) });
   const { ok, results, error } = await store.dispatchToChannels(job.rule.userId, message);
   await store.finishPush(job.deliveryId, { ok, payload: { channels: results }, error: ok ? '' : (error || '所有渠道投递失败') });
   if (!ok) console.error(`Alert delivery to all channels failed for user ${job.rule.userId}: ${error || 'unknown'}`);
@@ -56,9 +59,10 @@ async function scanLossWatch(price) {
       lossCooldowns.set(cooldownKey, now);
       const label = level === 'loss' ? '亏损推送' : '亏损警告';
       const message = {
-        title: `【${label}】持仓 ROE ${roe.toFixed(1)}%`,
+        // v2.12.62：亏损/警告固定红色标（🔴），正文末尾附站点链接（与 buildAlertMessage 一致）。
+        title: `【${label}】🔴 持仓 ROE ${roe.toFixed(1)}%`,
         short: `${label} ROE ${roe.toFixed(1)}%`,
-        body: `${label === 'loss' ? '已达到亏损推送阈值' : '已接近亏损警告值'}。\n\n持仓方向 ${entry.side === 'short' ? '做空' : '做多'}\n开仓价 ${entryPrice.toLocaleString('en-US',{maximumFractionDigits:2})} USDT\n当前市价 ${current} USDT\n保证金收益率 ROE ${roe.toFixed(1)}%（${Number(entry.leverage) || 1}x 杠杆）\n触发时间 ${new Date().toLocaleString('zh-CN',{hour12:false})}`,
+        body: `${label === 'loss' ? '已达到亏损推送阈值' : '已接近亏损警告值'}。\n\n持仓方向 ${entry.side === 'short' ? '做空' : '做多'}\n开仓价 ${entryPrice.toLocaleString('en-US',{maximumFractionDigits:2})} USDT\n当前市价 ${current} USDT\n保证金收益率 ROE ${roe.toFixed(1)}%（${Number(entry.leverage) || 1}x 杠杆）\n触发时间 ${new Date().toLocaleString('zh-CN',{hour12:false})}\n\n${SITE_LINK}`,
       };
       const { results } = await store.dispatchToChannels(account.userId, message);
       await store.recordDelivery(account.userId, `${label}（持仓 #${index + 1}）`, results);

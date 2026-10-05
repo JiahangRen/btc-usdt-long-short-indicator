@@ -204,14 +204,23 @@ export async function createAlertStore() {
     // 「已就绪」= 至少启用了一条渠道（总开关在 enqueue 阶段单独判断）。
     async hasSendKey(userId) { await this.ensureLegacySendKeyMigrated(); return (await pool.query('SELECT 1 FROM alert_channels WHERE user_id=$1 AND enabled=true LIMIT 1',[userId])).rowCount > 0; },
     async getSendKey(userId) { await this.ensureLegacySendKeyMigrated(); const row=(await pool.query('SELECT id, config_ciphertext FROM alert_channels WHERE user_id=$1 AND type=\'serverchan\' AND enabled=true ORDER BY created_at ASC LIMIT 1',[userId])).rows[0]; if(!row) return null; try { return unjson(decrypt(row.config_ciphertext,key,`channel:${row.id}`)).sendKey || null; } catch { throw Object.assign(new Error('云端 SendKey 无法验证，请重新保存。'),{statusCode:500}); } },
-    async testPush(userId,price) { // 测试推送：发给所有启用渠道，逐渠道回报结果。
+    async testPush(userId,price,opts={}) { // 测试推送：发给所有启用渠道，逐渠道回报结果。opts 可自定义 categoryLabel/phrase/note（规则行的「测试」按钮用）。
       await this.ensureLegacySendKeyMigrated();
       const current=Number(price); if(!Number.isFinite(current)||current<=0) throw Object.assign(new Error('实时价格无效。'),{statusCode:400});
       const quote=current.toLocaleString('en-US',{maximumFractionDigits:2});
-      const message=buildAlertMessage({ categoryLabel:'价格', phrase:`BTC当前价格 ${quote}`, current:quote, test:true, note:'该测试不会创建或触发规则。' });
+      // 前端可传自定义文案；做长度上限防止滥用（categoryLabel 拼进标题，phrase 拼进标题和正文）。
+      const categoryLabel=typeof opts.categoryLabel==='string'&&opts.categoryLabel.length>=1&&opts.categoryLabel.length<=6?opts.categoryLabel.trim():'价格';
+      const phrase=typeof opts.phrase==='string'&&opts.phrase.length>=1&&opts.phrase.length<=160?opts.phrase.trim():`BTC当前价格 ${quote}`;
+      const note=typeof opts.note==='string'&&opts.note.length<=600?opts.note:'';
+      // direction：调用方显式给出的红跌绿涨方向（'up'绿/'down'红/'none'中立），v2.12.63 起用于精准着色（尤其爆仓）。
+      const direction = opts.direction==='up'||opts.direction==='down'||opts.direction==='none' ? opts.direction : null;
+      // test 默认 true（设置里的「发送测试推送」兼容旧行为）；规则真实触发由前端显式传 test:false，
+      // 此时标题不得再挂【测试】，正文也不再带测试声明。
+      const isTest=opts.test!==false;
+      const message=buildAlertMessage({ categoryLabel, phrase, current:quote, test:isTest, note:note||(isTest?'该测试不会创建或触发规则。':''), direction });
       const { ok, results, error } = await this.dispatchToChannels(userId, message);
       if (!results.length) throw Object.assign(new Error(error || '请先添加并启用至少一个推送渠道。'),{statusCode:400});
-      await this.recordDelivery(userId, '测试推送', results);
+      await this.recordDelivery(userId, isTest ? '测试推送' : '规则推送', results);
       if (!ok) throw Object.assign(new Error(results.find(r => r.error)?.error || '所有渠道测试推送均失败。'),{statusCode:502});
       return { ok:true, results };
     },

@@ -23,10 +23,17 @@ function getRefreshMs() {
   return Math.round(getRefreshMin() * 60 * 1000);
 }
 
-// 涨跌配色：绿涨红跌（国际惯例），与本项目 Kronos 卡特例要求一致。
-const UP = '#00d4aa';
-const DOWN = '#ff4d6a';
-const NEUTRAL = '#9aa4b2';
+// 涨跌配色：读主题变量（深/浅主题各自定义，浅色下为深色变体保证对比度）。
+// canvas fillStyle 不支持 var()，所以用函数即时求值；DOM 内联样式同样适用。
+function themeVar(name, fallback) {
+  try {
+    const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    return v || fallback;
+  } catch (e) { return fallback; }
+}
+const UP = () => themeVar('--bull', '#00d4aa');
+const DOWN = () => themeVar('--bear', '#ff4d6a');
+const NEUTRAL = () => themeVar('--text-muted', '#9aa4b2');
 const HIST_BLUE = '#4ea6ff';
 
 // 24h 走势形状 i18n 映射（与 inference.classify_path_shape 返回的键保持一致）
@@ -83,7 +90,7 @@ function render(card, d) {
   // 方向判定：用于上涨概率卡片颜色（绿色=上涨占优，红色=下跌占优，灰色=中性）
   const up = d.direction === 'up';
   const neutral = d.direction === 'neutral';
-  const dirColor = neutral ? NEUTRAL : (up ? UP : DOWN);
+  const dirColor = neutral ? NEUTRAL() : (up ? UP() : DOWN());
 
   $('kf-exchange').textContent = (d.exchange || 'okx').toUpperCase();
 
@@ -467,7 +474,7 @@ function drawBacktestChart(canvas, details) {
     let barH = h - pad.bottom - yTopRaw;
     const yTop = barH < minBarH ? (h - pad.bottom - minBarH) : yTopRaw;
     if (barH < minBarH) barH = minBarH;
-    c.fillStyle = d.actualUp ? UP : DOWN;
+    c.fillStyle = d.actualUp ? UP() : DOWN();
     c.globalAlpha = 0.85;
     c.fillRect(x, yTop, barW, barH);
     c.globalAlpha = 1;
@@ -481,7 +488,7 @@ function drawBacktestChart(canvas, details) {
 
     // 判断正确性：每根柱都画（预测方向与实际方向一致则绿勾，反之红叉）
     const correct = Boolean(d.predictedUp) === Boolean(d.actualUp);
-    c.fillStyle = correct ? UP : DOWN;
+    c.fillStyle = correct ? UP() : DOWN();
     c.font = 'bold 10px sans-serif';
     c.textAlign = 'center';
     c.fillText(correct ? '✓' : '✗', x + barW / 2, h - 6);
@@ -589,8 +596,8 @@ function onBacktestHover(e) {
   const actualShape = d.actualPathShape ? shapeLabel(d.actualPathShape) : '--';
   const correct = Boolean(d.predictedUp) === Boolean(d.actualUp);
   const correctLabel = correct
-    ? `<span style="color:${UP}">✓ ${tx('判断正确', 'Correct')}</span>`
-    : `<span style="color:${DOWN}">✗ ${tx('判断错误', 'Wrong')}</span>`;
+    ? `<span style="color:${UP()}">✓ ${tx('判断正确', 'Correct')}</span>`
+    : `<span style="color:${DOWN()}">✗ ${tx('判断错误', 'Wrong')}</span>`;
 
   tooltip.innerHTML = `
     <div class="kf-bt-tooltip-date">${dateLabel}</div>

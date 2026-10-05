@@ -4212,7 +4212,7 @@ renderRangeExtremaPoints = function () {
   const version = document.createElement("button");
   version.type = "button";
   version.id = "appVersion";
-  version.textContent = "v2.12.58";
+  version.textContent = "v2.12.64";
   version.title = "查看更新日志";
   version.setAttribute("aria-expanded", "false");
   // v2.12.7：版本号随「账户 / API / 连通性 / 数据源」一起收进设置齿轮面板。
@@ -4628,10 +4628,28 @@ renderRangeExtremaPoints = function () {
   log.innerHTML = `<b>v2.12.56 更新日志</b><dl><dt>宏观实况条：点击指标直达宏观卡</dt><dd>顶部「宏观实况」条里的每个指标现在可以点击：页面自动滚动到下方「宏观环境与跨市场联动」卡的「综合指标」区，对应的指标卡片会放大缩小两拍并带青色描边高亮，在十来张卡片里一眼认出刚在滚动条里看到的那一项。</dd><dt>实况条右端新增 ⚙ 设置入口</dt><dd>点击后同样跳到宏观卡并直接展开「实况条设置」浮层，勾选/取消指标即可自定义顶部滚动条显示哪些数据，不必先找设置按钮在哪。宏观卡里原有的「⚙ 实况条设置」保持不变，两处入口共用同一份设置与保存逻辑。</dd></dl><hr>` + v21256TickerJumpChangelog;
   // v2.12.57：关注卡新增「锁定」—— 锁定后点顶部预警条不再抢占卡片，改为跳宏观事件中枢高亮。
   const v21257PinLockChangelog = log.innerHTML;
-  log.innerHTML = `<b>v2.12.57 更新日志</b><dl><dt>关注宏观事件卡：新增「锁定」</dt><dd>此前在顶部「宏观预警」条里点任意事件，都会把「关注宏观事件实时数据」卡切到那条并滚过去 —— 正在盯非农时点一下别的条目，关注卡就被抢走了。现在卡上新增「锁定」按钮（状态持久化）：锁定后点击预警条里的事件，若它正是当前关注的那条，页面直接滚回关注卡并闪烁提示；若不是当前关注的，则跳到下方「宏观事件中枢」，对应事件行放大缩小高亮，告诉你它在哪里 —— 关注卡保持不动。想换关注对象时，点「更换」菜单选择仍然直接切换（显式操作优先于锁定）。</dd></dl><hr>` + v21256TickerJumpChangelog;
+  log.innerHTML = `<b>v2.12.57 更新日志</b><dl><dt>关注宏观事件卡：新增「锁定」</dt><dd>此前在顶部「宏观预警」条里点任意事件，都会把「关注宏观事件实时数据」卡切到那条并滚过去 —— 正在盯非农时点一下别的条目，关注卡就被抢走了。现在卡上新增「锁定」按钮（状态持久化）：锁定后点击预警条里的事件，若它正是当前关注的那条，页面直接滚回关注卡并闪烁提示；若不是当前关注的，则跳到下方「宏观事件中枢」，对应事件行放大缩小高亮，告诉你它在哪里 —— 关注卡保持不动。想换关注对象时，点「更换」菜单选择仍然直接切换（显式操作优先于锁定）。</dd></dl><hr>` + v21257PinLockChangelog;
   // v2.12.58：锁定收紧 —— 「更换」在锁定期间整体冻结，先解锁才能换关注对象。
   const v21258LockFreezeChangelog = log.innerHTML;
-  log.innerHTML = `<b>v2.12.58 更新日志</b><dl><dt>关注卡锁定收紧：「更换」随锁定一并冻结</dt><dd>v2.12.57 上线锁定时保留了「更换菜单仍可直接切换」的口子，实际用下来容易误触换掉正在盯的事件。现在锁定期间点「更换」不再展开菜单，按钮置灰并左右抖动提示，必须先点「已锁定」解锁、再「更换」；锁定瞬间若更换菜单开着也会自动收起。顶部预警条点击的定位逻辑不变。</dd></dl><hr>` + v21257PinLockChangelog;
+  log.innerHTML = `<b>v2.12.58 更新日志</b><dl><dt>关注卡锁定收紧：「更换」随锁定一并冻结</dt><dd>v2.12.57 上线锁定时保留了「更换菜单仍可直接切换」的口子，实际用下来容易误触换掉正在盯的事件。现在锁定期间点「更换」不再展开菜单，按钮置灰并左右抖动提示，必须先点「已锁定」解锁、再「更换」；锁定瞬间若更换菜单开着也会自动收起。顶部预警条点击的定位逻辑不变。</dd></dl><hr>` + v21258LockFreezeChangelog;
+  // v2.12.59：「规则测试已发送」提示被消息推送弹层盖住 —— 提示层提到 1200，压过所有业务弹层。
+  const v21259NoticeZIndexChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.59 更新日志</b><dl><dt>修复「规则测试已发送」提示被推送面板盖住</dt><dd>症状：在「消息推送」弹层里点规则的「测试」后，「规则测试已发送」提示被推送面板整个盖住，必须先关掉消息推送面板才能看到。根因：提示层 z-index 为 1001，而消息推送弹层复用推送设置的 1004 层级，同层时后挂载的弹层永远压在提示上面。修复：提示层提升到 1200，与全局确认框同级，压过所有业务弹层；提示弹出时无需关闭任何面板。纯样式改动，刷新即生效。</dd></dl><hr>` + v21259NoticeZIndexChangelog;
+  // v2.12.60：浅色主题对比度全面修复 —— 深色渐变面板在浅色下变成「深底深字」的一批卡片全部适配。
+  const v21260LightContrastChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.60 更新日志</b><dl><dt>浅色主题对比度全面修复</dt><dd>症状：切到浅色主题后，指标明细、周期涨幅、研究预测（BTC 多因子）、宏观环境与跨市场联动、信号有效区间、关注宏观事件等一批卡片仍带着深色渐变底，而文字却跟随主题变成深色 —— 深底深字几乎不可读；顶部宏观实况条的金色数字、OKX 微观结构的琥珀警语、「已公布」折叠行等也在浅底上对比不足。根因：一组共享的深色渐变规则带 !important，把早前没有 !important 的浅色覆盖全部压住。修复：浅色主题下这批面板统一切换为浅色表面（auto 主题跟随系统浅色时同步），金色/琥珀文字在浅底下换深琥珀变体，KRONOS 卡涨跌色改读主题变量（明暗自适应），「计算」按钮在浅色下加深紫色渐变。深色主题外观不变。纯样式改动，刷新即生效。</dd></dl><hr>` + v21260LightContrastChangelog;
+  // v2.12.61：宏观事件中枢浅色翻浅（修复 v2.12.61 块此前被 v2.12.60 行覆盖、日志面板显示不出的链序错误）
+  const v21261MacroCalLightChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.61 更新日志</b><dl><dt>宏观事件中枢：浅色主题整卡翻浅</dt><dd>症状：切到浅色主题后，其它卡片都变浅了，唯独「宏观事件中枢」整张卡仍是深色渐变底。根因：这张卡是早期的「强制深色」设计 —— 卡底深色渐变带 !important，卡内配色由一组卡级 --cal-* 变量锁定为深底浅字，与外层主题完全脱钩。修复：浅色主题下把卡面翻成白/浅灰渐变，卡级变量整体重映射为浅色系（深字、深青强调色、深绿/深红涨跌色），卡内的筛选下拉菜单、国旗胶囊、分类徽章（宏观/流动性/能源/风险/加密）、「今天」徽标、「现在」分隔线、「继续展开」按钮、影响矩阵单元格等硬编码色逐条适配；「更换关注」浮层随卡一起翻浅。auto 主题跟随系统浅色时同步。深色主题下这张卡保持原有深色外观不变。纯样式改动，刷新即生效。</dd></dl><hr>` + v21261MacroCalLightChangelog;
+  // v2.12.62：告警推送钉钉 markdown 化 —— 色标（红跌绿涨）、加粗、站点蓝链、文案去重重排。
+  const v21262PushMarkdownChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.62 更新日志</b><dl><dt>警报推送样式重做：颜色提示 + 站点链接 + 文案重排</dt><dd>钉钉机器人从纯文本消息改为 markdown 消息：原来 ** 加粗星号原样露出、不可能有颜色，现在正常渲染。文案加红跌绿涨色标（🟢 上破/上涨、🔴 下破/跌破、⚠️ 无方向），标题、正文首行同步；信息重排为「触发摘要 → 当前价 → 明细字段 → 触发时间 → 交易对 → 站点链接」，一眼先看到命中价位与市价；修掉了同一条消息里触发文案重复出现三次的问题。正文末尾新增醒目蓝色链接「jeffereyreng.site · 查看实时行情」，点击直达站点。Bark 渠道无 markdown 渲染，自动降级为纯文本（剥加粗、链接转「文字：URL」），不再裸露星号。本地服务端与云端部署同步生效。</dd></dl><hr>` + v21262PushMarkdownChangelog;
+  // v2.12.63：各告警类型文案按语义细分 + 爆仓方向色标修正。
+  const v21263AlertCopyChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.63 更新日志</b><dl><dt>各类型告警文案优化：整数明确上破/下破，爆仓色标修正</dt><dd>把 8 类告警的标题与明细文案按语义统一重排：整数告警拆成「整数上破告警 / 整数下破告警」（命中整数位时一眼看清是涨破还是跌破）；价格类拆成「上涨告警（涨破）/ 下跌告警（跌破）」；网格、波动、爆仓各自文案更贴合实际事件。爆仓色标修正：多头爆仓=价格下跌=🔴、空头爆仓=价格上涨=🟢，旧实现把「接近多头爆仓价」误判成绿色，本次通过显式 direction 参数彻底修掉；网格/整数等原先无方向词的告警也补齐了精准着色。爆仓明细新增「距爆仓幅度」百分比字段，更直观判断逼近程度。文案与 v2.12.62 的钉钉 markdown / 站点蓝链 / 红跌绿涨样式保持一致，本地、云端、Bark 三路同步生效。</dd></dl><hr>` + v21263AlertCopyChangelog;
+  // v2.12.64：告警推送版式整理 —— 钉钉换行改段落空行、字段值统一加粗。
+  const v21264PushLayoutChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.64 更新日志</b><dl><dt>告警推送版式整理：一行一条、字段值统一加粗</dt><dd>把告警推送的正文版式按「标题一行 + 每个字段独占一行」整理：钉钉 markdown 的换行从行尾双空格硬换行改为段落空行分隔（硬换行在钉钉客户端不稳定、容易被折叠成一行挤在一起），现在当前价、各明细字段、触发时间、交易对、站点链接逐行显示、行间留白，一眼扫下来就是一条完整明细；全部明细字段的值统一加粗（此前只有部分字段加粗，字重参差）。Bark 渠道仍自动降级纯文本，逐行保留。纯排版调整，内容与色标（🟢 涨 / 🔴 跌）不变，本地服务端即时生效。</dd></dl><hr>` + v21264PushLayoutChangelog;
   // 旧版本默认收起，确保用户打开日志时首先看到当前版本的完整变更。
   // Older releases are collapsed by default so opening the log focuses on the current release.
   const collapseLegacyRelease = () => {
@@ -7300,7 +7318,8 @@ function normalizePanelReadingOrder() {
 }
 
 /* v2.12.42p：工具/诊断类卡片统一沉底（用户要求排在页面最底下）：
-   数据诊断 → 高杠杆强平缓冲参考 → 我的持仓与盈亏估算 → 消息推送 → 强平概率计算器。
+   数据诊断 → 高杠杆强平缓冲参考 → 我的持仓与盈亏估算 → 强平概率计算器。
+   （消息推送已改为顶栏铃铛弹层，不在此列。）
    各渲染函数仍按自己的锚点插入，这里只在相对顺序偏离时一次性把它们依次
    append 到 main 末尾，避免反复横跳触发 MutationObserver 风暴。 */
 function normalizeTailCards() {
@@ -7310,7 +7329,6 @@ function normalizeTailCards() {
     $("diagnostics")?.closest(".card"),
     document.getElementById("leverageDetails"),
     document.querySelector(".position-estimate-details"),
-    document.getElementById("wechatAlertDetails"),
     document.querySelector(".liq-probability-details"),
   ].filter(Boolean);
   if (tail.length < 2) return;
@@ -8971,6 +8989,7 @@ function calendarImpactFamily(title) {
   if (/非农|就业|payroll|employment/.test(t)) return "jobs";
   if (/原油库存|eia|petroleum|库存|opec|钻井/.test(t)) return "energy";
   if (/gdp|零售|销售|retail|gross domestic|pmi|工业|景气|制造业|商业活动/.test(t)) return "growth";
+  if (/回购|buyback/.test(t)) return "liquidity-op";
   return null;
 }
 const CALENDAR_IMPACT_MODELS = {
@@ -8986,6 +9005,8 @@ const CALENDAR_IMPACT_MODELS = {
     high:{btc:1,crypto:1,stocks:1,gold:0}, low:{btc:-1,crypto:-1,stocks:-1,gold:1} },
   energy: { label:"能源", note:"能源类数据以原油供需为主，对 BTC、加密货币、美股与黄金通常无直接方向。",
     high:{btc:0,crypto:0,stocks:0,gold:0}, low:{btc:0,crypto:0,stocks:0,gold:0} },
+  "liquidity-op": { label:"流动性操作", note:"财政部回购是向长端注入流动性的支持操作：规模落地越大，对风险资产流动性越友好。实际操作规模在操作结束后于 TreasuryDirect 公布，免费日历源通常不回填数字，故「今值」多为「操作后公布」。",
+    high:{btc:1,crypto:1,stocks:1,gold:0}, low:{btc:-1,crypto:-1,stocks:-1,gold:0} },
 };
 function calendarImpactModel(event) {
   const family = calendarImpactFamily(event.title);
@@ -12679,7 +12700,7 @@ positionCalc = function () {
   // 栏内控件弹出的浮层一旦打开，收起会把它一起带走 —— 此时不收起。
   const popupOpen = () =>
     !!document.querySelector(
-      '#versionChangelog:not([hidden]),#apiCenterModal:not([hidden]),#accountServiceCard:not([hidden]),#localAlertModal:not([hidden]),#pushSettingsModal:not([hidden]),#voiceSettingsModal:not([hidden]),.connectivity-toggle[aria-expanded="true"],.csw-coin-menu:not([hidden]),#macroLiveSettings:not([hidden])',
+      '#versionChangelog:not([hidden]),#apiCenterModal:not([hidden]),#accountServiceCard:not([hidden]),#localAlertModal:not([hidden]),#pushSettingsModal:not([hidden]),#voiceSettingsModal:not([hidden]),#notificationCenterModal:not([hidden]),.connectivity-toggle[aria-expanded="true"],.csw-coin-menu:not([hidden]),#macroLiveSettings:not([hidden])',
     );
 
   const canStow = () =>
