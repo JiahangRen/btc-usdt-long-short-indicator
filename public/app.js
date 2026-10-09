@@ -4216,7 +4216,7 @@ renderRangeExtremaPoints = function () {
   const version = document.createElement("button");
   version.type = "button";
   version.id = "appVersion";
-  version.textContent = "v2.12.80";
+  version.textContent = "v2.12.81";
   version.title = "查看更新日志";
   version.setAttribute("aria-expanded", "false");
   // v2.12.7：版本号随「账户 / API / 连通性 / 数据源」一起收进设置齿轮面板。
@@ -4695,7 +4695,7 @@ renderRangeExtremaPoints = function () {
   log.innerHTML = '<b>v2.12.78 更新日志</b><dl><dt>「当前规则信号」基准周期：3 小时 → 4 小时 / 6 小时</dt><dd>原 3 小时档位只有 OKX 能提供，且还需服务端把 1 小时 K 线聚合而成；Gate 与 Binance 都不支持该周期（实测分别返回 INVALID_PARAM_VALUE 与 Invalid interval），切到这两个数据源时规则信号会取不到数据。现移除 3 小时，改为 4 小时与 6 小时——三家数据源全部原生支持，同时与图表 K 线选择器、多周期共振、AI 快照所用的周期保持一致：4 小时是币圈中线通用档，6 小时给出更长一档的趋势视角。各档「有效至」时长同步按 24 根基准 K 线计算（4 小时 ≈ 4 天、6 小时 ≈ 6 天）。另修复：基准取数失败此前被空 catch 静默吞掉，卡片会继续展示上一次数据源的旧 K 线却看不出异常，现在改为在基准行直接提示失败原因。停留在 3 小时的历史偏好会自动迁移到 4 小时。</dd></dl><hr>' + v21278BasisIntervalChangelog;
   // v2.12.79：修复账户面板规则列表查询的 SQL 别名错误（v2.12.78 多币种改动引入）。
   const v21279AlertRulesFixChangelog = log.innerHTML;
-  log.innerHTML = '<b>v2.12.79 更新日志</b><dl><dt>修复：打开「账户与云端服务」报「云端服务暂不可用」</dt><dd>上一版加入多币种规则隔离时，规则列表查询把 coin 列写成了带表别名的 r.coin，但同一条 SQL 的 FROM 子句并未声明别名 r（同批改动里的另一条查询有别名、这条漏了），导致打开账户面板必然报错「接口不可用：missing FROM-clause entry for table "r"」，账户信息与规则列表完全无法加载。现已修正该查询，账户面板恢复正常。属纯查询语句修复，数据库结构与已存数据均不受影响。</dd></dl><hr>' + v21279AlertRulesFixChangelog;
+  log.innerHTML = '<b>v2.12.81 更新日志</b><dl><dt>云端规则同步按特征去重（修复重复规则）</dt><dd>此前「一键同步全部」采用「同 id 取新、不同 id 并集」的合并策略；当本机规则与云端规则的 id 不一致时（例如服务端直推、跨设备登录），同一条规则会同时存在于本机与云端，反复同步便产生重复卡片，且关页后台推送会重复触发。本次改为按「规则特征」（币种 + 类型 + 关键参数：价格类的触发价/冷却、整数位的步长/方向、波动类的窗口/阈值/方向）生成去重签名，同特征只保留一条，并自动复用云端已有规则的 id 进行更新而非新建。此后无论规则 id 如何变化，同步都保持幂等，本机与云端规则一一对应、不再产生重复。</dd></dl><hr>' + '<b>v2.12.79 更新日志</b><dl><dt>修复：打开「账户与云端服务」报「云端服务暂不可用」</dt><dd>上一版加入多币种规则隔离时，规则列表查询把 coin 列写成了带表别名的 r.coin，但同一条 SQL 的 FROM 子句并未声明别名 r（同批改动里的另一条查询有别名、这条漏了），导致打开账户面板必然报错「接口不可用：missing FROM-clause entry for table "r"」，账户信息与规则列表完全无法加载。现已修正该查询，账户面板恢复正常。属纯查询语句修复，数据库结构与已存数据均不受影响。</dd></dl><hr>' + v21279AlertRulesFixChangelog;
   // v2.12.80：整数位 / 网格 / 波动三类规则支持云端推送（关页后由服务器 worker 接管）。
   const v21280StatefulCloudChangelog = log.innerHTML;
   log.innerHTML = '<b>v2.12.80 更新日志</b><dl><dt>整数推送 / 网格 / 快速波动规则支持云端后台推送</dt><dd>此前「消息推送」里的整数推送（步长）、自定义推送（网格）、快速波动推送三类规则只能在页面开着时由浏览器评估，关页即失效，且「同步到云端」会自动跳过它们。现服务端 alert-worker 补齐这三类的判定逻辑（整数位游标、网格索引、滚动窗口采样，与本地评估逐语义一致），数据库规则表扩展对应类型与私有参数，同步时三类规则正常上传云端。关页后由云端 worker 独立取价判定并经钉钉等渠道推送，与价格类规则一致。注意事项：状态型规则云端冷却下限 1 分钟（防逐秒刷屏）；worker 重启后波动窗口重新采样、整数位/网格游标按当前价重新锚定，均不会误触发。</dd></dl><hr>' + v21280StatefulCloudChangelog;

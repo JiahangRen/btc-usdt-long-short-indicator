@@ -15,7 +15,7 @@
     /* v2.12.75：放开非 BTC 限制，ETH/ZEC/BNB 云端规则现已支持（钉钉等渠道按币种独立推送）。 */
     return !health?.enabled?`<p class="bear">${tx('云端服务尚未配置，暂不能保存关页推送规则。','Cloud service is not configured; closed-page push rules cannot be saved yet.')}</p>`:!account?`<p>${tx('登录账户后，可把现有本机规则安全同步到服务器，在网页关闭后继续推送。','After signing in, your local rules can be safely synced to the server and keep pushing after the page closes.')}</p><button id="openAccountLogin" type="button">${tx('前往登录','Go to sign in')}</button>`:`<div class="cloud-status-row"><p><b>${tx('云端已同步','Cloud synced')} ${cloudRules.length} ${tx('条规则','rules')}</b><span>${tx('本地 8787 在线时由本地优先推送；本地掉线或关页后由云端后台接管。','Local 8787 takes priority when online; cloud takes over after local goes offline or the page closes.')}</span></p><span class="badge ${account.hasSendKey?'bull':'flat'}">${account.hasSendKey?tx('云端 Key 已就绪','Cloud Key ready'):tx('请在推送设置中配置渠道','Set up a channel in Push settings')}</span></div><div class="cloud-alert-actions"><button id="syncLocalAlerts" type="button">${tx('同步本机规则到云端','Sync local rules to cloud')}</button></div>`;
   };
-  function renderCloudPanel(){const box=cloudPanel();if(!box)return;box.innerHTML=panelMarkup();box.querySelector('#openAccountLogin')?.addEventListener('click',()=>{const card=accountCard();if(card)card.hidden=false});box.querySelector('#syncLocalAlerts')?.addEventListener('click',()=>showAppDialog({title:tx('同步到云端','Sync to cloud'),message:tx('将以时间戳较新者为准，双向合并本机与云端的推送规则（同 id 取新、不同 id 并集）。','Bidirectional merge of local and cloud alert rules by newest timestamp (same id keeps newest, different ids unioned).'),confirmText:tx('开始同步','Start sync'),cancelText:tx('取消','Cancel'),onConfirm:()=>syncRules().catch(error=>notice(error.message))}))}
+  function renderCloudPanel(){const box=cloudPanel();if(!box)return;box.innerHTML=panelMarkup();box.querySelector('#openAccountLogin')?.addEventListener('click',()=>{const card=accountCard();if(card)card.hidden=false});box.querySelector('#syncLocalAlerts')?.addEventListener('click',()=>showAppDialog({title:tx('同步到云端','Sync to cloud'),message:tx('将按规则特征去重后双向合并本机与云端的推送规则（同特征只保留一条，自动复用云端 id）。','Bidirectional merge of local and cloud alert rules after dedup by rule signature (one rule per signature, cloud id reused automatically).'),confirmText:tx('开始同步','Start sync'),cancelText:tx('取消','Cancel'),onConfirm:()=>syncRules().catch(error=>notice(error.message))}))}
   /* 多币种（v2.12.5）：本机规则 vault 键按币种取（BTC 沿用 'alerts'，其余 'alerts_<COIN>'），
      与 notification.js 的 vaultKeyFor 同一约定；不再写死 'alerts' 把其它币种串到 BTC。 */
   const localVaultKey=()=>{const c=currentCoin();return c==='BTC'?'alerts':'alerts_'+c};
@@ -41,28 +41,46 @@
   };
   const tsOf=v=>Number(v&&v.updatedAt)||0;
   const mergeById=(localArr=[],cloudArr=[])=>{const map=new Map();for(const r of cloudArr)if(r&&r.id)map.set(r.id,{...r});for(const r of localArr)if(r&&r.id){const ex=map.get(r.id);if(!ex||tsOf(r)>=tsOf(ex))map.set(r.id,{...r});}return[...map.values()]};
-  // v2.12.69：推送规则双向合并（同 id 比时间戳取新，不同 id 并集保留；本地专属类只留本地）
+  /* v2.12.81：按「规则特征」生成去重签名，使同步不再依赖规则 id——无论本机/云端 id 如何变化，
+     同特征（同币种同类型同关键参数）只保留一条。彻底消除「不同 id 并集」产生的重复规则。 */
+  const ruleSignature=(r)=>{
+    const coin=r.coin||'BTC',kind=r.kind;
+    if(kind==='round_number')return `round:${coin}:${Number(r.step)}:${r.direction||'both'}`;
+    if(kind==='custom_grid')return `grid:${coin}:${Number(r.basePrice)}:${Number(r.step)}:${r.direction||'both'}`;
+    if(kind==='volatility')return `vol:${coin}:${Number(r.windowMinutes)}:${Number(r.threshold)}:${r.direction||'both'}`;
+    return `price:${kind}:${coin}:${Number(r.targetPrice)}:${Math.max(STATEFUL_KINDS.includes(kind)?1:0,Number(r.cooldownMinutes)||0)}:${r.repeat!==false}`;
+  };
+  // v2.12.81：推送规则按特征去重双向合并（同特征只留一条，复用云端 id 使后续同步幂等）
   async function syncRules(){
     const coin=currentCoin();
     const local=await localAlertData();
-    const localRules=(Array.isArray(local.rules)?local.rules:[]).map(r=>({...r,coin}));
+    const localRules=(Array.isArray(local.rules)?local.rules:[]).filter(r=>r&&r.id).map(r=>({...r,coin}));
     const allCloud=(await api('/api/alerts/rules')).rules||[];
-    /* 下载侧：把服务端 params JSONB 展开回规则顶层字段（step/direction/windowMinutes/threshold），
-       mergeById 与本地规则格式保持一致。 */
+    /* 下载侧：把服务端 params JSONB 展开回规则顶层字段（step/direction/windowMinutes/threshold）。 */
     const cloudRules=allCloud.filter(r=>(r.coin||'BTC')===coin).map(r=>({repeat:true,...r,...(r.params&&typeof r.params==='object'?r.params:{})}));
-    const merged=mergeById(localRules,cloudRules);
-    const localOrigin=new Set(localRules.filter(r=>CLOUD_KINDS.includes(r.kind)).map(r=>r.id));
-    for(const r of merged){
-      if((r.coin||'BTC')!==coin) continue; // 不触碰其它币种的云端规则
-      if(!localOrigin.has(r.id)||!CLOUD_KINDS.includes(r.kind)) continue;
-      await api('/api/alerts/rules',{method:'POST',body:JSON.stringify(ruleSyncPayload(r,coin))});
+    const cloudBySig=new Map();
+    for(const c of cloudRules)if(c&&c.id)cloudBySig.set(ruleSignature(c),c);
+    /* 上传：本地规则先按特征去重（同一特征只推一次），若云端已有同特征规则则复用其 id 更新，避免重复。 */
+    const localBySig=new Map();
+    for(const r of localRules){if(!CLOUD_KINDS.includes(r.kind))continue;const s=ruleSignature(r);if(!localBySig.has(s))localBySig.set(s,r);}
+    for(const [,r] of localBySig){
+      const payload=ruleSyncPayload(r,coin);
+      const existing=cloudBySig.get(ruleSignature(r));
+      if(existing)payload.id=existing.id; // 复用云端 id，更新而非新建
+      await api('/api/alerts/rules',{method:'POST',body:JSON.stringify(payload)});
     }
+    /* 下载：重新拉取云端并同样按特征合并，云端特征优先（保留云端 id，使后续同步幂等）。 */
+    const freshCloud=(await api('/api/alerts/rules')).rules||[];
+    const freshCloudRules=freshCloud.filter(r=>(r.coin||'BTC')===coin).map(r=>({repeat:true,...r,...(r.params&&typeof r.params==='object'?r.params:{})}));
+    const mergedBySig=new Map();
+    for(const c of freshCloudRules)if(c&&c.id)mergedBySig.set(ruleSignature(c),{...c});
+    for(const [s,r] of localBySig)if(!mergedBySig.has(s))mergedBySig.set(s,{...r});
     const localOnly=localRules.filter(r=>r&&!CLOUD_KINDS.includes(r.kind));
-    const finalLocal=[...merged.filter(r=>CLOUD_KINDS.includes(r.kind)),...localOnly];
+    const finalLocal=[...mergedBySig.values(),...localOnly];
     await saveLocalAlertData(finalLocal);
     window.dispatchEvent(new Event('btc:cloud-rules-synced'));
     await refresh();
-    return merged.length;
+    return finalLocal.length;
   }
   // v2.12.69：自动播报（语音规则）双向合并
   async function syncVoiceBidirectional(){
@@ -110,7 +128,7 @@
   const setUploadPromptState=(state)=>{try{localStorage.setItem(UPLOAD_PROMPT_KEY,JSON.stringify({state,at:Date.now()}))}catch{}};
   let previousAccount=null;
   const uploadPromptModal=()=>document.getElementById('btcUploadPromptModal');
-  const createUploadPromptModal=()=>{if(uploadPromptModal())return;const div=document.createElement('div');div.id='btcUploadPromptModal';div.className='alert-composer upload-prompt-modal';div.hidden=true;div.innerHTML=`<section><header><b>${tx('检测到已登录','Signed in detected')}</b><button id="closeUploadPrompt" type="button" aria-label="${tx('关闭','Close')}">×</button></header><div class="upload-prompt-body"><p>${tx('是否双向同步本地与云端数据？以时间戳较新的一方为准（同 id 规则取新、持仓按集合时间戳整组替换、API 密钥仅本地→云端上传）。','Bidirectional sync between local and cloud? The newer timestamp wins (same-id rules keep newest; positions replace by set timestamp; API keys upload local→cloud only).')}</p><div class="upload-prompt-grid"><button type="button" data-sync="rules"><b>1</b><span>${tx('同步推送规则与自动播报','Sync alert rules & auto-broadcast')}</span></button><button type="button" data-sync="ai"><b>2</b><span>${tx('同步 AI 助手/API 设置','Sync AI assistant / API settings')}</span></button><button type="button" data-sync="positions"><b>3</b><span>${tx('同步持仓数据','Sync positions')}</span></button></div></div><div class="upload-prompt-footer"><button type="button" data-upload-dismiss="later" class="asu-ghost">${tx('稍后再说','Later')}</button><button type="button" data-upload-dismiss="never" class="ch-clear">${tx('不再提示','Never ask')}</button></div></section>`;document.body.append(div);div.querySelector('#closeUploadPrompt').onclick=()=>{div.hidden=true};div.onclick=(event)=>{if(event.target===div)div.hidden=true};div.querySelectorAll('[data-sync]').forEach(btn=>btn.onclick=()=>handleSync(btn.dataset.sync));div.querySelectorAll('[data-upload-dismiss]').forEach(btn=>btn.onclick=()=>{if(btn.dataset.uploadDismiss==='never')setUploadPromptState('never');div.hidden=true})};
+  const createUploadPromptModal=()=>{if(uploadPromptModal())return;const div=document.createElement('div');div.id='btcUploadPromptModal';div.className='alert-composer upload-prompt-modal';div.hidden=true;div.innerHTML=`<section><header><b>${tx('检测到已登录','Signed in detected')}</b><button id="closeUploadPrompt" type="button" aria-label="${tx('关闭','Close')}">×</button></header><div class="upload-prompt-body"><p>${tx('是否双向同步本地与云端数据？推送规则按特征去重合并（同特征只保留一条）、持仓按集合时间戳整组替换、API 密钥仅本地→云端上传。','Bidirectional sync between local and cloud? The newer timestamp wins (same-id rules keep newest; positions replace by set timestamp; API keys upload local→cloud only).')}</p><div class="upload-prompt-grid"><button type="button" data-sync="rules"><b>1</b><span>${tx('同步推送规则与自动播报','Sync alert rules & auto-broadcast')}</span></button><button type="button" data-sync="ai"><b>2</b><span>${tx('同步 AI 助手/API 设置','Sync AI assistant / API settings')}</span></button><button type="button" data-sync="positions"><b>3</b><span>${tx('同步持仓数据','Sync positions')}</span></button></div></div><div class="upload-prompt-footer"><button type="button" data-upload-dismiss="later" class="asu-ghost">${tx('稍后再说','Later')}</button><button type="button" data-upload-dismiss="never" class="ch-clear">${tx('不再提示','Never ask')}</button></div></section>`;document.body.append(div);div.querySelector('#closeUploadPrompt').onclick=()=>{div.hidden=true};div.onclick=(event)=>{if(event.target===div)div.hidden=true};div.querySelectorAll('[data-sync]').forEach(btn=>btn.onclick=()=>handleSync(btn.dataset.sync));div.querySelectorAll('[data-upload-dismiss]').forEach(btn=>btn.onclick=()=>{if(btn.dataset.uploadDismiss==='never')setUploadPromptState('never');div.hidden=true})};
   const handleSync=async(kind)=>{try{if(kind==='rules'){const n=await syncRules();notice(tx(`推送规则与自动播报已双向同步（${n} 条规则）。`,`Alert rules & auto-broadcast synced (${n} rules).`))}else if(kind==='ai'){await syncAiSettings()}else if(kind==='positions'){const r=await syncPositionsBidirectional();notice(tx(`持仓已${r.dir==='upload'?'上传':'下载'}（${r.count} 个）。`,`Positions ${r.dir==='upload'?'uploaded':'downloaded'} (${r.count}).`))}setUploadPromptState('done');uploadPromptModal().hidden=true}catch(error){notice(error.message)}};
   const handleUpload=handleSync;
   const handleDownload=async()=>{};
