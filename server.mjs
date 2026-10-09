@@ -12,6 +12,7 @@ import { Communicate } from 'edge-tts.js';
 import { createAiChat, DEFAULT_MODEL as QWEN_DEFAULT_MODEL } from './ai-chat.mjs';
 import { createAlertStore } from './alert-store.mjs';
 import { evaluateAlertRule } from './shared/alert-rule-eval.mjs';
+import { sendChannelMessage } from './notification.mjs';
 // Research tuning config + pure fusion-model training, now shared with the
 // training worker thread so the two never drift. See shared/ for the rationale.
 // 研究超参配置与纯融合模型训练，现与训练 Worker 线程共用，避免两处漂移。
@@ -55,6 +56,99 @@ const coinbaseId = () => instIdFor('coinbase');
 
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || '127.0.0.1';
+
+/* ── 本地持仓 SQLite（vNEXT）：OKX 扩展同步时落库，作为 localStorage/云端之外的本地持久层 ── */
+const POSITIONS_DB_PATH = join(process.cwd(), 'data', 'positions.sqlite');
+let _positionsDb = null;
+function getPositionsDb() {
+  if (_positionsDb) return _positionsDb;
+  mkdirSync(join(process.cwd(), 'data'), { recursive: true });
+  _positionsDb = new DatabaseSync(POSITIONS_DB_PATH);
+  _positionsDb.exec(`
+    CREATE TABLE IF NOT EXISTS positions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      coin TEXT NOT NULL,
+      slot INTEGER NOT NULL DEFAULT 1,
+      side TEXT NOT NULL,
+      exchange TEXT NOT NULL,
+      amount REAL,
+      margin REAL,
+      leverage REAL,
+      entry REAL,
+      mark REAL,
+      liq_price REAL,
+      opened_at TEXT,
+      source TEXT NOT NULL DEFAULT 'okx',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(coin, slot)
+    );
+    CREATE INDEX IF NOT EXISTS idx_positions_coin ON positions(coin);
+    CREATE INDEX IF NOT EXISTS idx_positions_updated ON positions(updated_at);
+  `);
+  return _positionsDb;
+}
+function rowToPosition(row) {
+  return {
+    symbol: row.coin,
+    slot: row.slot,
+    side: row.side,
+    exchange: row.exchange,
+    amount: row.amount,
+    margin: row.margin,
+    leverage: row.leverage,
+    entry: row.entry,
+    mark: row.mark,
+    liqPrice: row.liq_price,
+    openedAt: row.opened_at,
+    source: row.source,
+    updatedAt: row.updated_at,
+  };
+}
+function listLocalPositions(coin) {
+  const db = getPositionsDb();
+  if (coin) {
+    return db.prepare('SELECT * FROM positions WHERE coin = ? ORDER BY slot').all(coin).map(rowToPosition);
+  }
+  return db.prepare('SELECT * FROM positions ORDER BY coin, slot').all().map(rowToPosition);
+}
+function upsertLocalPosition(payload) {
+  const db = getPositionsDb();
+  const coin = normalizeCoin(payload.symbol);
+  const slot = Number(payload.slot) || 1;
+  const side = payload.side === 'short' ? 'short' : 'long';
+  const exchange = String(payload.exchange || 'okx').toLowerCase();
+  const amount = Number(payload.amount) || 0;
+  const margin = Number(payload.margin) || 0;
+  const leverage = Number(payload.leverage) || 1;
+  const entry = Number(payload.entry) || 0;
+  const mark = Number(payload.mark) || 0;
+  const liqPrice = Number(payload.liqPrice) || 0;
+  const openedAt = payload.openedAt || null;
+  const source = String(payload.source || 'okx').toLowerCase();
+  db.prepare(`
+    INSERT INTO positions (coin, slot, side, exchange, amount, margin, leverage, entry, mark, liq_price, opened_at, source, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    ON CONFLICT(coin, slot) DO UPDATE SET
+      side=excluded.side,
+      exchange=excluded.exchange,
+      amount=excluded.amount,
+      margin=excluded.margin,
+      leverage=excluded.leverage,
+      entry=excluded.entry,
+      mark=excluded.mark,
+      liq_price=excluded.liq_price,
+      opened_at=excluded.opened_at,
+      source=excluded.source,
+      updated_at=datetime('now')
+  `).run(coin, slot, side, exchange, amount, margin, leverage, entry, mark, liqPrice, openedAt, source);
+  return { coin, slot, side, exchange, amount, margin, leverage, entry, mark, liqPrice, openedAt, source };
+}
+function deleteLocalPosition(coin, slot) {
+  getPositionsDb().prepare('DELETE FROM positions WHERE coin = ? AND slot = ?')
+    .run(normalizeCoin(coin), Number(slot) || 1);
+}
+
 // Optional: a Finnhub key upgrades the calendar with consensus, actual and
 // previous values.  The dashboard deliberately remains useful without one.
 const PUBLIC = join(process.cwd(), 'public');
@@ -85,6 +179,8 @@ function openApiCredentials(text) {
   return JSON.parse(Buffer.concat([cipher.update(raw.subarray(28)),cipher.final()]).toString('utf8'));
 }
 let apiCredentials={};
+// 环境变量注入的链上 Key（服务器 CI 场景）；api-center 保存的 Key 优先级更低，两者任一即可。
+const ONCHAIN_API_KEY_ENV=String(process.env.ONCHAIN_API_KEY || '').trim();
 try { apiCredentials=openApiCredentials(readFileSync(API_CREDENTIALS_FILE,'utf8')); } catch(error) { console.warn(`API credentials unavailable: ${error.message}`); apiCredentials={}; }
 // A key explicitly saved through API Center is the active local preference.
 // Environment variables remain the deployment fallback when no local setting
@@ -122,8 +218,8 @@ function qwenCredential() {
     model:String(saved.model || process.env.DASHSCOPE_MODEL || QWEN_DEFAULT_MODEL).trim()
   };
 }
-function apiCredentialStatus() { return { finnhub:Boolean(FINNHUB_API_KEY), eia:Boolean(EIA_API_KEY), coingecko:Boolean(COINGECKO_API_KEY), custom:Boolean(apiCredentials.custom?.url), qwen:Boolean(qwenCredential().key) }; }
-function apiCredentialVerification() { const saved=apiCredentials._verification || {}; return {finnhub:Boolean(saved.finnhub?.valid),eia:Boolean(saved.eia?.valid),coingecko:Boolean(saved.coingecko?.valid),qwen:Boolean(saved.qwen?.valid)}; }
+function apiCredentialStatus() { return { finnhub:Boolean(FINNHUB_API_KEY), eia:Boolean(EIA_API_KEY), coingecko:Boolean(COINGECKO_API_KEY), custom:Boolean(apiCredentials.custom?.url), qwen:Boolean(qwenCredential().key), cryptoquant:Boolean(String(apiCredentials.cryptoquant||'').trim() || ONCHAIN_API_KEY_ENV) }; }
+function apiCredentialVerification() { const saved=apiCredentials._verification || {}; return {finnhub:Boolean(saved.finnhub?.valid),eia:Boolean(saved.eia?.valid),coingecko:Boolean(saved.coingecko?.valid),qwen:Boolean(saved.qwen?.valid),cryptoquant:Boolean(saved.cryptoquant?.valid)}; }
 function saveApiCredentialsFile() { writeFileSync(API_CREDENTIALS_FILE,sealApiCredentials(apiCredentials),{mode:0o600}); }
 // Migrate legacy plaintext settings as soon as a configured encryption key is
 // available.  If the key is absent we keep the service running, but refuse all
@@ -138,7 +234,7 @@ if (apiCredentials.qwen && apiCredentials.qwen.model === 'qwen3.8-max' && !apiCr
   try { saveApiCredentialsFile(); } catch(error) { console.warn(`Qwen model migration deferred: ${error.message}`); }
 }
 function validApiUrl(value) { try { const url=new URL(String(value||'').trim()); return url.protocol==='https:' && !url.username && !url.password && url.href.length<=2048 ? url.href : null; } catch { return null; } }
-const API_PROVIDERS = ['finnhub','eia','coingecko','custom','qwen'];
+const API_PROVIDERS = ['finnhub','eia','coingecko','custom','qwen','cryptoquant'];
 function saveApiCredential(provider, key, url, model) {
   if (!API_PROVIDERS.includes(provider)) throw Object.assign(new Error('Unsupported API provider'),{statusCode:400});
   const value=String(key || '').trim();
@@ -165,6 +261,7 @@ function saveApiCredential(provider, key, url, model) {
   if (provider==='finnhub') { FINNHUB_API_KEY=value; cache.delete('investment-calendar'); }
   if (provider==='eia') EIA_API_KEY=value;
   if (provider==='coingecko') { COINGECKO_API_KEY=value; cache.delete('fed-market-signals'); }
+  if (provider==='cryptoquant') { for (const k of [...cache.keys()]) if (String(k).includes(':onchain:')) cache.delete(k); }
 }
 // 切换千问模型：只重写模型名，Key 与端点原样保留，无需重新验证。
 // Switch the Qwen model: only the model name is rewritten; key and endpoint stay untouched.
@@ -185,11 +282,12 @@ function deleteApiCredential(provider) {
   if (provider==='finnhub') { FINNHUB_API_KEY=String(process.env.FINNHUB_API_KEY || '').trim(); cache.delete('investment-calendar'); }
   if (provider==='eia') EIA_API_KEY=String(process.env.EIA_API_KEY || '').trim();
   if (provider==='coingecko') { COINGECKO_API_KEY=String(process.env.COINGECKO_API_KEY || '').trim(); cache.delete('fed-market-signals'); }
+  if (provider==='cryptoquant') { for (const k of [...cache.keys()]) if (String(k).includes(':onchain:')) cache.delete(k); }
 }
 async function verifyApiCredential(provider) {
-  if (!['finnhub','eia','coingecko','qwen'].includes(provider)) throw Object.assign(new Error('该类型的 API 地址无法通用验证；请按其服务商文档确认响应格式。'),{statusCode:400});
+  if (!['finnhub','eia','coingecko','qwen','cryptoquant'].includes(provider)) throw Object.assign(new Error('该类型的 API 地址无法通用验证；请按其服务商文档确认响应格式。'),{statusCode:400});
   const credential = provider === 'qwen' ? qwenCredential() : null;
-  const key = provider === 'qwen' ? credential.key : {finnhub:FINNHUB_API_KEY,eia:EIA_API_KEY,coingecko:COINGECKO_API_KEY}[provider];
+  const key = provider === 'qwen' ? credential.key : {finnhub:FINNHUB_API_KEY,eia:EIA_API_KEY,coingecko:COINGECKO_API_KEY,cryptoquant:String(apiCredentials.cryptoquant||'').trim()}[provider];
   if(!key) throw Object.assign(new Error('请先保存 API Key。'),{statusCode:400});
   try {
     // 千问：用一次极小请求验证 Key + 端点 + 模型三者是否匹配。
@@ -215,6 +313,13 @@ async function verifyApiCredential(provider) {
       // minimal credential check.
       const payload=await request(`https://api.coingecko.com/api/v3/ping?x_cg_demo_api_key=${encodeURIComponent(key)}`,8_000);
       if(!payload || typeof payload!=='object') throw new Error('CoinGecko 返回格式无效');
+    } else if(provider==='cryptoquant') {
+      // 链上数据（exchange-flows 等）需 Professional+ 付费套餐，免费 Key 调它会 403。
+      // 因此验证改用所有套餐均可调的 Market data 端点（只验证 Key 本身的有效性）。
+      const payload=await request('https://api.cryptoquant.com/v1/btc/market-data/price-ohlcv?window=day&limit=1',8_000,{Authorization:`Bearer ${key}`});
+      if(!payload || typeof payload!=='object') throw new Error('CryptoQuant 返回格式无效');
+      apiCredentials._verification={...(apiCredentials._verification||{}),cryptoquant:{valid:true,limited:true,verifiedAt:Date.now()}}; saveApiCredentialsFile();
+      return { valid:true, limited:true, message:'CryptoQuant Key 验证通过。注意：链上数据（交易所净流出/巨鲸）需 Professional 及以上付费套餐；市场异动卡片的链上行默认使用 CoinMetrics 免费源（日级数据），无需此 Key。' };
     } else if(provider==='finnhub') {
       // Economic Calendar is Premium. Verify a free-plan endpoint first so a
       // valid free registration is not incorrectly reported as a bad key.
@@ -233,7 +338,7 @@ async function verifyApiCredential(provider) {
       apiCredentials={...apiCredentials,qwen:{...(apiCredentials.qwen||{}),key:credential.key,baseUrl:credential.baseUrl,model:credential.model}};
     }
     apiCredentials._verification={...(apiCredentials._verification||{}),[provider]:{valid:true,verifiedAt:Date.now()}}; saveApiCredentialsFile();
-    return { valid:true, message:`${provider==='qwen'?`千问（${credential.model}）`:provider==='finnhub'?'Finnhub':provider==='eia'?'EIA':'CoinGecko'} 验证通过。`, ...(provider==='qwen'?{endpoint:credential.baseUrl,model:credential.model}:{}) };
+    return { valid:true, message:`${provider==='qwen'?`千问（${credential.model}）`:provider==='finnhub'?'Finnhub':provider==='eia'?'EIA':provider==='cryptoquant'?'CryptoQuant':'CoinGecko'} 验证通过。`, ...(provider==='qwen'?{endpoint:credential.baseUrl,model:credential.model}:{}) };
   } catch(error) {
     // A failed check must revoke any earlier success immediately; otherwise an
     // expired or replaced key would continue to expose and authorize AI chat.
@@ -1097,7 +1202,7 @@ async function requireApiCenterAccess(req, res, provider) {
   return Boolean(await requireAlertUser(req, res));
 }
 function intervalFor(source, interval) {
-  const map = { '1m':'1m', '5m':'5m', '15m':'15m', '30m':'30m', '1h':'1H', '2h':'2H', '3h':'3H', '4h':'4H', '1d':'1D', '1w':'1W' };
+  const map = { '1m':'1m', '5m':'5m', '15m':'15m', '30m':'30m', '1h':'1H', '2h':'2H', '3h':'3H', '4h':'4H', '6h':'6H', '1d':'1D', '1w':'1W' };
   if (source === 'gate' || source === 'binance') return interval === '1h' ? '1h' : interval === '2h' ? '2h' : interval === '4h' ? '4h' : interval === '1d' ? '1d' : interval === '1w' ? '1w' : interval;
   return map[interval];
 }
@@ -1436,6 +1541,201 @@ async function marketContext(source = 'okx') {
     throw error;
   }
 }
+
+/* ==== Market health / 市场异动监测 ====
+   基于现有 OKX 数据（market() 蜡烛 + marketContext 资金费率/OI）实时评估 5 类异动：
+   成交量放大、资金费率极端、永续 OI 快速变化、关键支撑/阻力有效收盘突破；
+   链上（交易所净流出）默认走 CoinMetrics Community 免费 API（无需 Key，日级）；
+   也可配置 ONCHAIN_API_KEY 走 cryptoquant|coinglass（注意 CryptoQuant 链上数据需 Professional 及以上付费套餐，免费 Key 会 403）。 */
+const MARKET_HEALTH_TTL = 20_000;
+const ONCHAIN_TTL = 120_000;
+function onchainApiKey() { return String(ONCHAIN_API_KEY_ENV || (apiCredentials && (apiCredentials.cryptoquant || apiCredentials.onchain)) || '').trim(); }
+function onchainProvider() { return String(process.env.ONCHAIN_PROVIDER || 'coinmetrics').toLowerCase(); }
+function mhPrice(p) { return p == null ? '--' : (p >= 1000 ? Math.round(p).toLocaleString('en-US') : p.toFixed(2)); }
+
+function mhBand(v, watch, alert) {
+  const a = Math.abs(Number(v) || 0);
+  if (a >= alert) return 'alert';
+  if (a >= watch) return 'watch';
+  return 'normal';
+}
+function mhVolumeStats(candles) {
+  const vols = candles.map(c => c.volume).filter(v => Number.isFinite(v) && v > 0);
+  if (vols.length < 22) return null;
+  // 末根通常是「当前进行中」的 K 线（成交量尚在累积），用它比 MA 会恒偏小；
+  // 改用最近一根「已收盘」K 线（vols[n-2]）作为比较基准。
+  const last = vols[vols.length - 2];
+  const window20 = vols.slice(-22, -2);
+  const ma = window20.reduce((a, b) => a + b, 0) / window20.length;
+  return { last, ma, ratio: ma > 0 ? last / ma : null };
+}
+function mhPivots(candles, left = 3, right = 3) {
+  const pivots = []; const n = candles.length;
+  for (let i = left; i < n - right; i++) {
+    let hi = true, lo = true;
+    for (let j = i - left; j <= i + right; j++) {
+      if (candles[j].high >= candles[i].high) hi = false;
+      if (candles[j].low <= candles[i].low) lo = false;
+    }
+    if (hi) pivots.push({ price: candles[i].high, type: 'resistance', index: i });
+    if (lo) pivots.push({ price: candles[i].low, type: 'support', index: i });
+  }
+  return pivots;
+}
+async function fetchCoinmetrics() {
+  // CoinMetrics Community API：无需 Key，日级，交易所流入/流出（native 单位 BTC）。
+  const url = 'https://community-api.coinmetrics.io/v4/timeseries/asset-metrics?assets=btc&metrics=FlowInExNtv,FlowOutExNtv,SplyExNtv&frequency=1d&page_size=3';
+  const d = await request(url, 12_000);
+  const rows = Array.isArray(d?.data) ? d.data : [];
+  if (!rows.length) throw new Error('CoinMetrics 未返回数据');
+  const last = rows[rows.length - 1];
+  const inf = Number(last.FlowInExNtv), out = Number(last.FlowOutExNtv), sply = Number(last.SplyExNtv);
+  const netflow = (Number.isFinite(inf) && Number.isFinite(out)) ? out - inf : null; // 正=净流入交易所，负=净流出（与 CryptoQuant 口径一致）
+  return { netflow, whaleTx: null, exchangeReserve: Number.isFinite(sply) ? sply : null, day: String(last.time || '').slice(0, 10) || null };
+}
+async function fetchOnchain() {
+  const provider = onchainProvider();
+  const key = onchainApiKey();
+  const needKey = provider === 'cryptoquant' || provider === 'coinglass';
+  if (needKey && !key) {
+    // 指定了需 Key 的 provider 但没配 Key：回落 CoinMetrics 免费源，而不是显示「未配置」。
+    try {
+      const cm = await fetchCoinmetrics();
+      return { configured: true, provider: 'coinmetrics', netflow: cm.netflow, whaleTx: cm.whaleTx, available: cm.netflow != null,
+        exchangeReserve: cm.exchangeReserve, day: cm.day,
+        note: cm.netflow != null ? null : 'CoinMetrics 免费源未返回有效数据。' };
+    } catch (e) {
+      return { configured: false, provider, netflow: null, whaleTx: null,
+        note: `未配置链上 API Key（ONCHAIN_API_KEY），且 CoinMetrics 免费源请求失败：${e.message}` };
+    }
+  }
+  try {
+    let netflow = null, whaleTx = null, err = null, exchangeReserve = null, day = null;
+    if (provider === 'coinmetrics') {
+      try {
+        const cm = await fetchCoinmetrics();
+        netflow = cm.netflow; whaleTx = cm.whaleTx; exchangeReserve = cm.exchangeReserve; day = cm.day;
+      } catch (e) { err = e.message; }
+    } else if (provider === 'cryptoquant') {
+      // CryptoQuant 用 Bearer 鉴权；链上数据（exchange-flows）需 Professional 及以上付费套餐，
+      // 免费 Key 调用直接 403 → 403 时自动回落 CoinMetrics 免费源，不空转。
+      const headers = { Authorization: `Bearer ${key}` };
+      const cqExtract = (obj, metric) => {
+        let arr = obj?.data?.[metric]?.value || obj?.data?.[metric.replace(/\//g, '')]?.value;
+        if (!Array.isArray(arr) && Array.isArray(obj?.data)) {
+          for (const it of obj.data) { const n = it?.[metric]; if (Array.isArray(n?.value)) { arr = n.value; break; } }
+        }
+        return (Array.isArray(arr) && arr.length) ? Number(arr[arr.length - 1]) : null;
+      };
+      try {
+        const [inf, out] = await Promise.all([
+          request('https://api.cryptoquant.com/v1/btc/exchange-flows/inflow?window=day', 12_000, headers),
+          request('https://api.cryptoquant.com/v1/btc/exchange-flows/outflow?window=day', 12_000, headers),
+        ]);
+        const infV = cqExtract(inf, 'exchange-flows/inflow');
+        const outV = cqExtract(out, 'exchange-flows/outflow');
+        if (outV != null && infV != null) netflow = outV - infV; // 正=净流入交易所，负=净流出
+        // 付费层若开放 netflow 端点则优先覆盖上面的计算值
+        const nf = await request('https://api.cryptoquant.com/v1/btc/exchange-flows/netflow?window=day', 12_000, headers).catch(() => null);
+        const nfV = cqExtract(nf, 'exchange-flows/netflow') ?? cqExtract(nf, 'netflow');
+        if (nfV != null) netflow = nfV;
+      } catch (e) {
+        err = e.message;
+        if (String(e.statusCode || e.status || '') === '403' || /403/.test(e.message)) {
+          try {
+            const cm = await fetchCoinmetrics();
+            netflow = cm.netflow; exchangeReserve = cm.exchangeReserve; day = cm.day;
+            if (netflow != null) err = `CryptoQuant 套餐不含链上数据（HTTP 403，需 Professional+），已改用 CoinMetrics 免费源。`;
+          } catch (e2) { err = e.message; }
+        }
+      }
+      // 巨鲸大额交易笔数（network-data 指标，付费套餐限定，拿不到则优雅降级为 null）
+      try {
+        const wt = await request('https://api.cryptoquant.com/v1/btc/network-data/transactions-count-large-value?window=day', 12_000, headers);
+        whaleTx = cqExtract(wt, 'network-data/transactions-count-large-value') ?? cqExtract(wt, 'transactions-count-large-value');
+      } catch { /* 降级为 null */ }
+    } else if (provider === 'coinglass') {
+      const headers = { 'coinglass-api-key': key };
+      try {
+        const nf = await request('https://open-api.coinglass.com/api/pro/v1/futures/balance/ex/allEx?symbol=BTC&timeType=0', 12_000, headers);
+        netflow = Number(nf?.data?.netflowFlow ?? nf?.data?.netFlowAll ?? null);
+      } catch (e) { err = e.message; }
+      try {
+        const wt = await request('https://open-api.coinglass.com/api/pro/v1/whale/transaction?symbol=BTC', 12_000, headers);
+        whaleTx = Number(wt?.data?.list?.length ?? wt?.data?.count ?? null);
+      } catch (e) { err = err || e.message; }
+    }
+    const available = netflow != null || whaleTx != null;
+    return { configured: true, provider, netflow, whaleTx, available, exchangeReserve, day,
+      note: available ? null : `链上接口未返回有效数据${err ? '：' + err : '，请检查 Provider / Key。'}` };
+  } catch (e) {
+    return { configured: true, provider, netflow: null, whaleTx: null, available: false, note: `链上接口请求失败：${e.message}` };
+  }
+}
+async function marketHealth(source = 'okx', interval = '4h') {
+  const selected = loaders[source] ? source : 'okx';
+  const key = coinKey(`market-health:${selected}:${interval}`);
+  const hit = cache.get(key);
+  if (hit && Date.now() - hit.time < MARKET_HEALTH_TTL) return { ...cacheResult(hit), stale: false };
+  return coalesce(key, async () => {
+    const [mkt, ctx] = await Promise.all([ market(interval, 200, selected), marketContext(selected) ]);
+    const candles = mkt.candles || [];
+    const vol = mhVolumeStats(candles);
+    const volRatio = vol?.ratio ?? null;
+    const volLevel = volRatio == null ? 'normal' : mhBand(volRatio, 1.6, 2.5);
+    const fr = Number.isFinite(ctx.fundingRate) ? ctx.fundingRate : null;
+    const frAnnual = fr == null ? null : fr * 3 * 365 * 100;
+    const frChange = Number.isFinite(ctx.fundingChangePct) ? ctx.fundingChangePct : null;
+    const frLevel = fr == null ? 'normal' : mhBand(fr, 0.0005, 0.001);
+    const oi = Number.isFinite(ctx.oi) ? ctx.oi : null;
+    const oiChange = Number.isFinite(ctx.oiChangePct) ? ctx.oiChangePct : null;
+    const oiLevel = oiChange == null ? 'normal' : mhBand(oiChange, 3, 8);
+    let sr = { level: 'normal', broken: null, near: null, note: null };
+    const last = candles[candles.length - 1];
+    const price = mkt.ticker?.last ?? last?.close;
+    if (last && price) {
+      const pivots = mhPivots(candles);
+      const recent = pivots.filter(p => p.index < candles.length - 1 && Math.abs(p.price - last.close) / last.close < 0.06)
+        .sort((a, b) => Math.abs(a.price - last.close) - Math.abs(a.price - last.close));
+      const eps = 0.0015;
+      for (const p of recent) {
+        if (p.type === 'resistance' && last.close > p.price * (1 + eps)) { sr = { level: 'alert', broken: { type: 'resistance', price: p.price, dir: 'up' } }; break; }
+        if (p.type === 'support' && last.close < p.price * (1 - eps)) { sr = { level: 'alert', broken: { type: 'support', price: p.price, dir: 'down' } }; break; }
+      }
+      if (sr.level === 'normal' && recent.length) {
+        const nearest = recent[0];
+        if (Math.abs(nearest.price - last.close) / last.close < 0.003) sr = { level: 'watch', near: { type: nearest.type, price: nearest.price } };
+      }
+      sr.note = sr.broken ? `最近收盘价已${sr.broken.dir === 'up' ? '上破' : '下破'}${sr.broken.type === 'resistance' ? '阻力' : '支撑'} ${mhPrice(sr.broken.price)}`
+        : sr.near ? `价格逼近${sr.near.type === 'resistance' ? '阻力' : '支撑'} ${mhPrice(sr.near.price)}` : '近期无显著支撑/阻力突破';
+    }
+    const ocKey = coinKey(`onchain:${selected}`);
+    const ocHit = cache.get(ocKey);
+    const onchain = (ocHit && Date.now() - ocHit.time < ONCHAIN_TTL) ? ocHit.value
+      : (await fetchOnchain().then(v => { remember(ocKey, v); return v; }));
+    const netflowLevel = onchain?.netflow != null ? mhBand(onchain.netflow, 2000, 5000) : 'normal';
+    const whaleLevel = onchain?.whaleTx != null ? mhBand(onchain.whaleTx, 30, 80) : 'normal';
+    const result = {
+      coin: currentCoin(), source: selected, interval, price,
+      generatedAt: Date.now(),
+      volume: { last: vol?.last ?? null, ma: vol?.ma ?? null, ratio: volRatio, amplified: volLevel !== 'normal', level: volLevel,
+        note: volRatio == null ? '成交量样本不足' : `当前 K 线成交量 ${volRatio.toFixed(2)}× 近 20 根均值` },
+      funding: { rate: fr, annualizedPct: frAnnual, changePct: frChange, extreme: frLevel !== 'normal', level: frLevel,
+        note: fr == null ? '资金费率不可用' : `资金费率 ${(fr * 100).toFixed(4)}% / 8h（年化约 ${frAnnual == null ? '--' : frAnnual.toFixed(0) + '%'}）${frChange != null ? '，1h 变化 ' + (frChange >= 0 ? '+' : '') + frChange.toFixed(3) + '%' : ''}` },
+      oi: { value: oi, unit: ctx.oiUnit ?? null, changePct: oiChange, windowSeconds: ctx.oiChangeWindowSeconds ?? null, rapid: oiLevel !== 'normal', level: oiLevel,
+        note: oiChange == null ? 'OI 快照积累中' : `未平仓合约 ${oiChange >= 0 ? '+' : ''}${oiChange.toFixed(2)}%（约 ${ctx.oiChangeWindowSeconds ?? 300}s 窗口）` },
+      srBreakout: sr,
+      onchain: { ...onchain, netflowLevel, whaleLevel }
+    };
+    remember(key, result);
+    return result;
+  }, 30_000).catch(error => {
+    const h = cache.get(key);
+    if (h && Date.now() - h.time <= STALE_QUOTE_MAX_AGE) return { ...cacheResult(h), stale: true, fallbackReason: error.message };
+    throw error;
+  });
+}
+
 function storedFearGreedSentiment(now = Date.now()) {
   const row = latestSentimentSnapshot.get();
   if (!row || !Number.isFinite(+row.value)) return null;
@@ -1516,7 +1816,9 @@ function nearestDate(text, { range = false } = {}) {
 // a page-wide "nearest date" scan can therefore attach an unrelated date to
 // the FOMC event. Monetary-policy decisions are released on the final meeting
 // day at 14:00 ET.
-function nearestFomcDecision(html, now = Date.now()) {
+// v2.12.70：利率监测需要未来多场 FOMC 决议日，把「最近一场」泛化为「全部候选」（同一解析规则）。
+// Nearest wrapper kept for the calendar; fedRateMonitor uses the full candidate list.
+function fomcDecisionCandidates(html, now = Date.now()) {
   const source = String(html || ''), candidates = [];
   const headings = [...source.matchAll(/\b(20\d{2}) FOMC Meetings\b/g)];
   for (let sectionIndex = 0; sectionIndex < headings.length; sectionIndex++) {
@@ -1539,7 +1841,10 @@ function nearestFomcDecision(html, now = Date.now()) {
     }
   }
   candidates.sort((a, b) => a.at - b.at);
-  return candidates[0] || null;
+  return candidates;
+}
+function nearestFomcDecision(html, now = Date.now()) {
+  return fomcDecisionCandidates(html, now)[0] || null;
 }
 // BLS publishes a canonical ICS calendar; parse its Employment Situation event instead of guessing from page prose.
 // BLS 提供权威 ICS 日历；非农直接解析 Employment Situation 事件，不再从网页正文猜测日期。
@@ -1643,17 +1948,17 @@ async function fedMarketSignals() {
       request('https://api.coingecko.com/api/v3/global', 8_000, COINGECKO_API_KEY ? { 'x-cg-demo-api-key':COINGECKO_API_KEY } : {}),
       request('https://api.coinlore.net/api/global/', 8_000)
     ]);
-    const unavailable=(name)=>({ key:name, name, available:false, source:'Yahoo Finance', detail:'公开行情暂不可用' });
+    const unavailable=(key, name)=>({ key, name, available:false, source:'Yahoo Finance', detail:'公开行情暂不可用' });
     const market=[];
-    market.push(gold.status==='fulfilled' ? dailySignal('gold','黄金指数',gold.value.quote,'Yahoo Finance') : unavailable('黄金指数'));
-    market.push(dxy.status==='fulfilled' ? dailySignal('dxy','美元指数',dxy.value.quote,'Yahoo Finance') : unavailable('美元指数'));
-    market.push(ndx.status==='fulfilled' ? dailySignal('ndx','纳斯达克100',ndx.value.quote,'Yahoo Finance') : unavailable('纳斯达克100'));
-    market.push(spx.status==='fulfilled' ? dailySignal('spx','标普 500',spx.value.quote,'Yahoo Finance') : unavailable('标普 500'));
-    market.push(us10y.status==='fulfilled' ? us10YieldSignal(us10y.value.quote) : { key:'us10y', name:'美国10年期国债收益率', available:false, source:'Yahoo Finance', detail:'公开行情暂不可用' });
-    market.push(wti.status==='fulfilled' ? dailySignal('wti','WTI 原油',wti.value.quote,'Yahoo Finance') : unavailable('WTI 原油'));
-    market.push(brent.status==='fulfilled' ? dailySignal('brent','布伦特原油',brent.value.quote,'Yahoo Finance') : unavailable('布伦特原油'));
-    market.push(cnh.status==='fulfilled' ? dailySignal('cnh','美元/离岸人民币',cnh.value.quote,'Yahoo Finance') : unavailable('美元/离岸人民币'));
-    market.push(vix.status==='fulfilled' ? dailySignal('vix','VIX 波动率',vix.value.quote,'Yahoo Finance') : unavailable('VIX 波动率'));
+    market.push(gold.status==='fulfilled' ? dailySignal('gold','黄金指数',gold.value.quote,'Yahoo Finance') : unavailable('gold','黄金指数'));
+    market.push(dxy.status==='fulfilled' ? dailySignal('dxy','美元指数',dxy.value.quote,'Yahoo Finance') : unavailable('dxy','美元指数'));
+    market.push(ndx.status==='fulfilled' ? dailySignal('ndx','纳斯达克100',ndx.value.quote,'Yahoo Finance') : unavailable('ndx','纳斯达克100'));
+    market.push(spx.status==='fulfilled' ? dailySignal('spx','标普 500',spx.value.quote,'Yahoo Finance') : unavailable('spx','标普 500'));
+    market.push(us10y.status==='fulfilled' ? us10YieldSignal(us10y.value.quote) : unavailable('us10y','美国10年期国债收益率'));
+    market.push(wti.status==='fulfilled' ? dailySignal('wti','WTI 原油',wti.value.quote,'Yahoo Finance') : unavailable('wti','WTI 原油'));
+    market.push(brent.status==='fulfilled' ? dailySignal('brent','布伦特原油',brent.value.quote,'Yahoo Finance') : unavailable('brent','布伦特原油'));
+    market.push(cnh.status==='fulfilled' ? dailySignal('cnh','美元/离岸人民币',cnh.value.quote,'Yahoo Finance') : unavailable('cnh','美元/离岸人民币'));
+    market.push(vix.status==='fulfilled' ? dailySignal('vix','VIX 波动率',vix.value.quote,'Yahoo Finance') : unavailable('vix','VIX 波动率'));
     const cg=coingecko.status==='fulfilled' ? coingecko.value?.data : null;
     const cl=coinlore.status==='fulfilled' ? (Array.isArray(coinlore.value) ? coinlore.value[0] : coinlore.value?.data?.[0]) : null;
     const dominance=Number(cg?.market_cap_percentage?.btc ?? cl?.btc_d);
@@ -1706,7 +2011,86 @@ async function fedMonitor() {
   let signals;
   try { signals=await fedMarketSignals(); }
   catch { signals={ market:[], fetchedAt:Date.now(), refreshMs:FED_MARKET_SIGNALS_TTL }; }
-  return { ...calendar, events, marketSignals:signals.market, marketSignalsFetchedAt:signals.fetchedAt, marketSignalsRefreshMs:signals.refreshMs };
+  let rateMonitor=null;
+  try { rateMonitor=await fedRateMonitor(); }
+  catch (error) { console.warn('Fed rate monitor unavailable:', error.message); }
+  return { ...calendar, events, marketSignals:signals.market, marketSignalsFetchedAt:signals.fetchedAt, marketSignalsRefreshMs:signals.refreshMs, rateMonitor };
+}
+
+// ===== 美联储利率监测（v2.12.70 · Fed Rate Monitor）=====
+// 目标利率概率链路：CME 30 天联邦基金期货月度合约（Yahoo 免费日线，.CBT 后缀）+ FRED DFEDTARU
+// 当前目标区间上限（免 key）。算法与 Investing.com / CME FedWatch 同族：
+//   隐含月均 EFFR = 100 − 期货价；决议日月末加权，一次 25bp 变动的期望步数
+//   steps = N × (隐含利率 − 会前中值) ÷ ((N − D) × 0.25)，D = 决议日（美东）、N = 当月天数。
+// 实测（2026-10-06）：10 月合约 96.118 与 Investing.com 显示值一字不差；算得 26–29% 变动概率
+// 与其 26.4% 同量级（差值来自 D 的当日归属约定）。
+const FED_RATE_TTL = 10 * 60_000;
+const ZQ_MONTH_CODE = { 1:'F',2:'G',3:'H',4:'J',5:'K',6:'M',7:'N',8:'Q',9:'U',10:'V',11:'X',12:'Z' };
+function daysInMonthUtc(year, monthIndex) { return new Date(Date.UTC(year, monthIndex + 1, 0)).getUTCDate(); }
+async function fedTargetUpper(now = Date.now()) {
+  const key='fed-target-upper', hit=cache.get(key), ttl=6*3_600_000;
+  if (hit && now-hit.time < ttl) return hit.value;
+  const csv = await requestText('https://fred.stlouisfed.org/graph/fredgraph.csv?id=DFEDTARU', 8_000);
+  let upper=null;
+  for (const line of String(csv).trim().split(/\r?\n/).slice(1)) {
+    const value=Number(line.split(',')[1]);
+    if (Number.isFinite(value) && value > 0) upper=value;
+  }
+  if (!upper) throw new Error('FRED DFEDTARU unavailable');
+  remember(key, upper);
+  return upper;
+}
+// 月末加权：返回「会议后目标区间中值期望」与「25bp 步数期望」（负 = 降息方向）。
+function fedRateSteps(midBefore, implied, daysTotal, decisionDay) {
+  const afterDays = daysTotal - decisionDay;
+  if (afterDays <= 0) return null;
+  const expectedMid = (daysTotal*implied - decisionDay*midBefore) / afterDays;
+  return { expectedMid, steps: (expectedMid - midBefore) / 0.25 };
+}
+async function fedRateMonitor(now = Date.now()) {
+  const key='fed-rate-monitor', hit=cache.get(key);
+  if (hit && now-hit.time < FED_RATE_TTL) return cacheResult(hit, now);
+  return coalesce(key, async () => {
+    const [upper, html] = await Promise.all([
+      fedTargetUpper(now),
+      requestText('https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm', 8_000)
+    ]);
+    const decisions = fomcDecisionCandidates(html, now).slice(0, 3);
+    if (!decisions.length) throw new Error('no upcoming FOMC decisions found');
+    const meetings=[];
+    let midBefore = upper - 0.125;
+    for (const decision of decisions) {
+      // 决议瞬间是 14:00 ET，用美东日历字段取「决议日 D」（月末加权锚点）。
+      const parts = new Intl.DateTimeFormat('en-US', { timeZone:'America/New_York', year:'numeric', month:'numeric', day:'numeric' }).formatToParts(new Date(decision.at));
+      const partOf = type => Number(parts.find(p => p.type === type)?.value);
+      const year = partOf('year'), month = partOf('month'), day = partOf('day');
+      const contract = `ZQ${ZQ_MONTH_CODE[month] ?? '?'}${String(year % 100).padStart(2, '0')}.CBT`;
+      try {
+        const { quote } = await yahooHistory(contract);
+        const price = Number(quote?.last);
+        // 30 天联邦基金期货的合理价格带是 90–100 之外基本不可能；越界视为坏数据而不是概率。
+        if (!Number.isFinite(price) || price < 90 || price > 100) throw new Error('implausible futures price');
+        const implied = 100 - price;
+        const steps = fedRateSteps(midBefore, implied, daysInMonthUtc(year, month - 1), day);
+        if (!steps) throw new Error('decision day outside contract month');
+        let stepsPrev = null, prevPrice = Number(quote.previous);
+        if (Number.isFinite(prevPrice) && prevPrice >= 90 && prevPrice <= 100) {
+          stepsPrev = fedRateSteps(midBefore, 100 - prevPrice, daysInMonthUtc(year, month - 1), day)?.steps ?? null;
+        } else prevPrice = null;
+        meetings.push({ at:decision.at, label:decision.label, contract, available:true, price, prevPrice, implied, midBefore, steps:steps.steps, stepsPrev });
+        midBefore = steps.expectedMid;
+      } catch (error) {
+        meetings.push({ at:decision.at, label:decision.label, contract, available:false, detail:String(error.message || error) });
+      }
+    }
+    const result = {
+      targetUpper: upper, targetLower: upper - 0.25, midpoint: upper - 0.125,
+      meetings, fetchedAt: now, refreshMs: FED_RATE_TTL,
+      source: 'CME 30-Day Fed Funds Futures (via Yahoo Finance) + FRED DFEDTARU',
+    };
+    remember(key, result);
+    return result;
+  });
 }
 
 // A BTC-focused calendar has a paid-feed enhancement path, but never exposes a
@@ -2561,8 +2945,8 @@ async function researchOutlook({ refresh = false } = {}) {
     remember(key,result); return result;
   });
 }
-async function yahooHistory(symbol) {
-  const raw = await request(`https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=2y&interval=1d&events=history`);
+async function yahooHistory(symbol, timeout = 8_000) {
+  const raw = await request(`https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?range=2y&interval=1d&events=history`, timeout);
   const result = raw.chart?.result?.[0]; const closes = result?.indicators?.quote?.[0]?.close;
   if (!result?.timestamp || !closes) throw new Error(`${symbol} history unavailable`);
   // Yahoo 偶尔会把尚未完成的日线附为 null 或 0；忽略它，避免临时占位符被误算为 -100% 涨跌。
@@ -3068,6 +3452,21 @@ http.createServer((req, res) => {
     const user=await requireAlertUser(req,res); if(!user)return;
     try { if(req.method==='PUT'){await alertStore.setSendKey(user.id,(await readJson(req)).sendKey);json(res,204,{});return;} if(req.method==='DELETE'){await alertStore.deleteSendKey(user.id);json(res,204,{});return;} json(res,405,{error:'PUT or DELETE required'}); } catch(error) { json(res,error.statusCode||500,{error:error.message}); } return;
   }
+  // ---- 本地模式推送中继（v2.12.75）：未登录的本机推送也支持钉钉/飞书加签 ----
+  // 复用 notification.mjs 的 CHANNEL_SENDERS（含 HMAC 加签）；仅允许本机 Host 调用，
+  // 部署到公网后该端点对外部 Host 一律 403，不会变成开放中继。
+  if (url.pathname === '/api/local-push' && req.method === 'POST') {
+    const host = String(req.headers.host || '').split(':')[0].trim().toLowerCase();
+    if (host !== '127.0.0.1' && host !== 'localhost') { json(res, 403, { error: '本地推送中继仅限 127.0.0.1 / localhost 访问' }); return; }
+    try {
+      const { type, config = {}, title = '', body = '' } = await readJson(req);
+      if (!type || typeof config !== 'object') { json(res, 400, { error: 'type 与 config 必填' }); return; }
+      const result = await sendChannelMessage(type, config, { title: String(title), short: String(title), body: String(body) });
+      if (!result.ok) json(res, 502, { error: result.error || '推送失败', payload: result.payload ?? null });
+      else json(res, 200, { ok: true, payload: result.payload ?? null });
+    } catch (error) { json(res, 500, { error: error.message }); }
+    return;
+  }
   // /api/alerts/test= 设置里的测试推送；/api/alerts/notify= 前端自定义消息（规则真实触发走 test:false）。
   if ((url.pathname === '/api/alerts/test' || url.pathname === '/api/alerts/notify') && req.method === 'POST') {
     const user=await requireAlertUser(req,res); if(!user)return;
@@ -3110,6 +3509,39 @@ http.createServer((req, res) => {
       json(res,405,{error:'GET or PUT required'});
     } catch(error) { json(res,error.statusCode||500,{error:error.message}); } return;
   }
+
+  // ---- 推送日志（v2.12.72）：列出历史投递，供前端「推送日志」按钮查看 ----
+  if (url.pathname === '/api/alerts/deliveries') {
+    const user = await requireAlertUser(req, res); if (!user) return;
+    try {
+      const limit = Math.min(200, Math.max(1, Number(url.searchParams.get('limit')) || 50));
+      json(res, 200, { deliveries: await alertStore.listDeliveries(user.id, limit) });
+    } catch (error) { json(res, error.statusCode || 500, { error: error.message }); }
+    return;
+  }
+
+  // 本地持仓：不依赖云端登录，OKX 扩展同步时写入本地 SQLite，页面/脚本均可读取。
+  if (url.pathname === '/api/positions') {
+    try {
+      if (req.method === 'GET') {
+        json(res, 200, { positions: listLocalPositions(url.searchParams.get('symbol') || null) });
+        return;
+      }
+      if (req.method === 'POST') {
+        const saved = upsertLocalPosition(await readJson(req));
+        json(res, 200, { ok: true, position: saved });
+        return;
+      }
+      if (req.method === 'DELETE') {
+        deleteLocalPosition(url.searchParams.get('symbol') || currentCoin(), url.searchParams.get('slot') || '1');
+        json(res, 204, {});
+        return;
+      }
+      json(res, 405, { error: 'GET, POST or DELETE required' });
+    } catch (error) { json(res, error.statusCode || 500, { error: error.message }); }
+    return;
+  }
+
   if (url.pathname === '/api/account' && req.method==='DELETE') {
     const user=await requireAlertUser(req,res); if(!user)return;
     await alertStore.deleteAccount(user.id);clearSessionCookie(res);json(res,204,{});return;
@@ -3175,6 +3607,13 @@ http.createServer((req, res) => {
     catch (e) { json(res, 503, { error:'Market context unavailable', detail:e.message }); }
     return;
   }
+  if (url.pathname === '/api/market-health') {
+    try {
+      const iv = url.searchParams.get('interval') || '4h';
+      json(res, 200, await marketHealth(url.searchParams.get('source') || 'okx', iv));
+    } catch (e) { json(res, 503, { error:'Market health unavailable', detail:e.message }); }
+    return;
+  }
   if (url.pathname === '/api/sentiment') {
     try { json(res, 200, await fearGreedSentiment({ refresh:url.searchParams.get('refresh') === '1' })); }
     catch (e) { json(res, 503, { error:'Fear and Greed Index unavailable', detail:e.message }); }
@@ -3183,6 +3622,11 @@ http.createServer((req, res) => {
   if (url.pathname === '/api/fed-calendar') {
     try { json(res, 200, await fedMonitor()); }
     catch (e) { json(res, 503, { error:'Federal Reserve calendar unavailable', detail:e.message }); }
+    return;
+  }
+  if (url.pathname === '/api/fed-rate-monitor') {
+    try { json(res, 200, await fedRateMonitor()); }
+    catch (e) { json(res, 503, { error:'Fed rate monitor unavailable', detail:e.message }); }
     return;
   }
   if (url.pathname === '/api/investment-calendar') {

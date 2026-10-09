@@ -4964,6 +4964,153 @@ html[data-theme="light"] .fear-greed-reading strong {
   }
 }
 
+/* v2.12.70：美联储利率监测（Fed Rate Monitor）——市场隐含目标利率概率。 */
+.fed-rate-panel {
+  margin: 19px 0 15px;
+  padding: 16px 0 0;
+  border-top: 1px solid var(--border-subtle);
+}
+.fed-rate-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.fed-rate-head h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 750;
+  color: var(--text);
+}
+.fed-rate-head h3 .fed-rate-en {
+  font-style: normal;
+  margin-left: 8px;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+.fed-rate-head p {
+  margin: 4px 0 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-muted);
+  max-width: 640px;
+}
+.fed-rate-current {
+  display: grid;
+  gap: 2px;
+  justify-items: end;
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.fed-rate-current b {
+  font:
+    800 15px "SF Mono",
+    monospace;
+  color: var(--text);
+}
+.fed-rate-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 12px;
+}
+.fed-rate-meeting {
+  padding: 13px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.015);
+  display: grid;
+  gap: 6px;
+}
+.fed-rate-meeting header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+.fed-rate-meeting header span {
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--text-muted);
+}
+.fed-rate-meeting header b {
+  font:
+    800 15px "SF Mono",
+    monospace;
+  color: var(--text);
+}
+.fed-rate-meeting > strong {
+  font-size: 13px;
+  color: var(--warn);
+}
+.fed-rate-meeting > small {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.fed-rate-buckets {
+  display: grid;
+  gap: 9px;
+  margin-top: 2px;
+}
+.fed-rate-bucket {
+  display: grid;
+  grid-template-columns: 100px minmax(0, 1fr) 56px;
+  align-items: center;
+  gap: 8px;
+}
+.fed-rate-bucket .fed-rate-range {
+  font-size: 11.5px;
+  font-weight: 650;
+  color: var(--text);
+  white-space: nowrap;
+}
+.fed-rate-bucket .fed-rate-bar {
+  display: block;
+  height: 14px;
+  border-radius: 4px;
+  background: rgba(120, 140, 170, 0.14);
+  overflow: hidden;
+}
+.fed-rate-bucket .fed-rate-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 4px;
+  background: rgba(140, 158, 184, 0.55);
+}
+.fed-rate-bucket .fed-rate-bar i.lead {
+  background: linear-gradient(180deg, #6ea8ff, #3d7bff);
+}
+.fed-rate-bucket > b {
+  font:
+    800 13px "SF Mono",
+    monospace;
+  color: var(--text);
+  text-align: right;
+}
+.fed-rate-bucket small {
+  grid-column: 1 / -1;
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+.fed-rate-bucket small.up {
+  color: var(--bull);
+}
+.fed-rate-bucket small.down {
+  color: var(--bear);
+}
+@media (max-width: 760px) {
+  .fed-rate-grid {
+    grid-template-columns: 1fr;
+  }
+  .fed-rate-current {
+    justify-items: start;
+  }
+}
+
 .fed-market-panel {
   margin: 19px 0 15px;
   padding: 16px 0 0;
@@ -8200,25 +8347,59 @@ main > #marketClocks #exchangeMeta .exchange-row {
 .alert-composer label:has(em) input {
   padding-right: 52px;
 }
-.mark-price {
+.price-quick-fill {
   display: flex;
-  gap: 5px;
+  flex-wrap: wrap;
+  gap: 6px;
   align-items: center;
-  color: var(--text-muted);
-  font-size: 10px;
 }
-.mark-price button {
-  min-height: 0;
-  padding: 0;
-  border: 0;
-  border-bottom: 1px solid var(--text-muted);
-  border-radius: 0;
-  background: transparent;
+.quick-fill-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 24px;
+  padding: 2px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--bg-surface-2);
+  color: var(--text-secondary);
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.quick-fill-btn span {
   color: var(--text-primary);
-  font:
-    600 11px "SF Mono",
-    "JetBrains Mono",
-    monospace;
+  font-family: "SF Mono", "JetBrains Mono", monospace;
+  font-size: 10.5px;
+}
+.quick-fill-btn:hover {
+  border-color: var(--accent-cyan);
+  background: color-mix(in srgb, var(--accent-cyan) 8%, transparent);
+  color: var(--text-primary);
+}
+.frequency-toggle {
+  display: flex;
+  gap: 6px;
+}
+.frequency-toggle button {
+  flex: 1;
+  min-height: 28px;
+  padding: 4px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  background: var(--bg-surface-2);
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.frequency-toggle button.active {
+  border-color: var(--accent-cyan);
+  background: color-mix(in srgb, var(--accent-cyan) 10%, transparent);
+  color: var(--text-primary);
 }
 .frequency {
   display: grid;
@@ -9711,6 +9892,7 @@ html[data-theme="light"] .toolbar #ranges button.active {
 .research-derivatives,
 .fed-event,
 .fed-market-signal,
+.fed-rate-meeting,
 .notification-rule-list article {
   border: 1px solid rgba(102, 132, 174, 0.2) !important;
   border-radius: 10px !important;
@@ -13238,18 +13420,123 @@ html[data-theme="light"] .liq-prob-window {
   font-size: 10.5px;
 }
 .loss-push-fields input {
-  width: 84px;
-  padding: 5px 8px;
+  width: 80px;
+  padding: 5px 7px;
   border: 1px solid var(--border-subtle);
   border-radius: 7px;
   background: var(--bg-surface-2);
   color: var(--text-primary);
   font-size: 12px;
 }
+.loss-push-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 6px;
+  padding: 7px 9px;
+  border: 1px dashed var(--border-subtle);
+  border-radius: 8px;
+  background: var(--bg-surface);
+}
+.loss-push-group > b {
+  width: 100%;
+  margin-bottom: 1px;
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: 600;
+}
 .loss-push-box > small {
   color: var(--text-muted);
   font-size: 10px;
   line-height: 1.6;
+}
+/* v2.12.67 单阈值 + 双向换算：输入框与单位切换同行；镜像预览；参考仓位下拉 */
+.loss-input-row {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+}
+.loss-input-row input {
+  width: 96px;
+  padding: 5px 8px;
+  border: 1px solid var(--border-subtle);
+  border-right: 0;
+  border-radius: 7px 0 0 7px;
+  background: var(--bg-surface-2);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+.loss-input-row select {
+  padding: 5px 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 0 7px 7px 0;
+  background: var(--bg-surface-3, var(--bg-surface-2));
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+}
+.loss-mirror {
+  width: 100%;
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+.loss-push-group select#lossRefPos {
+  width: 100%;
+  padding: 5px 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  background: var(--bg-surface-2);
+  color: var(--text-primary);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.loss-push-box button#lossPushSave {
+  align-self: flex-end;
+}
+.loss-push-box button#lossPushTest {
+  align-self: flex-end;
+  margin-left: 8px;
+}
+/* v2.12.68 隐藏数字输入微调器；输入框右侧静态显示 % 符号 */
+.loss-input-row,
+.loss-push-fields label:has(>#lossCooldown) {
+  position: relative;
+}
+.loss-input-row input[type="number"],
+#lossCooldown[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+.loss-input-row input[type="number"]::-webkit-outer-spin-button,
+.loss-input-row input[type="number"]::-webkit-inner-spin-button,
+#lossCooldown[type="number"]::-webkit-outer-spin-button,
+#lossCooldown[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.loss-input-row .loss-static-unit {
+  display: none;
+  align-items: center;
+  padding: 0 6px;
+  border: 1px solid var(--border-subtle);
+  border-left: 0;
+  border-right: 0;
+  background: var(--bg-surface-2);
+  color: var(--text-muted);
+  font-size: 12px;
+  pointer-events: none;
+}
+.loss-input-row .loss-static-unit.visible {
+  display: flex;
+}
+.loss-input-row.has-pct-suffix input {
+  padding-right: 8px;
+}
+#lossCooldown {
+  width: 70px;
+  text-align: right;
 }
 
 /* ===== 消息推送设置 · 仿 8899 分渠道交互（v2.10.53，配 public/notification.js） =====
@@ -13337,6 +13624,63 @@ html[data-theme="light"] .liq-prob-window {
   border-top: 1px solid var(--border-subtle);
 }
 .push-settings-footer button { min-height: 34px; }
+
+/* 「推送日志」入口固定在弹窗标题栏（v2.12.72；v2.12.73 挪到「消息推送」弹层标题右侧）：
+   弹窗内容很长（渠道 + 亏损推送 + 云同步），放底部要滚到底才看得到 —— 入口必须在首屏可见。 */
+.push-settings-head-actions { display: inline-flex; align-items: center; gap: 8px; }
+.notification-center-head .nc-head-left { display: inline-flex; align-items: center; gap: 10px; min-width: 0; }
+.push-settings-modal .push-log-head-btn {
+  width: auto;
+  height: auto;
+  min-height: 28px;
+  min-width: 0;
+  padding: 3px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-surface-2);
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.4;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.push-settings-modal .push-log-head-btn:hover { border-color: var(--accent, #4f8cff); color: var(--accent, #4f8cff); }
+
+/* 推送日志（v2.12.72；v2.12.73 补全正文 / 逐渠道失败原因） */
+.push-log-body { max-height: 60vh; overflow-y: auto; padding: 4px 2px; }
+.push-log-loading, .push-log-empty { padding: 18px 8px; text-align: center; color: var(--text-secondary); font-size: 13px; }
+.push-log-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.push-log-row { border: 1px solid var(--border-subtle); border-radius: 10px; padding: 8px 10px; background: var(--bg-surface-2); }
+.push-log-row-main { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.push-log-time { font-variant-numeric: tabular-nums; color: var(--text-secondary); font-size: 12px; }
+.push-log-badge { font-size: 11px; padding: 1px 7px; border-radius: 999px; font-weight: 600; }
+.push-log-badge.ok { color: #0a7d3c; background: rgba(10,125,60,0.14); }
+.push-log-badge.fail { color: #c0392b; background: rgba(192,57,43,0.14); }
+.push-log-kind { font-size: 12px; color: var(--text-secondary); }
+.push-log-msg { margin-top: 4px; font-size: 13px; color: var(--text-primary); line-height: 1.4; word-break: break-word; font-weight: 600; }
+.push-log-msg-body { margin-top: 4px; font-size: 12px; color: var(--text-secondary); line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
+.push-log-ch { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px; }
+.push-log-ch-item { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.push-log-ch-err { font-size: 11px; color: #c0392b; word-break: break-all; }
+.push-log-err { margin-top: 6px; font-size: 12px; color: #c0392b; word-break: break-word; }
+.push-log-more { margin-top: 10px; text-align: center; }
+.push-log-more button {
+  min-height: 30px;
+  padding: 4px 16px;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-surface-2);
+  color: var(--text-primary);
+  font-size: 12px;
+  cursor: pointer;
+  width: auto;
+  min-width: 0;
+}
+.push-log-more button:hover { border-color: var(--accent, #4f8cff); color: var(--accent, #4f8cff); }
+.push-log-more button:disabled { opacity: 0.6; cursor: default; }
+.push-log-chip { font-size: 11px; padding: 1px 7px; border-radius: 6px; border: 1px solid var(--border-subtle); color: var(--text-primary); }
+.push-log-chip.ok { color: #0a7d3c; border-color: rgba(10,125,60,0.35); }
+.push-log-chip.fail { color: #c0392b; border-color: rgba(192,57,43,0.35); }
 
 /* 渠道块：标题行 + 状态徽章 + 开关；开关打开后展开表单 */
 .ch-block {
@@ -15120,6 +15464,9 @@ html[data-theme="light"] .fed-live-cog:hover { background: rgba(15, 42, 74, .06)
   top: calc(100% + 8px);
   right: 0;
   z-index: 80;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
   min-width: 168px;
   padding: 5px;
   border-radius: 12px;
@@ -15217,6 +15564,7 @@ html[data-theme="light"] .research-window,
 html[data-theme="light"] .research-derivatives,
 html[data-theme="light"] .fed-event,
 html[data-theme="light"] .fed-market-signal,
+html[data-theme="light"] .fed-rate-meeting,
 html[data-theme="light"] .notification-rule-list article,
 html[data-theme="light"] .ms-pin,
 html[data-theme="light"] .signal-validity {
@@ -15321,6 +15669,7 @@ html[data-theme="light"] .badge.bull {
   html[data-theme="auto"] .research-derivatives,
   html[data-theme="auto"] .fed-event,
   html[data-theme="auto"] .fed-market-signal,
+  html[data-theme="auto"] .fed-rate-meeting,
   html[data-theme="auto"] .notification-rule-list article,
   html[data-theme="auto"] .ms-pin,
   html[data-theme="auto"] .signal-validity {
@@ -15705,4 +16054,83 @@ html[data-theme="light"] .investment-calendar-card .ic-impact-matrix td.flat {
     color: var(--cal-text-3) !important;
     background: rgba(22, 34, 53, 0.05) !important;
   }
+}
+
+/* v2.12.68 登录后上传本地数据提示弹层 */
+.upload-prompt-modal section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 420px;
+}
+.upload-prompt-modal .upload-prompt-body p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.upload-prompt-modal .upload-prompt-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 4px;
+}
+.upload-prompt-modal .upload-prompt-grid button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--bg-surface-2);
+  color: var(--text-primary);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.upload-prompt-modal .upload-prompt-grid button:hover {
+  background: var(--bg-surface-3);
+}
+.upload-prompt-modal .upload-prompt-grid button b {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 11px;
+}
+.upload-prompt-modal .upload-prompt-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+/* ==== 市场异动监测卡片（周期涨幅下方） ==== */
+.market-health-card { padding: 14px 16px; }
+.market-health-card h2 { display: flex; align-items: center; gap: 8px; font-size: 14px; margin: 0 0 10px; }
+.market-health-card .mh-int { font-size: 11px; color: var(--text-muted); background: var(--bg-surface-2); padding: 1px 6px; border-radius: 6px; }
+.market-health-card .help-dot { margin-left: auto; }
+.mh-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 7px; }
+.mh-row { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 10px; font-size: 12px; }
+.mh-row.mh-empty { color: var(--text-muted); }
+.mh-label { color: var(--text-secondary); white-space: nowrap; }
+.mh-value { color: var(--text-primary); font-variant-numeric: tabular-nums; text-align: right; font-family: "SF Mono", "JetBrains Mono", monospace; font-size: 12px; }
+.mh-pill { font-size: 11px; padding: 1px 9px; border-radius: 999px; font-weight: 600; white-space: nowrap; }
+.mh-pill.normal { color: var(--bull); background: color-mix(in srgb, var(--bull) 16%, transparent); }
+.mh-pill.watch { color: var(--warn); background: color-mix(in srgb, var(--warn) 18%, transparent); }
+.mh-pill.alert { color: var(--bear); background: color-mix(in srgb, var(--bear) 16%, transparent); }
+@media (max-width: 680px) {
+  .mh-value { max-width: 46vw; overflow: hidden; text-overflow: ellipsis; }
+}
+/* ==== 规则信号基准行：取数失败的显式告警 ==== */
+/* 此前空 catch 静默吞错，卡片会停留在上一数据源的旧 K 线且看不出异常；
+   现在失败态在基准行直接上色提示。硬编码双主题值，不依赖未在 dark 定义的 --warn。 */
+.fixed-rule-basis.is-error { color: #ff9b8a; font-weight: 500; }
+html[data-theme="light"] .fixed-rule-basis.is-error { color: #b4451f; }
+@media (prefers-color-scheme: light) {
+  html[data-theme="auto"] .fixed-rule-basis.is-error { color: #b4451f; }
 }

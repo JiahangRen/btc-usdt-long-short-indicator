@@ -79,7 +79,7 @@ window.BTCNotification = {
         // 每个币种独立存取：默认空、已添加则保留、未添加则为无 —— 互不串台。
         const getCoin = ctx.getCoin || (() => (window.btcCoinContext && window.btcCoinContext.coin ? window.btcCoinContext.coin() : "BTC"));
         const vaultKeyFor = () => (getCoin() === "BTC" ? "alerts" : "alerts_" + getCoin());
-        const coinPairPlain = () => (getCoin() === "BTC" ? "BTC/USDT" : getCoin() + "/USDT");
+        const coinPairPlain = (c) => { const coin = c || getCoin(); return coin === "BTC" ? "BTC/USDT" : coin + "/USDT"; };
         const coinMark = () => (getCoin() === "BTC" ? "₿ " : "");
 
         const LOCAL_ONLY_KINDS = ["round_number", "custom_grid", "volatility"];
@@ -143,7 +143,32 @@ window.BTCNotification = {
       let cloudChannels = [];
       let pushSettings = {
         masterEnabled: true,
-        lossPush: { enabled: false, warnRoe: 20, lossRoe: 50, cooldownMinutes: 30 },
+        lossPush: {
+          enabled: false,
+          warnLossPct: 5, pushLossPct: 10,
+          warnLossAmount: 100, pushLossAmount: 500,
+          warnLiqDistancePct: 20, pushLiqDistancePct: 10,
+          cooldownMinutes: 30,
+        },
+      };
+      // v2.12.68：本地 8787 服务健康状态（主备切换用）。
+      let localHealth = { online: null, checkedAt: 0 };
+      const checkLocalHealth = async () => {
+        try {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 3000);
+          const response = await fetch("/api/alerts/health", { signal: controller.signal });
+          clearTimeout(timer);
+          const payload = await response.json().catch(() => ({}));
+          localHealth = { online: response.ok && payload.enabled === true, checkedAt: Date.now() };
+        } catch {
+          localHealth = { online: false, checkedAt: Date.now() };
+        }
+      };
+      // 推送主备：未登录时只能本地；登录后本地 8787 在线则本地为主，否则云端接管。
+      const primaryMode = () => {
+        if (!cloudSession.loggedIn) return "local";
+        return localHealth.online === true ? "local" : "cloud";
       };
       const api = async (path, options) => {
         const response = await fetch(path, options);
@@ -181,9 +206,9 @@ window.BTCNotification = {
       card.innerHTML = `<div class="forecast-head"><div><h2>${tx("消息推送", "Message alerts")}</h2><p id="localAlertDescription"></p></div><span id="localAlertState" class="badge flat"></span></div>`
         + `<div class="push-head-row"><label class="push-switch push-switch-row"><input type="checkbox" id="pushMasterSwitch"><span>${tx("启用消息推送", "Enable push")}</span></label><small id="pushMasterHint"></small><button type="button" id="openPushSettings" class="push-settings-btn">⚙ ${tx("推送设置", "Settings")}</button></div>`
         + `<div id="pushMasterBody"><div class="alert-rule-toolbar"><b>${tx("推送规则", "Push rules")}<small>${coinMark()}${coinPairPlain()} · ${tx("永续", "Perpetual")}</small></b><div><button type="button" id="clearLocalAlerts" class="danger">${tx("批量全删", "Delete all")}</button><button type="button" id="openLocalAlert">＋ ${tx("添加预警", "Add alert")}</button></div></div><div id="localAlertList" class="wechat-alert-detail"></div>`
-        + `<div id="lossPushSection" class="loss-push-box"><label class="push-switch push-switch-row"><input type="checkbox" id="lossPushEnabled"><span>${tx("亏损推送（联动持仓）", "Loss push (linked to positions)")}</span></label><div class="loss-push-fields"><label>${tx("警告 ROE ≤", "Warn ROE ≤")}<input id="lossWarnRoe" type="number" min="1" max="1000" step="1"></label><label>${tx("推送 ROE ≤", "Push ROE ≤")}<input id="lossLossRoe" type="number" min="1" max="1000" step="1"></label><label>${tx("冷却（分钟）", "Cooldown (min)")}<input id="lossCooldown" type="number" min="1" max="1440" step="1"></label><button type="button" id="lossPushSave">${tx("保存设置", "Save")}</button></div><small>${tx("以「我的持仓」中各笔持仓的保证金收益率（ROE = 价格变动% × 杠杆）计算；任一持仓触发即向所有启用渠道推送。", "Computed from each saved position's ROE (price move % × leverage); any position crossing a threshold pushes to all enabled channels.")}</small></div></div>`
+        + '<div id="lossPushSection" class="loss-push-box"></div>'
         + `<div id="cloudAlertPanel" class="cloud-alert-panel"></div>`
-        + `<div id="localAlertModal" class="alert-composer" hidden><section><header><b id="localAlertModalTitle">${tx("添加预警", "Add alert")}</b><button type="button" id="closeLocalAlert">×</button></header><p class="alert-symbol">${coinMark()}<b>${coinPairPlain()} ${tx("永续", "Perpetual")}</b></p><form id="localAlertForm"><label>${tx("推送模式", "Push mode")}<select name="mode"><option value="price">${tx("价格预警", "Price alert")}</option><option value="round_number">${tx("整数推送", "Round-number")}</option><option value="custom_grid">${tx("自定义推送", "Custom grid")}</option><option value="volatility">${tx("快速挣扎推送", "Volatility")}</option></select></label><div data-mode-fields="price"><label>${tx("预警类型", "Alert type")}<select name="kind"><option value="price_reached">${tx("价格达到", "Price reached")}</option><option value="price_above">${tx("价格上涨至", "Price rises to")}</option><option value="price_below">${tx("价格下跌至", "Price falls to")}</option><option value="long_liquidation">${tx("多头爆仓价", "Long liquidation")}</option><option value="short_liquidation">${tx("空头爆仓价", "Short liquidation")}</option></select></label><label>${tx("价格", "Price")}<span class="mark-price">${tx("市价", "Mark")} <button type="button" id="useLocalMark">--</button></span><input name="target" type="number" step="0.01" min="0" placeholder="0.00"></label><div class="frequency-toggle"><button type="button" data-local-frequency="once" class="active">${tx("仅一次", "Once")}</button><button type="button" data-local-frequency="repeat">${tx("重复", "Repeat")}</button></div></div><div data-mode-fields="round_number" hidden><label>${tx("整数步长", "Round step")}<input name="roundStep" type="number" min="1" step="1" value="100"></label><label>${tx("方向", "Direction")}<select name="roundDir"><option value="both">${tx("任一方向", "Either")}</option><option value="up">${tx("只向上", "Up only")}</option><option value="down">${tx("只向下", "Down only")}</option></select></label></div><div data-mode-fields="custom_grid" hidden><label>${tx("基准价格", "Base price")}<span class="mark-price">${tx("市价", "Mark")} <button type="button" id="useLocalMarkBase">--</button></span><input name="basePrice" type="number" step="0.01" min="0" placeholder="0.00"></label><label>${tx("间隔", "Step")}<input name="gridStep" type="number" min="1" step="1" value="50"></label><label>${tx("方向", "Direction")}<select name="gridDir"><option value="both">${tx("双向", "Both")}</option><option value="up">${tx("只向上", "Up only")}</option><option value="down">${tx("只向下", "Down only")}</option></select></label></div><div data-mode-fields="volatility" hidden><label>${tx("时间窗口（分钟）", "Window (min)")}<input name="volWindow" type="number" min="1" max="120" step="1" value="5"></label><label>${tx("波动阈值（USDT）", "Move threshold (USDT)")}<input name="volThreshold" type="number" min="1" step="1" value="300"></label><label>${tx("方向", "Direction")}<select name="volDir"><option value="both">${tx("双向", "Both")}</option><option value="up">${tx("只涨", "Up only")}</option><option value="down">${tx("只跌", "Down only")}</option></select></label></div><label id="localCooldown" hidden>${tx("冷却时间（分钟）", "Cooldown (minutes)")}<input name="cooldown" type="number" min="1" step="1" value="5"></label><label class="voice-rule-toggle">${tx("同时语音播报", "Also announce by voice")}<input name="voiceEnabled" type="checkbox"></label><button class="alert-submit">${tx("保存预警", "Save alert")}</button></form></section></div>`
+        + `<div id="localAlertModal" class="alert-composer push-settings-modal" hidden><section><header><b id="localAlertModalTitle">${tx("添加预警", "Add alert")}</b><button type="button" id="closeLocalAlert">×</button></header><p class="alert-symbol">${coinMark()}<b>${coinPairPlain()} ${tx("永续", "Perpetual")}</b></p><form id="localAlertForm"><label>${tx("推送模式", "Push mode")}<select name="mode"><option value="price">${tx("价格预警", "Price alert")}</option><option value="round_number">${tx("整数推送", "Round-number")}</option><option value="custom_grid">${tx("自定义推送", "Custom grid")}</option><option value="volatility">${tx("快速挣扎推送", "Volatility")}</option></select></label><div data-mode-fields="price"><label>${tx("预警类型", "Alert type")}<select name="kind"><option value="price_reached">${tx("价格达到", "Price reached")}</option><option value="price_above">${tx("价格上涨至", "Price rises to")}</option><option value="price_below">${tx("价格下跌至", "Price falls to")}</option><option value="long_liquidation">${tx("多头爆仓价", "Long liquidation")}</option><option value="short_liquidation">${tx("空头爆仓价", "Short liquidation")}</option></select></label><label>${tx("价格", "Price")}<div class="price-quick-fill" id="priceQuickFill"><button type="button" class="quick-fill-btn" data-fill="mark">${tx("市价", "Mark")} <span id="qfMarkPrice">--</span></button><button type="button" class="quick-fill-btn" data-fill="entry" hidden>${tx("开仓价", "Entry")} <span id="qfEntryPrice">--</span></button><button type="button" class="quick-fill-btn" data-fill="liq" hidden>${tx("强平价", "Liq")} <span id="qfLiqPrice">--</span></button></div><input name="target" type="number" step="0.01" min="0" placeholder="0.00"></label><div class="frequency-toggle"><button type="button" data-local-frequency="once" class="active">${tx("仅一次", "Once")}</button><button type="button" data-local-frequency="repeat">${tx("重复", "Repeat")}</button></div></div><div data-mode-fields="round_number" hidden><label>${tx("整数步长", "Round step")}<input name="roundStep" type="number" min="1" step="1" value="100"></label><label>${tx("方向", "Direction")}<select name="roundDir"><option value="both">${tx("任一方向", "Either")}</option><option value="up">${tx("只向上", "Up only")}</option><option value="down">${tx("只向下", "Down only")}</option></select></label></div><div data-mode-fields="custom_grid" hidden><label>${tx("基准价格", "Base price")}<span class="mark-price">${tx("市价", "Mark")} <button type="button" id="useLocalMarkBase">--</button></span><input name="basePrice" type="number" step="0.01" min="0" placeholder="0.00"></label><label>${tx("间隔", "Step")}<input name="gridStep" type="number" min="1" step="1" value="50"></label><label>${tx("方向", "Direction")}<select name="gridDir"><option value="both">${tx("双向", "Both")}</option><option value="up">${tx("只向上", "Up only")}</option><option value="down">${tx("只向下", "Down only")}</option></select></label></div><div data-mode-fields="volatility" hidden><label>${tx("时间窗口（分钟）", "Window (min)")}<input name="volWindow" type="number" min="1" max="120" step="1" value="5"></label><label>${tx("波动阈值（USDT）", "Move threshold (USDT)")}<input name="volThreshold" type="number" min="1" step="1" value="300"></label><label>${tx("方向", "Direction")}<select name="volDir"><option value="both">${tx("双向", "Both")}</option><option value="up">${tx("只涨", "Up only")}</option><option value="down">${tx("只跌", "Down only")}</option></select></label></div><label id="localCooldown" hidden>${tx("冷却时间（分钟）", "Cooldown (minutes)")}<input name="cooldown" type="number" min="1" step="1" value="5"></label><label class="voice-rule-toggle">${tx("同时语音播报", "Also announce by voice")}<input name="voiceEnabled" type="checkbox"></label><button class="alert-submit">${tx("保存预警", "Save alert")}</button></form></section></div>`
         + `<div id="pushSettingsModal" class="alert-composer push-settings-modal" hidden><section><header><b>${tx("推送设置", "Push settings")}</b><button type="button" id="closePushSettings" aria-label="${tx("关闭", "Close")}">×</button></header><p class="push-settings-desc">${tx("每个渠道独立开关：打开后填写 API Key，点「确认并验证」会真实发送一条测试消息；验证通过后输入框自动收起，只留「重新编辑」。", "Each channel has its own switch: turn it on, fill in the API key, then “Save & verify” sends a real test message; inputs collapse once verified.")}</p><div id="pushSettingsBody"></div><div class="push-settings-footer"><button type="button" id="pushTestSend">${tx("发送测试推送（当前市价）", "Send test push (current price)")}</button><button type="button" id="donePushSettings" class="alert-submit">${tx("完成", "Done")}</button></div></section></div>`;
       const submitAlert = card.querySelector(".alert-submit"),
         alertActions = document.createElement("div");
@@ -204,11 +229,224 @@ window.BTCNotification = {
       shell.id = "notificationCenterModal";
       shell.className = "alert-composer push-settings-modal notification-center-modal";
       shell.hidden = true;
-      shell.innerHTML = `<section><header class="notification-center-head"><b>${tx("消息推送", "Message alerts")}</b><button type="button" id="closeNotificationCenter" aria-label="${tx("关闭", "Close")}">×</button></header></section>`;
+      shell.innerHTML = `<section><header class="notification-center-head"><span class="nc-head-left"><b>${tx("消息推送", "Message alerts")}</b><button type="button" id="openPushLog" class="push-log-head-btn">🕘 ${tx("推送日志", "Push log")}</button></span><button type="button" id="closeNotificationCenter" aria-label="${tx("关闭", "Close")}">×</button></header></section>`;
       shell.querySelector("section").append(card);
       document.body.append(shell);
+      // ---- 亏损推送（单阈值 + 双向换算 + 参考仓位）v2.12.67 ----
+      const LMMR = 0.005;
+      const calcLiqPrice = (entry) => {
+        const price = Number(entry && entry.price);
+        const lev = Number(entry && entry.leverage) || (Number(entry && entry.amount) > 0 && Number(entry && entry.margin) > 0 ? Number(entry.amount) / Number(entry.margin) : null);
+        if (!(price > 0) || !(lev > 0)) return null;
+        return entry.side === 'short' ? price * (1 + 1 / lev - LMMR) : price * (1 - 1 / lev + LMMR);
+      };
+      const validPersonalEntries = () => (Array.isArray(window.btcPersonalEntries) ? window.btcPersonalEntries : []).map((e, i) => ({ e, i })).filter(({ e }) => e && Number(e.price) > 0);
+      const refreshRefPosOptions = () => {
+        const sel = $("lossRefPos");
+        if (!sel) return;
+        const prev = sel.value;
+        const entries = validPersonalEntries();
+        sel.innerHTML = entries.length
+          ? entries.map(({ e, i }) => {
+              const liq = calcLiqPrice(e);
+              const liqText = liq != null ? `${tx('强平', 'Liq')} ${Number(liq).toLocaleString('en-US', { maximumFractionDigits: 1 })}` : `${tx('强平', 'Liq')} --`;
+              return `<option value="${i}">${tx("仓位", "Pos")} ${i + 1} · ${e.side === 'short' ? tx('做空', 'Short') : tx('做多', 'Long')} ${Number(e.leverage) ? Number(e.leverage).toFixed(0) : '?'}x · 均价 ${Number(e.price).toLocaleString('en-US', { maximumFractionDigits: 1 })} · ${liqText}</option>`;
+            }).join('')
+          : `<option value="-1">${tx('（暂无可联动持仓）', '(no linked position)')}</option>`;
+        if (entries.some(({ i }) => String(i) === prev)) sel.value = prev;
+        else if (entries.length) sel.value = String(entries[0].i);
+      };
+      const getRefEntry = () => {
+        const sel = $("lossRefPos");
+        const idx = sel ? Number(sel.value) : -1;
+        const entries = validPersonalEntries();
+        const hit = entries.find(({ i }) => i === idx);
+        return hit ? hit.e : (entries[0] ? entries[0].e : null);
+      };
+      const recomputeLossMirror = () => {
+        const mirror = $("lossMirror"), valEl = $("lossValue"), unitEl = $("lossUnit");
+        if (!mirror || !valEl || !unitEl) return;
+        const ref = getRefEntry();
+        const notional = ref ? Number(ref.amount) : 0;
+        const v = Number(valEl.value);
+        if (!Number.isFinite(v) || v <= 0) { mirror.textContent = ''; return; }
+        if (!(notional > 0)) { mirror.textContent = tx('参考仓位持仓量缺失，无法换算', 'Reference position size missing'); return; }
+        mirror.textContent = unitEl.value === 'pct'
+          ? `≈ ${ (notional * v / 100).toLocaleString('en-US', { maximumFractionDigits: 2 }) } USDT（名义 ${notional.toLocaleString('en-US', { maximumFractionDigits: 0 })}）`
+          : `≈ ${ (v / notional * 100).toLocaleString('en-US', { maximumFractionDigits: 2 }) }%`;
+      };
+      const recomputeLiqMirror = () => {
+        const mirror = $("liqMirror"), valEl = $("liqValue"), unitEl = $("liqUnit");
+        if (!mirror || !valEl || !unitEl) return;
+        const ref = getRefEntry();
+        const liq = calcLiqPrice(ref);
+        const v = Number(valEl.value);
+        if (!Number.isFinite(v) || v <= 0) { mirror.textContent = ''; return; }
+        if (liq == null) { mirror.textContent = tx('参考仓位强平价无法推算（缺均价/杠杆）', 'Cannot estimate liq price'); return; }
+        mirror.textContent = unitEl.value === 'pct'
+          ? `强平价 ${liq.toLocaleString('en-US', { maximumFractionDigits: 2 })} · 触发价 ≈ ${ (ref.side === 'short' ? liq * (1 - v / 100) : liq * (1 + v / 100)).toLocaleString('en-US', { maximumFractionDigits: 2 }) }`
+          : `≈ 距强平 ${ (Math.abs(v - liq) / liq * 100).toLocaleString('en-US', { maximumFractionDigits: 2 }) }%（强平价 ${liq.toLocaleString('en-US', { maximumFractionDigits: 2 })}）`;
+      };
+      // 切换亏损/强平单位时静默持久化，避免「render() 每 10 秒重跑 syncSettingsInputs」把未保存的单位选择冲掉。
+      // 输入齐全时重算 canonical（金额/百分比）；不齐时只存单位与原始输入值，保证选择不回退。
+      const persistLossPushSilently = async () => {
+        if (!cloudSession.loggedIn) return;
+        const ref = getRefEntry();
+        const liq = calcLiqPrice(ref);
+        const lossUnit = $("lossUnit").value, liqUnit = $("liqUnit").value;
+        const lossVal = Math.max(0.01, Number($("lossValue").value) || 0);
+        const liqVal = Math.max(0.01, Number($("liqValue").value) || 0);
+        const notional = ref ? Number(ref.amount) : 0;
+        const patch = { lossPush: { lossUnit, liqUnit, lossValue: lossVal, liqValue: liqVal } };
+        if (lossVal > 0 && liqVal > 0 && notional > 0) {
+          patch.lossPush.lossThresholdAmount = Math.min(1e9, Math.max(0.01, lossUnit === 'pct' ? notional * lossVal / 100 : lossVal));
+          if (liqUnit === 'pct') patch.lossPush.liqDistancePct = Math.min(100, Math.max(0.01, liqVal));
+          else if (liq != null) patch.lossPush.liqDistancePct = Math.min(100, Math.max(0.01, Math.abs(liqVal - liq) / liq * 100));
+          patch.lossPush.cooldownMinutes = Number($("lossCooldown").value) || 30;
+          const sel = $("lossRefPos");
+          patch.lossPush.refIndex = sel ? Number(sel.value) : 0;
+          patch.lossPush.enabled = $("lossPushEnabled").checked;
+        }
+        try { await savePushSettings(patch); } catch { /* 静默：单位选择不因暂存失败而打断用户 */ }
+      };
+      const buildLossPushSection = () => {
+        const box = $("lossPushSection");
+        if (!box) return;
+        box.innerHTML = `<label class="push-switch push-switch-row"><input type="checkbox" id="lossPushEnabled"><span>${tx('亏损推送（联动持仓）', 'Loss push (linked to positions)')}</span></label><div class="loss-push-fields"><div class="loss-push-group"><b>${tx('亏损阈值', 'Loss threshold')}</b><div class="loss-input-row" id="lossValueRow"><input id="lossValue" type="number" min="0.01" step="0.01" placeholder="0.00" inputmode="decimal"><span class="loss-static-unit" id="lossStaticUnit"></span><select id="lossUnit"><option value="pct">${tx('百分比', 'Percentage')}</option><option value="usdt" selected>${tx('金额', 'Amount')}</option></select></div><small id="lossMirror" class="loss-mirror"></small></div><div class="loss-push-group"><b>${tx('强平阈值', 'Liquidation threshold')}</b><div class="loss-input-row" id="liqValueRow"><input id="liqValue" type="number" min="0.01" step="0.01" placeholder="0.00" inputmode="decimal"><span class="loss-static-unit" id="liqStaticUnit"></span><select id="liqUnit"><option value="pct" selected>${tx('百分比距离', 'Pct distance')}</option><option value="price">${tx('价格', 'Price')}</option></select></div><small id="liqMirror" class="loss-mirror"></small></div><div class="loss-push-group"><b>${tx('参考仓位（仅用于换算预览）', 'Reference position (preview only)')}</b><select id="lossRefPos"></select><small class="loss-mirror">${tx('阈值以通用口径作用于每个仓位；下方金额/价格为所选参考仓位的换算预览。', 'Threshold applies to every position; amount/price below previews the selected reference position.')}</small></div><label>${tx('冷却（分钟）', 'Cooldown (min)')}<input id="lossCooldown" type="number" min="1" max="1440" step="1" inputmode="numeric"></label><button type="button" id="lossPushSave">${tx('保存设置', 'Save')}</button><button type="button" id="lossPushTest">${tx('测试发送', 'Test send')}</button></div><small>${tx('计算：亏损额 = 持仓名义价值 × 亏损%；距强平价% = |市价-理论强平价|/理论强平价×100%。任一维度触发即向所有启用渠道推送并页面警示；金额阈值作用于每个仓位（亏损达到该 USDT 即提醒）。', 'Loss amount = notional × loss %; distance to liq % = |mark-liq|/liq×100%. Any dimension crossing pushes to all channels and warns in-page; the amount threshold applies per position.')}</small>`;
+        refreshRefPosOptions();
+        const reW = () => recomputeLossMirror();
+        const reL = () => recomputeLiqMirror();
+        ["lossValue", "lossUnit", "lossRefPos"].forEach((id) => { const el = $(id); if (el) { el.addEventListener("input", reW); el.addEventListener("change", reW); } });
+        ["liqValue", "liqUnit", "lossRefPos"].forEach((id) => { const el = $(id); if (el) { el.addEventListener("input", reL); el.addEventListener("change", reL); } });
+        const syncPctSuffix = () => {
+          const lossRow = $("lossValueRow"), liqRow = $("liqValueRow");
+          const lossSuffix = $("lossStaticUnit"), liqSuffix = $("liqStaticUnit");
+          const lossPct = $("lossUnit")?.value === "pct";
+          const liqPct = $("liqUnit")?.value === "pct";
+          if (lossRow) lossRow.classList.toggle("has-pct-suffix", lossPct);
+          if (liqRow) liqRow.classList.toggle("has-pct-suffix", liqPct);
+          if (lossSuffix) lossSuffix.classList.toggle("visible", lossPct);
+          if (liqSuffix) liqSuffix.classList.toggle("visible", liqPct);
+        };
+        ["lossUnit", "liqUnit"].forEach((id) => { const el = $(id); if (el) { el.addEventListener("change", syncPctSuffix); el.addEventListener("input", syncPctSuffix); el.addEventListener("change", persistLossPushSilently); } });
+        syncPctSuffix();
+        const cooldownEl = $("lossCooldown");
+        if (cooldownEl) {
+          cooldownEl.addEventListener("input", () => {
+            const cleaned = String(cooldownEl.value).replace(/[^0-9]/g, "");
+            if (cleaned !== cooldownEl.value) cooldownEl.value = cleaned;
+          });
+          cooldownEl.addEventListener("change", () => {
+            const v = Math.max(1, Math.min(1440, Number(cooldownEl.value) || 1));
+            cooldownEl.value = String(Math.floor(v));
+          });
+        }
+        const lossEnabled = $("lossPushEnabled");
+        if (lossEnabled) {
+          lossEnabled.onchange = async () => {
+            if (!cloudSession.loggedIn) {
+              lossEnabled.checked = !lossEnabled.checked;
+              showAppDialog({ title: tx("亏损推送", "Loss push"), message: tx("请先登录后使用亏损推送。", "Sign in to use loss push.") });
+              return;
+            }
+            try {
+              await savePushSettings({ lossPush: { enabled: lossEnabled.checked } });
+              render();
+            } catch (error) {
+              lossEnabled.checked = !lossEnabled.checked;
+              showAppDialog({ title: tx("亏损推送", "Loss push"), message: error.message });
+            }
+          };
+        }
+        buildLossPushSaveHandler();
+        const lossTestBtn = $("lossPushTest");
+        if (lossTestBtn) lossTestBtn.onclick = () => sendLossPushTest();
+      };
+      const buildLossPushSaveHandler = () => {
+        const lossSave = $("lossPushSave");
+        if (!lossSave) return;
+        lossSave.onclick = async () => {
+          if (!cloudSession.loggedIn) {
+            showAppDialog({ title: tx("亏损推送", "Loss push"), message: tx("请先登录后使用亏损推送。", "Sign in to use loss push.") });
+            return;
+          }
+          const ref = getRefEntry();
+          const liq = calcLiqPrice(ref);
+          const lossUnit = $("lossUnit").value, liqUnit = $("liqUnit").value;
+          const lossVal = Math.max(0.01, Number($("lossValue").value) || 0);
+          const liqVal = Math.max(0.01, Number($("liqValue").value) || 0);
+          if (!(lossVal > 0) || !(liqVal > 0)) { showAppDialog({ title: tx("亏损推送", "Loss push"), message: tx("请填写亏损阈值与强平阈值。", "Fill both thresholds.") }); return; }
+          const notional = ref ? Number(ref.amount) : 0;
+          if (!(notional > 0)) { showAppDialog({ title: tx("亏损推送", "Loss push"), message: tx("参考仓位持仓量缺失，无法换算金额阈值。", "Reference position size missing.") }); return; }
+          const lossThresholdAmount = lossUnit === 'pct' ? notional * lossVal / 100 : lossVal;
+          let liqDistancePct;
+          if (liqUnit === 'pct') liqDistancePct = liqVal;
+          else {
+            if (liq == null) { showAppDialog({ title: tx("亏损推送", "Loss push"), message: tx("参考仓位强平价无法推算，无法用价格换算百分比。", "Cannot estimate liq price.") }); return; }
+            liqDistancePct = Math.abs(liqVal - liq) / liq * 100;
+          }
+          const sel = $("lossRefPos");
+          const refIndex = sel ? Number(sel.value) : 0;
+          try {
+            await savePushSettings({
+              lossPush: {
+                enabled: $("lossPushEnabled").checked,
+                lossThresholdAmount: Math.min(1e9, Math.max(0.01, lossThresholdAmount)),
+                liqDistancePct: Math.min(100, Math.max(0.01, liqDistancePct)),
+                cooldownMinutes: Number($("lossCooldown").value) || 30,
+                refIndex: Number.isInteger(refIndex) ? refIndex : 0,
+                lossUnit,
+                lossValue: lossVal,
+                liqUnit,
+                liqValue: liqVal,
+              },
+            });
+            showAppDialog({ title: tx("亏损推送", "Loss push"), message: tx("亏损推送设置已保存。", "Loss push settings saved.") });
+          } catch (error) {
+            showAppDialog({ title: tx("亏损推送", "Loss push"), message: error.message });
+          }
+        };
+      };
+      buildLossPushSection();
+      // 亏损推送「测试发送」：用当前输入框的值构造一条模拟触发文案，经本地/云端现有渠道发出，验证推送链路是否畅通。
+      const sendLossPushTest = async () => {
+        if (!localReady() && !cloudReady()) {
+          showAppDialog({ title: tx("亏损推送", "Loss push"), message: tx("请先在「推送设置」中配置并启用至少一个推送渠道。", "Configure and enable at least one push channel in Settings first.") });
+          return;
+        }
+        const current = price();
+        if (!Number.isFinite(current)) { alert(tx("实时价格尚未加载，请稍后重试。", "Live price not loaded yet, please retry.")); return; }
+        const ref = getRefEntry();
+        const notional = ref ? Number(ref.amount) : 0;
+        const lossUnit = $("lossUnit").value, liqUnit = $("liqUnit").value;
+        const lossVal = Math.max(0.01, Number($("lossValue").value) || 0);
+        const liqVal = Math.max(0.01, Number($("liqValue").value) || 0);
+        const lossAmount = lossUnit === 'pct' && notional > 0 ? notional * lossVal / 100 : lossVal;
+        const liqPrice = calcLiqPrice(ref);
+        let liqPct;
+        if (liqUnit === 'pct') liqPct = liqVal;
+        else liqPct = liqPrice != null ? Math.abs(liqVal - liqPrice) / liqPrice * 100 : null;
+        const lossPctNow = notional > 0 ? lossAmount / notional * 100 : null;
+        const pair = coinPairPlain(), zh = getLang() === 'zh';
+        const title = `${zh ? '亏损推送【测试】' : 'Loss push [TEST]'} ${pair} ${fmt(current)}`;
+        const body = [
+          `${zh ? '当前价格' : 'Current'}: ${fmt(current)} USDT`,
+          `${zh ? '持仓名义' : 'Notional'}: ${notional ? notional.toLocaleString('en-US', { maximumFractionDigits: 0 }) : '--'} USDT`,
+          `${zh ? '亏损阈值' : 'Loss threshold'}: ${lossAmount.toFixed(2)} USDT${lossPctNow != null ? ` (≈ ${lossPctNow.toFixed(2)}%)` : ''}`,
+          `${zh ? '强平阈值（距强平价）' : 'Liq distance'}: ${liqPct != null ? liqPct.toFixed(2) + '%' : (liqPrice != null ? `${Math.abs(current - liqPrice).toFixed(2)} USDT` : '--')}`,
+          `${zh ? '（模拟触发，非真实信号）' : '(simulated trigger, not a real signal)'}`,
+        ].join('\n');
+        try {
+          if (localReady()) await pushLocalAll({ title, body });
+          else await sendCloudCustom({ price: current, categoryLabel: zh ? '亏损' : 'Loss', phrase: `${pair} ${zh ? '亏损推送测试' : 'loss push test'}`, note: body, direction: 'down', test: true });
+          showAppDialog({ title: zh ? '亏损推送测试已发送' : 'Loss push test sent', message: zh ? '测试推送已提交，请查收各启用渠道。' : 'Test push submitted; please check your enabled channels.' });
+        } catch (error) {
+          showAppDialog({ title: zh ? '亏损推送测试' : 'Loss push test', message: error.message });
+        }
+      };
       const openCenter = (open) => {
         shell.hidden = !open;
+        if (open) syncSettingsInputs();
       };
       document.getElementById("closeNotificationCenter").onclick = () => openCenter(false);
       shell.addEventListener("click", (event) => {
@@ -250,12 +488,58 @@ window.BTCNotification = {
         modal = $("localAlertModal"),
         form = $("localAlertForm");
       let editingId = null; // 当前正在编辑的规则 id；null = 新建模式
-      const localKey = () => (sessionStorage.getItem(keyStore) || "").trim(),
+      const localKey = () => {
+          // 优先从本地 channels 读取 serverchan，兼容旧 sessionStorage
+          const local = localChannelOfType("serverchan");
+          if (local?.config?.sendKey) return local.config.sendKey.trim();
+          return (sessionStorage.getItem(keyStore) || "").trim();
+        },
         localKeyOk = () => /^SCT/i.test(localKey());
-      // 「推送就绪」= 本机 Server酱有效，或已登录且云端有启用渠道（钉钉/飞书/Bark/Webhook 均算）。
+      // 「推送就绪」= 本机有启用渠道，或已登录且云端有启用渠道。
       const cloudReady = () =>
         Boolean(cloudSession.loggedIn) &&
         cloudChannels.some((c) => c && c.enabled);
+      // v2.12.68：本地多渠道支持（未登录/本地在线时使用），配置保存在 secure vault。
+      const LOCAL_CHANNELS_KEY = "btc_local_channels_v1";
+      const loadLocalChannels = async () => {
+        try {
+          const data = await window.btcSecureVault?.get(LOCAL_CHANNELS_KEY);
+          return Array.isArray(data) ? data.filter((c) => c && c.type) : [];
+        } catch {
+          return [];
+        }
+      };
+      const saveLocalChannels = async (channels) => {
+        try {
+          await window.btcSecureVault?.put(LOCAL_CHANNELS_KEY, channels);
+        } catch (error) {
+          console.warn("Save local channels failed:", error.message);
+        }
+      };
+      let localChannels = [];
+      (async () => {
+        localChannels = await loadLocalChannels();
+        // 迁移旧 sessionStorage 中的 Server酱 Key 到本地 channels
+        const legacyKey = (sessionStorage.getItem(keyStore) || "").trim();
+        if (legacyKey && !localChannelOfType("serverchan")) {
+          await upsertLocalChannel("serverchan", { enabled: true, config: { sendKey: legacyKey }, verifiedAt: Date.now() });
+          sessionStorage.removeItem(keyStore);
+        }
+      })();
+      const localChannelOfType = (type) => localChannels.find((c) => c.type === type);
+      const localReady = () => localChannels.some((c) => c && c.enabled && c.config && Object.keys(c.config).length > 0);
+      const upsertLocalChannel = async (type, patch) => {
+        const idx = localChannels.findIndex((c) => c.type === type);
+        const base = idx >= 0 ? localChannels[idx] : { type, enabled: true, config: {} };
+        const next = { ...base, ...patch, type };
+        if (idx >= 0) localChannels[idx] = next; else localChannels.push(next);
+        await saveLocalChannels(localChannels);
+        return next;
+      };
+      const removeLocalChannel = async (type) => {
+        localChannels = localChannels.filter((c) => c.type !== type);
+        await saveLocalChannels(localChannels);
+      };
       // 云端 buildAlertMessage 的 categoryLabel 是短词（'价格'→'价格告警'）。
       // v2.12.63：整数按方向拆分（up→整数上破 / down→整数下破），价格按方向拆分（上涨/下跌）。
       const cloudCategoryLabel = (kind, up) =>
@@ -364,6 +648,8 @@ window.BTCNotification = {
       const editing = {},
         dirty = {};
       let localVerified = false;
+      // v2.12.68：推送设置支持「本地 / 云端」两种模式。未登录强制本地；登录后默认本地，可切云端。
+      let settingsMode = "local";
       const channelSummary = (channel) => {
         const def = CHANNEL_DEFS[channel.type];
         try { return def ? def.summary(channel.config || {}) : ""; }
@@ -373,10 +659,10 @@ window.BTCNotification = {
       const extrasOf = (type) => cloudChannels.filter((c) => c.type === type).slice(1);
       const badgeFor = (type) => {
         if (!cloudSession.loggedIn) {
-          if (type !== "serverchan") return null;
-          if (dirty.serverchan) return { cls: "warn", text: tx("待重新验证", "Needs re-check") };
-          if (localVerified && localKeyOk()) return { cls: "ok", text: tx("本机已就绪", "Local ready") };
-          if (localKeyOk()) return { cls: "muted", text: tx("未验证", "Not verified") };
+          const local = localChannelOfType(type);
+          if (dirty[type]) return { cls: "warn", text: tx("待重新验证", "Needs re-check") };
+          if (local?.verifiedAt) return { cls: "ok", text: tx("本机已就绪", "Local ready") };
+          if (local && Object.keys(local.config || {}).length) return { cls: "muted", text: tx("未验证", "Not verified") };
           return null;
         }
         const primary = primaryOf(type);
@@ -390,8 +676,8 @@ window.BTCNotification = {
         (CHANNEL_DEFS[type]?.fields || [])
           .map((field) => {
             if (field.secret && config[`__masked__${field.key}`])
-              return `<div class="field"><input name="__masked__${field.key}" type="hidden" value="1"><input name="${field.key}" type="${field.type}" autocomplete="off" placeholder="${tx("已保存，留空则不修改", "Saved; leave blank to keep")}"></div>`;
-            return `<div class="field"><input name="${field.key}" type="${field.type}" autocomplete="off" placeholder="${field.placeholder || field.label}" value="${String(config[field.key] ?? "").replace(/"/g, "&quot;")}"></div>`;
+              return `<div class="field"><input name="__masked__${field.key}" type="hidden" value="1"><input name="${field.key}" type="${field.type}" autocomplete="${field.type === "password" ? "new-password" : "off"}" placeholder="${tx("已保存，留空则不修改", "Saved; leave blank to keep")}"></div>`;
+            return `<div class="field"><input name="${field.key}" type="${field.type}" autocomplete="${field.type === "password" ? "new-password" : "off"}" placeholder="${field.placeholder || field.label}" value="${String(config[field.key] ?? "").replace(/"/g, "&quot;")}"></div>`;
           })
           .join("");
       const renderSettings = () => {
@@ -399,21 +685,21 @@ window.BTCNotification = {
         const signedIn = cloudSession.loggedIn;
         settingsBody.innerHTML = Object.entries(CHANNEL_DEFS)
           .map(([type, def]) => {
-            const isLocal = !signedIn && type === "serverchan",
-              locked = !signedIn && type !== "serverchan",
+            const isLocal = !signedIn,
+              locked = false,
               primary = signedIn ? primaryOf(type) : null,
               extras = signedIn ? extrasOf(type) : [];
-            const enabled = locked ? false : isLocal ? (localKeyOk() || Boolean(editing.serverchan)) : Boolean(primary?.enabled || editing[type]);
+            const local = isLocal ? localChannelOfType(type) : null;
+            const enabled = isLocal ? (Boolean(local?.enabled) || Boolean(editing[type])) : Boolean(primary?.enabled || editing[type]);
             const badge = badgeFor(type);
             const showBody = !locked && (enabled || editing[type]);
-            const fieldsVisible =
-              !locked &&
-              (isLocal
-                ? Boolean(editing.serverchan || (localKeyOk() && !localVerified))
-                : !primary
-                  ? Boolean(editing[type])
-                  : Boolean(editing[type] || primary.lastVerifyOk !== true));
-            const configured = isLocal ? localKeyOk() : Boolean(primary);
+            // v2.12.75 修复：configured 必须先声明再被 fieldsVisible 引用（原先顺序颠倒 → TDZ ReferenceError → 渠道列表整块不渲染）。
+            const configured = isLocal ? Boolean(local && Object.keys(local.config || {}).length > 0) : Boolean(primary);
+            const fieldsVisible = isLocal
+              ? Boolean(editing[type] || (configured && !local?.verifiedAt))
+              : !primary
+                ? Boolean(editing[type])
+                : Boolean(editing[type] || primary.lastVerifyOk !== true);
             const actions = [];
             if (fieldsVisible)
               actions.push(`<button type="button" class="ch-primary" data-ch-confirm="${type}">${tx("确认并验证", "Save & verify")}</button>`);
@@ -460,18 +746,17 @@ window.BTCNotification = {
             const type = input.dataset.chToggle,
               block = settingsBody.querySelector(`[data-ch-block="${type}"]`);
             if (!cloudSession.loggedIn) {
-              // 本机 Server酱：关闭开关 = 清除本机 Key
-              if (type === "serverchan" && !input.checked && localKeyOk()) {
+              // 本地模式：开关控制启用状态；关闭时询问是否清除配置
+              const local = localChannelOfType(type);
+              if (!input.checked && local && Object.keys(local.config || {}).length) {
                 showAppDialog({
-                  title: tx("清除本机 Key", "Clear local Key"),
-                  message: tx("确定清除本会话保存的 Server酱 SendKey 吗？", "Clear the ServerChan SendKey saved in this session?"),
-                  confirmText: tx("清除", "Clear"),
+                  title: tx("停用本地渠道", "Disable local channel"),
+                  message: tx(`确定停用本地「${CHANNEL_DEFS[type]?.label || type}」渠道吗？配置仍保留在本机。`, `Disable local "${CHANNEL_DEFS[type]?.label || type}"? The config stays on this device.`),
+                  confirmText: tx("停用", "Disable"),
                   cancelText: tx("取消", "Cancel"),
-                  onConfirm: () => {
-                    sessionStorage.removeItem(keyStore);
-                    localVerified = false;
-                    dirty.serverchan = false;
-                    save();
+                  onConfirm: async () => {
+                    await upsertLocalChannel(type, { enabled: false });
+                    editing[type] = false;
                     renderSettings();
                     render();
                   },
@@ -480,8 +765,9 @@ window.BTCNotification = {
                     renderSettings();
                   },
                 });
-              } else if (type === "serverchan") {
-                editing.serverchan = input.checked;
+              } else {
+                editing[type] = input.checked;
+                await upsertLocalChannel(type, { enabled: input.checked });
                 renderSettings();
               }
               return;
@@ -515,18 +801,47 @@ window.BTCNotification = {
             button.textContent = tx("验证中…", "Verifying…");
             try {
               if (!cloudSession.loggedIn) {
-                const key = block?.querySelector('input[name="sendKey"]')?.value.trim() || "";
-                if (!/^SCT/i.test(key)) throw new Error(tx("请输入以 SCT 开头的 Server酱 Turbo SendKey。", "Enter a ServerChan Turbo SendKey starting with SCT."));
-                sessionStorage.setItem(keyStore, key);
-                save();
-                localVerified = true;
-                dirty.serverchan = false;
-                editing.serverchan = false;
+                const config = collectBlock(block);
+                const def = CHANNEL_DEFS[type];
+                // 基础校验
+                for (const field of def?.fields || []) {
+                  if (field.required && !config[field.key]) {
+                    throw new Error(tx(`请填写 ${field.label}`, `Please fill in ${field.label}`));
+                  }
+                }
+                if (type === "serverchan" && !/^SCT/i.test(config.sendKey || "")) {
+                  throw new Error(tx("请输入以 SCT 开头的 Server酱 Turbo SendKey。", "Enter a ServerChan Turbo SendKey starting with SCT."));
+                }
+                if (type === "bark" && !config.deviceKey) {
+                  throw new Error(tx("请填写 Bark 设备 Key。", "Enter Bark device key."));
+                }
+                if ((type === "webhook" || type === "dingtalk" || type === "feishu") && !config.webhookUrl && !config.url) {
+                  throw new Error(tx("请填写 Webhook 地址。", "Enter webhook URL."));
+                }
+                await upsertLocalChannel(type, { enabled: true, config, verifiedAt: null });
+                dirty[type] = false;
+                editing[type] = false;
                 const current = price();
-                if (Number.isFinite(current)) await push(current).catch(() => {});
+                if (Number.isFinite(current)) {
+                  try {
+                    await sendLocalChannel(type, config, {
+                      title: tx("推送测试", "Push test"),
+                      body: `${coinPairPlain()} ${tx("当前价格", "current price")} ${fmt(current)} USDT`,
+                    });
+                    await upsertLocalChannel(type, { verifiedAt: Date.now() });
+                    showAppDialog({ title: tx("验证成功", "Verified"), message: tx("测试消息已发送，请在该渠道查收。", "A test message was sent; check the channel.") });
+                  } catch (error) {
+                    showAppDialog({ title: tx("验证失败", "Verification failed"), message: error.message || tx("渠道未确认送达。", "The channel did not confirm delivery.") });
+                    renderSettings();
+                    render();
+                    return;
+                  }
+                } else {
+                  await upsertLocalChannel(type, { verifiedAt: Date.now() });
+                  showAppDialog({ title: tx("已保存", "Saved"), message: tx("配置已保存到本机，当前价格不可用，未发送测试。", "Config saved locally; current price unavailable, no test sent.") });
+                }
                 renderSettings();
                 render();
-                showAppDialog({ title: tx("本机推送已就绪", "Local push ready"), message: tx("SendKey 已保存到当前会话（AES-GCM 加密），测试推送已发出，请查看微信。", "SendKey saved for this session (AES-GCM encrypted) and a test push was sent; check WeChat.") });
                 return;
               }
               const primary = primaryOf(type),
@@ -565,17 +880,15 @@ window.BTCNotification = {
           button.onclick = () => {
             const type = button.dataset.chClear;
             if (!cloudSession.loggedIn) {
-              if (type !== "serverchan") return;
               showAppDialog({
-                title: tx("清除本机 Key", "Clear local Key"),
-                message: tx("确定清除本会话保存的 Server酱 SendKey 吗？", "Clear the ServerChan SendKey saved in this session?"),
+                title: tx("清除本地配置", "Clear local config"),
+                message: tx(`确定清除本地「${CHANNEL_DEFS[type]?.label || type}」的配置吗？`, `Clear the local "${CHANNEL_DEFS[type]?.label || type}" configuration?`),
                 confirmText: tx("清除", "Clear"),
                 cancelText: tx("取消", "Cancel"),
-                onConfirm: () => {
-                  sessionStorage.removeItem(keyStore);
-                  localVerified = false;
-                  dirty.serverchan = false;
-                  save();
+                onConfirm: async () => {
+                  await removeLocalChannel(type);
+                  dirty[type] = false;
+                  editing[type] = false;
                   renderSettings();
                   render();
                 },
@@ -657,13 +970,84 @@ window.BTCNotification = {
           };
         });
       };
-      const showPushSettings = (open) => {
+      const showPushSettings = async (open) => {
         settingsModal.hidden = !open;
-        if (open) renderSettings();
+        if (open) {
+          localChannels = await loadLocalChannels();
+          renderSettings();
+        }
       };
       $("openPushSettings").onclick = () => showPushSettings(true);
       $("closePushSettings").onclick = () => showPushSettings(false);
       $("donePushSettings").onclick = () => showPushSettings(false);
+      // ---- 推送日志（v2.12.72）：列出历史投递（时间 / 服务 / 消息）----
+      const pushLogModal = document.createElement("div");
+      pushLogModal.id = "pushLogModal";
+      pushLogModal.className = "alert-composer push-settings-modal";
+      pushLogModal.hidden = true;
+      pushLogModal.innerHTML = `<section><header><b>${tx("推送日志", "Push log")}</b><button type="button" id="closePushLog" aria-label="${tx("关闭", "Close")}">×</button></header><div id="pushLogBody" class="push-log-body"><div class="push-log-loading">${tx("加载中…", "Loading…")}</div></div></section>`;
+      document.body.append(pushLogModal);
+      const renderPushLog = (items) => {
+        const zh = getLang() === "zh";
+        const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+        const fmt = (ts) => ts ? new Date(ts).toLocaleString(zh ? "zh-CN" : "en-US", { hour12: false }) : "—";
+        const statusText = (s) => ({ delivered: tx("送达", "Delivered"), failed: tx("失败", "Failed"), queued: tx("排队", "Queued"), queued_to_serverchan: tx("已提交", "Submitted") }[s] || s);
+        if (!items.length) return `<div class="push-log-empty">${tx("暂无推送记录。", "No push records yet.")}</div>`;
+        return `<ul class="push-log-list">${items.map((it) => {
+          const ch = Array.isArray(it.channels) ? it.channels : [];
+          // 逐渠道：成功只留徽章；失败附上具体原因（手机端收不到的渠道一目了然）。
+          const chHtml = ch.length ? `<div class="push-log-ch">${ch.map((c) => `<span class="push-log-ch-item"><span class="push-log-chip ${c.ok ? "ok" : "fail"}"${c.error ? ` title="${esc(c.error)}"` : ""}>${esc(c.name || c.type)}${c.ok ? "" : " ⚠"}</span>${c.ok ? "" : `<span class="push-log-ch-err">${esc(c.error || tx("发送失败", "Send failed"))}</span>`}</span>`).join("")}</div>` : "";
+          // 推送内容：title + body 即手机端实际收到的文本；旧记录无 message 时回退为消息类型。
+          const msg = it.message || {};
+          const msgTitle = msg.title || it.kind || "—";
+          const msgBody = msg.body ? `<div class="push-log-msg-body">${esc(msg.body)}</div>` : (msg.short && msg.short !== msgTitle ? `<div class="push-log-msg-body">${esc(msg.short)}</div>` : "");
+          const errHtml = it.error ? `<div class="push-log-err">⚠ ${esc(it.error)}</div>` : "";
+          return `<li class="push-log-row"><div class="push-log-row-main"><span class="push-log-time">${fmt(it.sentAt || it.queuedAt)}</span><span class="push-log-badge ${it.status === "failed" ? "fail" : "ok"}">${statusText(it.status)}</span><span class="push-log-kind">${esc(it.kind || "")}</span></div><div class="push-log-msg">${esc(msgTitle)}</div>${msgBody}${chHtml}${errHtml}</li>`;
+        }).join("")}</ul>`;
+      };
+      // v2.12.74：默认只拉最近 10 条（一次性 100 条拉取+渲染太慢，用户体感「加载中」很久）；
+      // 底部「展示全部」再拉全量（最多 200 条）。fetch 带 8 秒超时，超时/失败给出明确提示而非永久转圈。
+      const PUSH_LOG_PAGE = 10;
+      const fetchDeliveries = (limit) => {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 8000);
+        return fetch(`/api/alerts/deliveries?limit=${limit}`, { headers: { "content-type": "application/json" }, signal: ctrl.signal })
+          .finally(() => clearTimeout(timer));
+      };
+      const loadPushLog = (limit, showAll) => {
+        const body = $("pushLogBody");
+        if (!body) return;
+        if (!showAll) body.innerHTML = `<div class="push-log-loading">${tx("加载中…", "Loading…")}</div>`;
+        fetchDeliveries(limit)
+          .then((r) => { if (!r.ok) throw new Error(r.status === 401 ? tx("请先登录后查看推送日志。", "Sign in to view the push log.") : (tx("读取推送日志失败（", "Failed to load push log (") + r.status + "）")); return r.json(); })
+          .then((data) => {
+            const items = data.deliveries || [];
+            let html = renderPushLog(items);
+            // 首屏 10 条拉满时大概率还有更早记录 → 给「展示全部」入口。
+            if (!showAll && items.length >= PUSH_LOG_PAGE) {
+              html += `<div class="push-log-more"><button type="button" id="pushLogExpand">${tx("展示全部（更早的推送）", "Show all (older)")}</button></div>`;
+              body.innerHTML = html;
+              const expand = $("pushLogExpand");
+              if (expand) expand.onclick = () => {
+                expand.disabled = true;
+                expand.textContent = tx("加载中…", "Loading…");
+                loadPushLog(200, true);
+              };
+            } else {
+              body.innerHTML = html;
+            }
+          })
+          .catch((error) => {
+            const msg = error.name === "AbortError" ? tx("加载超时（8 秒），请稍后重试。", "Timed out after 8 s. Please retry.") : error.message;
+            body.innerHTML = `<div class="push-log-empty">${msg}</div>`;
+          });
+      };
+      const openPushLog = () => {
+        pushLogModal.hidden = false;
+        loadPushLog(PUSH_LOG_PAGE, false);
+      };
+      $("openPushLog").onclick = openPushLog;
+      $("closePushLog").onclick = () => { pushLogModal.hidden = true; };
       settingsModal.onclick = (event) => {
         if (event.target === settingsModal) showPushSettings(false);
       };
@@ -672,9 +1056,43 @@ window.BTCNotification = {
         const lossEnabled = $("lossPushEnabled"),
           loss = pushSettings.lossPush || {};
         if (lossEnabled) lossEnabled.checked = Boolean(loss.enabled);
-        if ($("lossWarnRoe")) $("lossWarnRoe").value = loss.warnRoe ?? 20;
-        if ($("lossLossRoe")) $("lossLossRoe").value = loss.lossRoe ?? 50;
+        refreshRefPosOptions();
+        const ref = getRefEntry();
+        const notional = ref ? Number(ref.amount) : 0;
+        const lossAmount = Number(loss.lossThresholdAmount) || 0;
+        const liqPct = Number(loss.liqDistancePct) || 0;
+        const lossUnitEl = $("lossUnit"), lossValEl = $("lossValue");
+        if (lossUnitEl && lossValEl) {
+          const lossUnit = (loss.lossUnit === 'pct' || loss.lossUnit === 'usdt') ? loss.lossUnit : 'usdt';
+          lossUnitEl.value = lossUnit;
+          const lossDisp = lossUnit === 'pct'
+            ? (Number(loss.lossValue) > 0 ? Number(loss.lossValue) : (notional > 0 && lossAmount > 0 ? lossAmount / notional * 100 : 0))
+            : lossAmount;
+          lossValEl.value = lossDisp > 0 ? Number(lossDisp).toFixed(2) : "";
+        }
+        const liqUnitEl = $("liqUnit"), liqValEl = $("liqValue");
+        if (liqUnitEl && liqValEl) {
+          const liqUnit = loss.liqUnit === 'price' ? 'price' : 'pct';
+          liqUnitEl.value = liqUnit;
+          const liqDisp = liqUnit === 'price'
+            ? (Number(loss.liqValue) > 0 ? Number(loss.liqValue) : 0)
+            : liqPct;
+          liqValEl.value = liqDisp > 0 ? Number(liqDisp).toFixed(2) : "";
+        }
         if ($("lossCooldown")) $("lossCooldown").value = loss.cooldownMinutes ?? 30;
+        const lsBtn = $("lossPushSave");
+        if (lsBtn) lsBtn.disabled = !cloudSession.loggedIn;
+        // 同步 % 后缀显示
+        const lossRow = $("lossValueRow"), liqRow = $("liqValueRow");
+        const lossSuffix = $("lossStaticUnit"), liqSuffix = $("liqStaticUnit");
+        const lossPctInput = $("lossUnit")?.value === "pct";
+        const liqPctInput = $("liqUnit")?.value === "pct";
+        if (lossRow) lossRow.classList.toggle("has-pct-suffix", lossPctInput);
+        if (liqRow) liqRow.classList.toggle("has-pct-suffix", liqPctInput);
+        if (lossSuffix) lossSuffix.classList.toggle("visible", lossPctInput);
+        if (liqSuffix) liqSuffix.classList.toggle("visible", liqPctInput);
+        recomputeLossMirror();
+        recomputeLiqMirror();
       };
       if (master)
         master.onchange = async () => {
@@ -686,45 +1104,28 @@ window.BTCNotification = {
             showAppDialog({ title: tx("消息推送", "Message alerts"), message: error.message });
           }
         };
-      const lossSave = $("lossPushSave");
-      if (lossSave)
-        lossSave.onclick = async () => {
-          if (!cloudSession.loggedIn) {
-            showAppDialog({ title: tx("亏损推送", "Loss push"), message: tx("请先登录后使用亏损推送。", "Sign in to use loss push.") });
-            return;
-          }
-          try {
-            await savePushSettings({
-              lossPush: {
-                enabled: $("lossPushEnabled").checked,
-                warnRoe: Number($("lossWarnRoe").value) || 20,
-                lossRoe: Number($("lossLossRoe").value) || 50,
-                cooldownMinutes: Number($("lossCooldown").value) || 30,
-              },
-            });
-            showAppDialog({ title: tx("亏损推送", "Loss push"), message: tx("亏损推送设置已保存。", "Loss push settings saved.") });
-          } catch (error) {
-            showAppDialog({ title: tx("亏损推送", "Loss push"), message: error.message });
-          }
-        };
+      // 亏损推送「保存」处理器由 buildLossPushSaveHandler 在 v2.12.67 中动态绑定（见上方）。
 
       const render = () => {
-        const ready = localKeyOk(),
-          cloudCount = rules.filter((r) => r.cloudManaged).length,
-          masterOn = pushSettings.masterEnabled !== false;
-        stateEl.className = `badge ${masterOn ? (cloudCount || ready ? "bull" : "flat") : "flat"}`;
+        const ready = localReady(),
+          masterOn = pushSettings.masterEnabled !== false,
+          mode = primaryMode(),
+          canPush = cloudSession.loggedIn ? (ready || cloudSession.hasSendKey) : ready;
+        stateEl.className = `badge ${masterOn ? (canPush ? (mode === "local" ? "bull" : "accent") : "flat") : "flat"}`;
         stateEl.textContent = !masterOn
           ? tx("推送已关闭", "Push off")
           : cloudSession.loggedIn
-            ? cloudCount
-              ? tx(`云端接管 ${cloudCount} 条`, `Cloud manages ${cloudCount}`)
-              : tx("待配置规则", "No rules yet")
+            ? mode === "local"
+              ? tx("本地推送为主", "Local push primary")
+              : tx("云端推送为主", "Cloud push primary")
             : ready
               ? tx("本机推送已就绪", "Local push ready")
               : tx("未配置推送", "Not configured");
         description.textContent = cloudSession.loggedIn
-          ? tx("已登录：渠道与 Key 加密保存到云端，网页关闭后持续推送；渠道在「推送设置」中管理。", "Signed in: channels and keys are stored encrypted in the cloud and keep pushing after the page closes; manage them under “Settings”.")
-          : tx("本机模式：规则仅保存在此浏览器；在「推送设置」中配置 Server酱，或登录后启用多渠道。", "Local mode: rules stay in this browser; set up ServerChan under “Settings”, or sign in for multi-channel push.");
+          ? mode === "local"
+            ? tx("当前以本地 8787 服务推送为主；本地掉线后自动切换为云端后台推送。", "Local 8787 service is the primary push channel; cloud takes over if local goes offline.")
+            : tx("本地 8787 服务未就绪，当前由云端后台接管推送；恢复后会自动切回本地。", "Local 8787 service is not ready; cloud is handling push until it recovers.")
+          : tx("本机模式：规则与渠道配置仅保存在此浏览器；在「推送设置」中配置本地推送渠道，或登录后启用云端多渠道。", "Local mode: rules and channel configs stay in this browser; set up local channels under “Settings”, or sign in for cloud multi-channel push.");
         if (master) {
           master.checked = masterOn;
           master.disabled = !cloudSession.loggedIn;
@@ -744,17 +1145,13 @@ window.BTCNotification = {
           rules.length
             ? rules
                 .map((r) => {
-                  const cloudManaged = Boolean(r.cloudManaged),
-                    newMode = isNewMode(r),
-                    triggered =
-                      !cloudManaged && r.repeat === false && r.lastTriggeredAt;
+                  const newMode = isNewMode(r),
+                    triggered = r.repeat === false && r.lastTriggeredAt;
                   /* 徽标只标「例外状态」：云端规则是默认形态不再逐行盖章；
                      已执行（一次性触发）与登录后仍留在本机的规则才值得提示。 */
-                  const badge = triggered
-                    ? `<em class="flat">${tx("已执行", "Executed")}</em>`
-                    : !cloudManaged && cloudSession.loggedIn
-                      ? `<em class="muted">${tx("本地", "Local")}</em>`
-                      : "";
+                  // v2.12.68：规则不再区分本地/云端微章，统一由顶部状态显示当前主备通道；
+                  // 仅保留一次性规则的「已执行」提示。
+                  const badge = triggered ? `<em class="flat">${tx("已执行", "Executed")}</em>` : "";
                   // 新模式为重复型：用「最后触发」行展示时间与命中价，一次性规则沿用「已触发执行」
                   const lastLine = r.lastTriggeredAt
                     ? newMode
@@ -763,7 +1160,7 @@ window.BTCNotification = {
                         ? `<small class="notification-triggered">${tx("已触发执行：", "Triggered: ")}${triggerText(r)}</small>`
                         : ""
                     : "";
-                  return `<article class="${cloudManaged ? "cloud-managed-rule" : ""} ${newMode ? "rule-new-mode" : ""}"><span><b>${coinPairPlain()} ${modeTitle(r)}</b><small>${ruleShort(r)}</small>${lastLine}</span>${badge}<button type="button" class="rule-edit" data-edit-local-alert="${r.id}">${tx("编辑", "Edit")}</button><button type="button" class="rule-test" data-test-local-alert="${r.id}">${tx("测试", "Test")}</button><button type="button" class="rule-remove" data-remove-local-alert="${r.id}">${tx("删除", "Delete")}</button></article>`;
+                  return `<article class="${newMode ? "rule-new-mode" : ""}"><span><b>${coinPairPlain()} ${modeTitle(r)}</b><small>${ruleShort(r)}</small>${lastLine}</span>${badge}<button type="button" class="rule-edit" data-edit-local-alert="${r.id}">${tx("编辑", "Edit")}</button><button type="button" class="rule-test" data-test-local-alert="${r.id}">${tx("测试", "Test")}</button><button type="button" class="rule-remove" data-remove-local-alert="${r.id}">${tx("删除", "Delete")}</button></article>`;
                 })
                 .join("")
             : `<small>${tx("尚未添加推送规则。点击「＋ 添加预警」创建第一条 " + coinPairPlain() + " 规则。", "No push rules yet. Click “Add alert” to create the first " + coinPairPlain() + " rule.")}</small>`
@@ -817,12 +1214,13 @@ window.BTCNotification = {
           setText("#notificationCenterModal .notification-center-head b", "消息推送", "Message alerts");
           const bellBtn = document.getElementById("notificationBellToggle"); if (bellBtn) bellBtn.title = tx("消息推送", "Message alerts");
           const ps = document.querySelector("#openPushSettings"); if (ps) ps.textContent = "⚙ " + tx("推送设置", "Settings");
+          const pl = document.querySelector("#openPushLog"); if (pl) pl.textContent = tx("推送日志", "Push log");
           const en = document.querySelector("#pushMasterSwitch")?.nextElementSibling; if (en) en.textContent = tx("启用消息推送", "Enable push");
           const add = document.querySelector("#openLocalAlert"); if (add) add.textContent = "＋ " + tx("添加预警", "Add alert");
           const del = document.querySelector("#clearLocalAlerts"); if (del) del.textContent = tx("批量全删", "Delete all");
           const loss = document.querySelector("#lossPushEnabled")?.nextElementSibling; if (loss) loss.textContent = tx("亏损推送（联动持仓）", "Loss push (linked to positions)");
           const ls = document.querySelector("#lossPushSave"); if (ls) ls.textContent = tx("保存设置", "Save");
-          const lsSmall = document.querySelector(".loss-push-box small"); if (lsSmall) lsSmall.textContent = tx("以「我的持仓」中各笔持仓的保证金收益率（ROE = 价格变动% × 杠杆）计算；任一持仓触发即向所有启用渠道推送。", "Computed from each saved position ROE (price move % x leverage); any position crossing a threshold pushes to all enabled channels.");
+          const lsSmall = document.querySelector(".loss-push-box small"); if (lsSmall) lsSmall.textContent = tx("以「我的持仓」中方向/开仓价/持仓量/杠杆/保证金计算。亏损百分比 = |市价-开仓价|/开仓价×100%（仅亏损方向）；亏损额 = 持仓量×亏损百分比；距强平价% = |市价-理论强平价|/理论强平价×100%。任一维度触发即向所有启用渠道推送。", "Computed from saved position side/entry/size/leverage/margin. Loss % = |mark-entry|/entry×100% (loss side only); loss amount = size × loss %; distance to liquidation % = |mark-theoretical liq|/liq×100%. Any dimension crossing triggers a push.");
         };
         new MutationObserver(applyLang).observe(document.documentElement, { attributes: true, attributeFilter: ["lang"] });
       })();
@@ -848,6 +1246,68 @@ window.BTCNotification = {
             body,
           );
         }
+      };
+      // v2.12.75：钉钉/飞书需要 HMAC 加签且不支持跨域，浏览器直发不可行 ——
+      // 改走本机 8787 的同源中继 /api/local-push（服务端复用云端渠道发送器，含加签），
+      // 且能拿到真实成败，验证不再「盲发即成功」。中继仅限 127.0.0.1/localhost 访问。
+      const sendViaLocalRelay = async (type, config, { title, body }) => {
+        let resp;
+        try {
+          resp = await fetch("/api/local-push", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ type, config, title, body }),
+            keepalive: true,
+          });
+        } catch {
+          throw new Error(tx("本地推送中继不可用（请通过 127.0.0.1:8787 访问）。", "Local push relay unavailable (open this page via 127.0.0.1:8787)."));
+        }
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok || data.ok === false) throw new Error(data.error || `中继失败（HTTP ${resp.status}）`);
+      };
+      // v2.12.68：本地多渠道发送。本地 8787 在线时由浏览器直接向各渠道推送。
+      const sendLocalChannel = async (type, config, { title, body }) => {
+        if (type === "serverchan") {
+          await sendViaServerChan(new URLSearchParams({ title, short: body, desp: body }));
+          return;
+        }
+        if (type === "bark") {
+          const serverUrl = (config.serverUrl || "https://api.day.app").replace(/\/+$/, "");
+          const url = `${serverUrl}/${encodeURIComponent(config.deviceKey)}/${encodeURIComponent(title)}/${encodeURIComponent(body)}`;
+          await fetch(url, { method: "GET", mode: "no-cors", keepalive: true });
+          return;
+        }
+        if (type === "webhook") {
+          await fetch(config.url, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ title, short: body, body, time: new Date().toISOString() }),
+            keepalive: true,
+          });
+          return;
+        }
+        if (type === "dingtalk") {
+          await sendViaLocalRelay("dingtalk", config, { title, body });
+          return;
+        }
+        if (type === "feishu") {
+          await sendViaLocalRelay("feishu", config, { title, body });
+          return;
+        }
+        throw new Error(tx("未知本地渠道类型", "Unknown local channel type"));
+      };
+      const pushLocalAll = async ({ title, body }) => {
+        const enabled = localChannels.filter((c) => c && c.enabled && c.config && Object.keys(c.config).length > 0);
+        if (!enabled.length) throw new Error(tx("没有启用的本地渠道", "No enabled local channels"));
+        const errors = [];
+        for (const ch of enabled) {
+          try {
+            await sendLocalChannel(ch.type, ch.config, { title, body });
+          } catch (error) {
+            errors.push(`${CHANNEL_DEFS[ch.type]?.label || ch.type}: ${error.message}`);
+          }
+        }
+        if (errors.length) throw new Error(errors.join("\n"));
       };
       const timeText = (ts) =>
         new Date(ts).toLocaleString(getLang() === "zh" ? "zh-CN" : "en-US", { hour12: false });
@@ -878,7 +1338,7 @@ window.BTCNotification = {
           lvl = Number.isFinite(Number(event.level)) ? Number(event.level) : Number(rule.targetPrice),
           currentText = fmt(current),
           zh = getLang() === "zh",
-          pair = coinPairPlain();
+          pair = coinPairPlain(opts.coin);
         // 方向判定（红跌绿涨，v2.12.63）：爆仓语义固定 —— 多头爆仓=价跌(红)/空头爆仓=价涨(绿)；
         // 其余按突破/波动方向；无方向信息（如价格达到）用中立 ⚠️。
         const volMove = Number.isFinite(Number(event.move)) ? Number(event.move) : null;
@@ -994,7 +1454,7 @@ window.BTCNotification = {
         return { title, short: phrase, desp, test, category: cat, direction };
       };
       const push = async (current, rule = null, event = null) => {
-        if (!localKeyOk() && !cloudReady())
+        if (!localReady() && !cloudReady())
           throw new Error(
             tx(
               "请先在「推送设置」中配置并启用至少一个推送渠道（Server酱 / 钉钉 / 飞书 / Bark / Webhook 均可）。",
@@ -1002,22 +1462,15 @@ window.BTCNotification = {
             ),
           );
         if (!rule) {
-          if (localKeyOk()) {
-            await sendViaServerChan(
-              new URLSearchParams({
-                title: `价格告警【测试】 ${coinPairPlain()} 当前价格 ${fmt(current)}`,
-                short: `${coinPairPlain()} 当前价格 ${fmt(current)} USDT`,
-                desp: `价格告警【测试】\n\n${coinPairPlain()} 当前价格 ${fmt(current)} USDT`,
-              }),
-            );
-          } else {
-            await sendCloudCustom({ price: current, test: true });
-          }
+          const title = `价格告警【测试】 ${coinPairPlain()} 当前价格 ${fmt(current)}`,
+            body = `${coinPairPlain()} 当前价格 ${fmt(current)} USDT`;
+          if (localReady()) await pushLocalAll({ title, body });
+          else await sendCloudCustom({ price: current, test: true });
           return;
         }
         const m = buildMessage(rule, current, { event });
-        if (localKeyOk())
-          await sendViaServerChan(new URLSearchParams({ title: m.title, short: m.short, desp: m.desp }));
+        if (localReady())
+          await pushLocalAll({ title: m.title, body: m.desp });
         else
           await sendCloudCustom({
             price: current,
@@ -1052,7 +1505,9 @@ window.BTCNotification = {
         return null;
       };
       const pushRuleTest = async (current, rule, saved = false) => {
-        if (!localKeyOk() && !cloudReady())
+        // v2.12.75：与 push() 对齐——本地就绪判定用多渠道 localReady()（钉钉/Bark/Webhook 等均算），
+        // 不再只认 Server酱 Key（localKeyOk），否则非 SCT 渠道用户点「测试推送」会误报未配置。
+        if (!localReady() && !cloudReady())
           throw new Error(
             tx(
               "请先在「推送设置」中配置并启用至少一个推送渠道（Server酱 / 钉钉 / 飞书 / Bark / Webhook 均可）。",
@@ -1060,8 +1515,8 @@ window.BTCNotification = {
             ),
           );
         const m = buildMessage(rule, current, { test: true, event: testEventFor(rule, current), savedRule: saved });
-        if (localKeyOk())
-          await sendViaServerChan(new URLSearchParams({ title: m.title, short: m.short, desp: m.desp }));
+        if (localReady())
+          await pushLocalAll({ title: m.title, body: m.desp });
         else
           await sendCloudCustom({
             price: current,
@@ -1135,9 +1590,22 @@ window.BTCNotification = {
         return null;
       };
       const syncMarkPrice = () => {
-        const mark = $("useLocalMark"),
-          current = price();
+        const current = price();
+        const mark = $("qfMarkPrice");
         if (mark) mark.textContent = Number.isFinite(current) ? fmt(current) : "--";
+      };
+      const updatePriceQuickFill = () => {
+        const entries = Array.isArray(window.btcPersonalEntries) ? window.btcPersonalEntries.filter((e) => e && Number(e.price) > 0) : [];
+        const hasPos = entries.length > 0;
+        const entryBtn = form.querySelector('[data-fill="entry"]'), liqBtn = form.querySelector('[data-fill="liq"]');
+        if (entryBtn) entryBtn.hidden = !hasPos;
+        if (liqBtn) liqBtn.hidden = !hasPos;
+        const entry = entries[0];
+        const entryPrice = entry ? Number(entry.price) : null;
+        const liqPrice = entry ? calcLiqPrice(entry) : null;
+        const entrySpan = $("qfEntryPrice"), liqSpan = $("qfLiqPrice");
+        if (entrySpan) entrySpan.textContent = Number.isFinite(entryPrice) ? fmt(entryPrice) : "--";
+        if (liqSpan) liqSpan.textContent = Number.isFinite(liqPrice) ? fmt(liqPrice) : "--";
       };
       setInterval(() => {
         syncMarkPrice();
@@ -1199,6 +1667,8 @@ window.BTCNotification = {
           }
         }
         previous = current;
+        // v2.12.75：非当前币种的本地规则并行评估（仅钉钉推送，不含语音/浏览器通知）
+        evalBackgroundCoins(now).catch(() => {});
       }, 1_000);
       $("clearLocalAlerts").onclick = () => {
         if (!rules.length) return;
@@ -1275,7 +1745,7 @@ window.BTCNotification = {
         const mode = form.elements.mode.value,
           cooldown = Math.max(1, Number(form.elements.cooldown.value) || 5),
           voiceEnabled = form.elements.voiceEnabled.checked,
-          base = { id: editingId || crypto.randomUUID(), repeat: mode === "price" ? repeat : true, cooldownMinutes: cooldown, voiceEnabled, lastTriggeredAt: null };
+          base = { id: editingId || crypto.randomUUID(), updatedAt: Date.now(), repeat: mode === "price" ? repeat : true, cooldownMinutes: cooldown, voiceEnabled, lastTriggeredAt: null };
         if (mode === "round_number") {
           const step = Number(form.elements.roundStep.value);
           if (!Number.isFinite(step) || step <= 0) throw new Error(tx("请填写有效的整数步长（> 0）。", "Enter a valid round step (> 0)."));
@@ -1316,6 +1786,7 @@ window.BTCNotification = {
             );
           applyMode();
           syncMarkPrice();
+          updatePriceQuickFill();
         }
       };
       // 编辑已有规则：回填表单并切换弹窗为「编辑预警」模式（提交时原位替换，不新增）
@@ -1362,11 +1833,22 @@ window.BTCNotification = {
       $("openLocalAlert").onclick = () => show(true);
       $("closeLocalAlert").onclick = () => show(false);
       form.elements.mode.onchange = applyMode;
-      $("useLocalMark").onclick = () => {
-        const current = price();
-        if (Number.isFinite(current))
-          form.elements.target.value = current.toFixed(2);
-      };
+      form.querySelector("#priceQuickFill")?.addEventListener("click", (event) => {
+        const btn = event.target.closest(".quick-fill-btn");
+        if (!btn) return;
+        const fill = btn.dataset.fill;
+        const entries = Array.isArray(window.btcPersonalEntries) ? window.btcPersonalEntries.filter((e) => e && Number(e.price) > 0) : [];
+        const entry = entries[0];
+        if (fill === "mark") {
+          const current = price();
+          if (Number.isFinite(current)) form.elements.target.value = current.toFixed(2);
+        } else if (fill === "entry" && entry) {
+          form.elements.target.value = Number(entry.price).toFixed(2);
+        } else if (fill === "liq" && entry) {
+          const liq = calcLiqPrice(entry);
+          if (Number.isFinite(liq)) form.elements.target.value = liq.toFixed(2);
+        }
+      });
       $("useLocalMarkBase").onclick = () => {
         const current = price();
         if (Number.isFinite(current))
@@ -1421,6 +1903,9 @@ window.BTCNotification = {
         render();
       });
       render();
+      // v2.12.68：周期性探测本地 8787 服务，用于显示本地/云端主备状态。
+      checkLocalHealth();
+      setInterval(async () => { await checkLocalHealth(); render(); }, 10_000);
       // 切换币种：按新币种重新读取本机规则并重渲染（每币种独立存储，默认空、已添加则保留、未添加则为无）
       window.addEventListener("btc:coin-changed", async () => {
         const reloaded = await loadRules();
@@ -1430,6 +1915,97 @@ window.BTCNotification = {
         previous = null;
         render();
       });
+      // ── v2.12.75 本地推送多币种支撑：非当前币种并行评估，触发时仅推送钉钉（不含语音/浏览器通知）──
+      const LOCAL_COINS = ['BTC', 'ETH', 'ZEC', 'BNB'];
+      const localInstId = (c) => c + '-USDT-SWAP';
+      const localCoinOfInst = (inst) => LOCAL_COINS.find((c) => localInstId(c) === inst) || null;
+      const wsPriceByCoin = new Map();   // 非当前币种的实时价（来自自建 OKX WS 池）
+      const bgRulesByCoin = new Map();   // 非当前币种规则缓存：coin -> { rules, prev }
+      let bgRulesLoadedAt = 0;
+      const loadCoinRules = async (coin) => {
+        const key = coin === 'BTC' ? 'alerts' : 'alerts_' + coin.toLowerCase();
+        try {
+          const saved = await window.btcSecureVault?.get(key);
+          if (saved && Array.isArray(saved.rules)) return sanitize(saved.rules);
+        } catch {}
+        return [];
+      };
+      // 自建 OKX 公共行情池：为所有币种订阅 tickers，独立于当前界面（与后端 worker 同源）
+      const startLocalPricePool = () => {
+        let socket;
+        const connect = () => {
+          try { socket = new WebSocket('wss://ws.okx.com:8443/ws/v5/public'); }
+          catch { setTimeout(connect, 3_000); return; }
+          const args = LOCAL_COINS.map((c) => ({ channel: 'tickers', instId: localInstId(c) }));
+          socket.addEventListener('open', () => socket.send(JSON.stringify({ op: 'subscribe', args })));
+          socket.addEventListener('message', (e) => {
+            try {
+              const row = JSON.parse(e.data).data?.[0];
+              const coin = localCoinOfInst(row?.instId);
+              if (coin) wsPriceByCoin.set(coin, Number(row?.last));
+            } catch {}
+          });
+          socket.addEventListener('close', () => setTimeout(connect, 3_000));
+          socket.addEventListener('error', () => { try { socket.close(); } catch {} });
+        };
+        connect();
+      };
+      // 仅钉钉推送（消息推送），复用 buildMessage 的币种感知文案；不触发语音、不触发浏览器通知
+      const pushCoinOnly = async (coin, current, rule, event) => {
+        const m = buildMessage(rule, current, { event, coin });
+        if (localReady()) await pushLocalAll({ title: m.title, body: m.desp });
+        else if (cloudReady()) await sendCloudCustom({ price: current, categoryLabel: cloudCategoryLabel(rule.kind, m.direction === 'up'), phrase: m.short, note: m.desp, direction: m.direction, test: false });
+      };
+      // 后台币种评估：每 5 秒刷新规则缓存（保留冷却状态），逐币种与各自上一价比较触发
+      const evalBackgroundCoins = async (now) => {
+        const active = getCoin();
+        if (pushSettings.masterEnabled === false) return;
+        if (now - bgRulesLoadedAt > 5_000) {
+          bgRulesLoadedAt = now;
+          for (const c of LOCAL_COINS) {
+            if (c === active) continue;
+            const fresh = await loadCoinRules(c);
+            const old = bgRulesByCoin.get(c);
+            if (old) {
+              const byId = new Map(old.rules.map((r) => [r.id, r]));
+              for (const r of fresh) {
+                const o = byId.get(r.id);
+                if (o) { r.lastTriggeredAt = o.lastTriggeredAt; r._gridIdx = o._gridIdx; r._volBuffer = o._volBuffer; }
+              }
+            }
+            const prev = old ? old.prev : undefined;
+            bgRulesByCoin.set(c, { rules: fresh, prev });
+          }
+        }
+        for (const c of LOCAL_COINS) {
+          if (c === active) continue;
+          const entry = bgRulesByCoin.get(c);
+          if (!entry || !entry.rules.length) continue;
+          const current = wsPriceByCoin.get(c);
+          if (!Number.isFinite(current)) continue;
+          const prev = entry.prev;
+          if (prev === undefined) { entry.prev = current; continue; }
+          entry.prev = current;
+          for (const r of entry.rules) {
+            if (r.cloudManaged) continue;
+            let ev = null;
+            if (isNewMode(r)) {
+              ev = evaluateMode(r, current, now);
+              if (!ev) continue;
+              const newGap = Math.max(1, Number(r.cooldownMinutes) || 1) * 60_000;
+              if (r.lastTriggeredAt && now - r.lastTriggeredAt < newGap) continue;
+            } else {
+              if (r.repeat === false && r.lastTriggeredAt) continue;
+              const gap = r.repeat === false ? 0 : Math.max(1, Number(r.cooldownMinutes) || 1) * 60_000;
+              if (!(matched(r, prev, current) && (!gap || !r.lastTriggeredAt || now - r.lastTriggeredAt >= gap))) continue;
+            }
+            r.lastTriggeredAt = now;
+            r.lastTriggeredPrice = current;
+            pushCoinOnly(c, current, r, ev).catch(() => {});
+          }
+        }
+      };
+      startLocalPricePool();
     }, 0);
   },
 };

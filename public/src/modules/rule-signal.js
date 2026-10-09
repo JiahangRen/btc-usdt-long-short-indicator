@@ -165,7 +165,8 @@ function fixedRuleBasisText() {
         "15m": tx("15分钟", "15 min"),
         "30m": tx("30分钟", "30 min"),
         "1h": tx("1小时", "1 hour"),
-        "3h": tx("3小时", "3 hours"),
+        "4h": tx("4小时", "4 hours"),
+        "6h": tx("6小时", "6 hours"),
       }[fixedRuleSignal.interval] || fixedRuleSignal.interval;
   return `${tx("基准", "Basis")}：${source} · ${intervalLabel} · ${tx("最近", "latest")} ${fixedRuleHistoryCount()} ${tx("根已收盘 K 线", "closed candles")}`;
 }
@@ -210,7 +211,7 @@ function renderFixedIndicatorDetails(m) {
   const interval = fixedRuleSignal.interval,
     historyCount = fixedRuleHistoryCount(),
     minutes =
-      { "5m": 5, "15m": 15, "30m": 30, "1h": 60, "3h": 180 }[interval] || 15,
+      { "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "6h": 360 }[interval] || 15,
     period = (n) => {
       const total = n * minutes;
       return total < 60
@@ -343,7 +344,7 @@ function renderFixedRuleSignalBase() {
     /* 有效期标注：短线反转信号在 60 分钟内最有效，长周期趋势信号有效期更长。 */
     const validity = $("signalValidity");
     if (validity) {
-      const mins = { "5m": 60, "15m": 60, "30m": 120, "1h": 1440, "3h": 4320 }[fixedRuleSignal.interval] || 60;
+      const mins = { "5m": 60, "15m": 60, "30m": 120, "1h": 1440, "4h": 5760, "6h": 8640 }[fixedRuleSignal.interval] || 60;
       const dur = mins >= 1440 ? `${mins / 1440} 天` : mins >= 60 ? `${mins / 60} 小时` : `${mins} 分钟`;
       const valHtml = `<span class="muted">${tx("有效至", "Valid until")}</span> ${tx("当前收盘后约", "~after this candle")} <b>${dur}</b> · <span class="muted">${tx("破位即撤销", "void if broken")}</span>`;
       if (validity.dataset.lastHtml !== valHtml) {
@@ -373,6 +374,7 @@ function renderFixedRuleSignalBase() {
     reason.after(basis);
   }
   if (basis) {
+    basis.classList.remove("is-error");
     const confirmation = presentation
       ? presentation.confirmations
           .map((item) => `${item.interval} ${item.direction === "pending" ? tx("加载中", "loading") : ruleSignalLabel(item.direction)}`)
@@ -388,6 +390,27 @@ function renderFixedRuleSignalBase() {
     signalCard.classList.add("signal-flash");
   }
   lastRuleSignalState = newState;
+}
+/* A failed basis fetch used to be swallowed by an empty catch, so the card
+   kept rendering the previous source's candles as if they were still current.
+   Surface the failure on the basis line instead of silently going stale. */
+function renderFixedRuleSignalError(error) {
+  const reason = $("signalReason");
+  if (!reason) return;
+  let basis = $("fixedRuleBasis");
+  if (!basis) {
+    basis = document.createElement("small");
+    basis.id = "fixedRuleBasis";
+    basis.className = "fixed-rule-basis";
+    reason.after(basis);
+  }
+  const detail = error?.message || error?.msg || "";
+  const text = `${fixedRuleBasisText()} · ${tx("当前数据源取不到该周期", "basis interval unavailable on this source")}${detail ? `（${detail}）` : ""}`;
+  if (basis.dataset.lastHtml !== text) {
+    basis.textContent = text;
+    basis.dataset.lastHtml = text;
+  }
+  basis.classList.add("is-error");
 }
 async function loadFixedRuleSignal(force = false) {
   if (fixedRuleSignal.loading) return;
@@ -422,7 +445,8 @@ async function loadFixedRuleSignal(force = false) {
       fixedRuleSignal.presentation = deriveStableRulePresentation();
       renderFixedRuleSignal();
     });
-  } catch {
+  } catch (error) {
+    renderFixedRuleSignalError(error);
   } finally {
     fixedRuleSignal.loading = false;
   }
@@ -434,7 +458,7 @@ export function initRuleSignal() {
   const control = document.createElement("label");
   control.id = "fixedRuleControl";
   control.className = "fixed-rule-control";
-  control.innerHTML = `<span>${tx("信号基准", "Signal basis")}</span><select aria-label="${tx("信号基准周期", "Signal basis interval")}"><option value="5m">${tx("5分钟", "5 min")}</option><option value="15m">${tx("15分钟", "15 min")}</option><option value="30m">${tx("30分钟", "30 min")}</option><option value="1h">${tx("1小时", "1 hour")}</option><option value="3h">${tx("3小时", "3 hours")}</option></select>`;
+  control.innerHTML = `<span>${tx("信号基准", "Signal basis")}</span><select aria-label="${tx("信号基准周期", "Signal basis interval")}"><option value="5m">${tx("5分钟", "5 min")}</option><option value="15m">${tx("15分钟", "15 min")}</option><option value="30m">${tx("30分钟", "30 min")}</option><option value="1h">${tx("1小时", "1 hour")}</option><option value="4h">${tx("4小时", "4 hours")}</option><option value="6h">${tx("6小时", "6 hours")}</option></select>`;
   const select = control.querySelector("select");
   select.value = fixedRuleSignal.interval;
   select.onchange = () => {

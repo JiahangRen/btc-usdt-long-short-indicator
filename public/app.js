@@ -14,9 +14,9 @@ import {
   formatRate,
 } from './src/core.js?v=20260928a';
 import { initMultiCoin } from './src/modules/multi-coin.js?v=20261001d';
-import { initApiCenter } from './src/modules/api-center.js?v=20260925b';
-import { metrics, classification, fixedRuleSignal, RULE_SIGNAL_MIN_CANDLES, RULE_SIGNAL_HISTORY_CANDLES, RULE_SIGNAL_ENTER_SCORE, RULE_SIGNAL_EXIT_SCORE, RULE_SIGNAL_CONFIRM_INTERVALS, RULE_SIGNAL_REENTRY_CANDLES } from './src/signals.js?v=20260924b';
-import { renderFixedRuleSignal, deriveStableRulePresentation, fixedRuleHistoryCount, invalidateFixedRuleSignal, registerRuleSignalEnhancer, initRuleSignal, loadFixedRuleSignal, ruleSignalLabel } from './src/modules/rule-signal.js?v=20260924b';
+import { initApiCenter } from './src/modules/api-center.js?v=20261008c';
+import { metrics, classification, fixedRuleSignal, RULE_SIGNAL_MIN_CANDLES, RULE_SIGNAL_HISTORY_CANDLES, RULE_SIGNAL_ENTER_SCORE, RULE_SIGNAL_EXIT_SCORE, RULE_SIGNAL_CONFIRM_INTERVALS, RULE_SIGNAL_REENTRY_CANDLES } from './src/signals.js?v=20261009a';
+import { renderFixedRuleSignal, deriveStableRulePresentation, fixedRuleHistoryCount, invalidateFixedRuleSignal, registerRuleSignalEnhancer, initRuleSignal, loadFixedRuleSignal, ruleSignalLabel } from './src/modules/rule-signal.js?v=20261009a';
 import { refreshResonance, renderResonanceChips, RES_INTERVALS, resonanceCache, initResonance } from './src/modules/resonance.js?v=20260924b';
 import { loadResearchOutlook, renderResearchOutlook, rerenderResearchOutlook, initResearch, setSyncMacroPanels } from './src/modules/research.js?v=20260928a';
 import { renderOkxMicrostructure } from './src/modules/microstructure.js?v=20260924b';
@@ -541,7 +541,8 @@ function visibleCandles() {
       // 否则整个 .chart-column 会被 replaceChildren 丢弃，卡跟着消失。
       const stowed = layout.querySelector(".chart-column > .optional");
       if (stowed) layout.after(stowed);
-      layout.replaceChildren(signal, chart, changes, side);
+      const healthMobile = $("marketHealthCard");
+      layout.replaceChildren(signal, chart, changes, ...(healthMobile ? [healthMobile] : []), side);
       side.hidden = true;
       // 移动端：宏观与情绪不能留在 hidden 的 side-stack 里，否则会被隐藏。
       // 把它放到 terminal-layout 之后、indicatorDetailsCard 之前。
@@ -564,7 +565,8 @@ function visibleCandles() {
          这里的 replaceChildren 会把不在清单里的子节点整个摘掉 —— 卡片会凭空消失
          （实测：宏观卡一长就触发）。所以凡是已经在左列里的共振卡，必须原样带上。 */
       const stowedResonance = column.querySelector(".optional");
-      column.replaceChildren(chart, ...(okx ? [okx] : []), changes, ...(stowedResonance ? [stowedResonance] : []));
+      const healthDesktop = $("marketHealthCard");
+      column.replaceChildren(chart, ...(okx ? [okx] : []), changes, ...(healthDesktop ? [healthDesktop] : []), ...(stowedResonance ? [stowedResonance] : []));
       layout.replaceChildren(column, side);
     }
     draw();
@@ -2124,7 +2126,7 @@ setTimeout(() => {
   });
 }, 0);
 
-import { initVoiceEngine } from './src/modules/voice.js?v=20260924b';
+import { initVoiceEngine } from './src/modules/voice.js?v=20261005a';
 
 /* Final readability pass: selected-point pricing, compact global explanations, and clearer short-horizon caveats. */
 const microPredictionBase = microPrediction;
@@ -4054,6 +4056,8 @@ $("source")?.addEventListener("change", () => {
 });
 whenIdle(() => loadDerivativeMarketContext(true));
 setInterval(() => loadDerivativeMarketContext(true), 10_000);
+whenIdle(() => loadMarketHealth());
+setInterval(() => loadMarketHealth(), 30_000);
 
 /* 连通性诊断在启动稍后执行，并将服务器给出的本地与上游耗时分别呈现。
    Connectivity diagnostics begin shortly after startup, with the server's
@@ -4212,7 +4216,7 @@ renderRangeExtremaPoints = function () {
   const version = document.createElement("button");
   version.type = "button";
   version.id = "appVersion";
-  version.textContent = "v2.12.64";
+  version.textContent = "v2.12.78";
   version.title = "查看更新日志";
   version.setAttribute("aria-expanded", "false");
   // v2.12.7：版本号随「账户 / API / 连通性 / 数据源」一起收进设置齿轮面板。
@@ -4650,6 +4654,45 @@ renderRangeExtremaPoints = function () {
   // v2.12.64：告警推送版式整理 —— 钉钉换行改段落空行、字段值统一加粗。
   const v21264PushLayoutChangelog = log.innerHTML;
   log.innerHTML = `<b>v2.12.64 更新日志</b><dl><dt>告警推送版式整理：一行一条、字段值统一加粗</dt><dd>把告警推送的正文版式按「标题一行 + 每个字段独占一行」整理：钉钉 markdown 的换行从行尾双空格硬换行改为段落空行分隔（硬换行在钉钉客户端不稳定、容易被折叠成一行挤在一起），现在当前价、各明细字段、触发时间、交易对、站点链接逐行显示、行间留白，一眼扫下来就是一条完整明细；全部明细字段的值统一加粗（此前只有部分字段加粗，字重参差）。Bark 渠道仍自动降级纯文本，逐行保留。纯排版调整，内容与色标（🟢 涨 / 🔴 跌）不变，本地服务端即时生效。</dd></dl><hr>` + v21264PushLayoutChangelog;
+  // v2.12.68：本地多渠道推送、% 后缀显示修复、登录后上传提示。
+  const v21268LocalChannelsChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.68 更新日志</b><dl><dt>本地多渠道推送设置 & 登录上传提示</dt><dd>推送设置改为「本地/云端」清晰分流：未登录时所有渠道（Server酱 / Bark / Webhook / 钉钉 / 飞书）均可配置，配置加密保存在本机 secure vault；本地 8787 在线时由浏览器直接推送，掉线或关页后自动切云端。修复亏损/强平阈值输入框的 % 字体重叠：单位选择器显示文字单位，输入框右侧静态显示 %。冷却分钟数移除微调器、只能填整数。登录成功后自动弹出「上传本地数据到云端」提示，支持一键同步推送规则与渠道、AI 助手/API 设置、持仓数据；持仓同时提供下载云端覆盖本地的入口。若用户未处理，下次登录会继续提示，点击「不再提示」后不再打扰。</dd></dl><hr>` + v21268LocalChannelsChangelog;
+  // v2.12.67：亏损推送简化为单阈值（警告+推送同时），亏损/强平均支持 % 与金额/价格双向实时换算，按参考仓位联动，天然多仓位。
+  const v21267LossPushSimplifyChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.67 更新日志</b><dl><dt>亏损推送：单阈值 + 双向实时换算 + 多仓位联动</dt><dd>把「亏损推送（联动持仓）」从「三维度 × 警告/推送两级」简化为单一阈值：命中即页面警示并外推（警告与推送同时发生）。亏损设置合并为一个输入框 + 单位切换（% / USDT），基于所选「参考仓位」的名义持仓实时双向换算——填百分比自动算出对应亏损额，填金额自动算出对应百分比。强平设置同样合并为一个输入框 + 单位切换（距强平价% / 强平价价格），填百分比给出触发价与理论强平价，填价格自动折算距离百分比。新增「参考仓位」下拉（仅用于换算预览）；阈值以通用口径作用于每个仓位：亏损金额阈值在每个仓位独立判定（亏损达到该 USDT 即提醒），强平价距离阈值按百分比作用于每个仓位，天然支持多仓位。后端 push-settings schema 同步精简，前端 UI、换算逻辑与文案统一更新。</dd></dl><hr>` + v21267LossPushSimplifyChangelog;
+  // v2.12.66：亏损推送触发维度从单一 ROE 扩展为亏损百分比 / 亏损额 / 距离强平价百分比。
+  const v21266LossPushChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.66 更新日志</b><dl><dt>亏损推送：三维度触发</dt><dd>原「亏损推送（联动持仓）」仅按保证金收益率 ROE（价格变动% × 杠杆）触发，现在改为三套独立阈值，每套均分「警告 / 推送」两级：① 亏损百分比（按开仓价计算的价格亏损幅度）；② 亏损额（按持仓名义价值估算的绝对亏损金额）；③ 距离强平价百分比（按理论强平价计算）。三者互斥或关系：任一维度先达到推送线即触发亏损推送，无推送线命中但达到警告线则触发警告。设置保存在云端 push-settings，alert-worker 每 15 秒扫描一次持仓档案并统一推送文案，正文展示命中时各维度的具体数值与理论强平价。UI 上的输入框同步改为三组，小字说明同步更新计算公式。</dd></dl><hr>` + v21266LossPushChangelog;
+  // v2.12.69：登录同步改为双向（按时间戳 last-write-wins）。
+  const v21269BidirectionalSyncChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.69 更新日志</b><dl><dt>登录同步改为双向（按时间戳较新者为准）</dt><dd>登录后弹出的数据同步从「单向上传」改为「双向合并」：① 推送规则与自动播报（语音规则）按条目合并——同 id 比 updatedAt 取新、不同 id 并集保留，不再整组覆盖误删；② 持仓按「集合时间戳」整组替换（较新一方整体覆盖，符合你设定的捆绑语义）；③ API 密钥因服务端安全不回传浏览器，仅本地→云端上传、云端→本地下载不可用。服务端 alert_rules 新增 updated_at 并复用本地规则 id，使双向合并成立。未处理时下次登录继续提示，点「不再提示」后不再打扰。</dd></dl><hr>` + v21269BidirectionalSyncChangelog;
+  // v2.12.65：OKX 同步持仓写入本地 SQLite，作为 localStorage / 云端同步之外的本地持久层。
+  const v21265LocalPositionsChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.65 更新日志</b><dl><dt>OKX 同步持仓写入本地数据库</dt><dd>从欧易同步持仓时，除页面 localStorage 与云端同步外，额外写入本机 SQLite（data/positions.sqlite）。新增 /api/positions 接口（GET/POST/DELETE），无需云端登录；OKX 扩展 content-app.js 在填卡成功后自动落库，本地持久化便于后续读取、跨浏览器恢复与风控联动。</dd></dl><hr>` + v21265LocalPositionsChangelog;
+  // v2.12.70：修复亏损/强平阈值单位被强制回退 + 亏损推送新增「测试发送」按钮。
+  const v21270LossPushUnitTestChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.70 更新日志</b><dl><dt>亏损 / 强平阈值单位记忆修复</dt><dd>此前选择「百分比 / 百分比距离」后，每次重新打开亏损推送面板都会被强制回退成「金额 / 百分比距离」：根因是服务端只持久化了换算后的金额与百分比，未保存用户选择的输入单位，前端每次渲染都硬编码为默认单位。现服务端 alert_push_settings 的 lossPush 增加 lossUnit / lossValue / liqUnit / liqValue 四个字段持久化用户的选择与原始输入值；前端 syncSettingsInputs 改为按已存单位回填，亏损阈值选百分比不再跳回金额，强平阈值（百分比距离 / 价格）也正确联动与还原。</dd><dt>亏损推送「测试发送」按钮</dt><dd>在亏损推送卡片内新增「测试发送」按钮：用当前输入框的亏损阈值、强平阈值与参考仓位构造一条模拟触发文案（含当前价格、名义持仓、亏损额与距强平价百分比），经现有本地 / 云端渠道发出，便于即时验证推送链路是否畅通。无启用渠道时给出明确提示；本地渠道优先，未配置本地则走云端自定义消息接口。</dd></dl><hr>` + v21270LossPushUnitTestChangelog;
+  // v2.12.71：美联储利率监测（Fed Rate Monitor）——目标利率概率上线。
+  const v21271FedRateChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.71 更新日志</b><dl><dt>美联储利率监测：目标利率概率上线</dt><dd>「宏观环境与跨市场联动」卡新增『美联储利率监测』面板：基于 CME 30 天联邦基金期货月度合约（行情经 Yahoo Finance 免费源转发）与美联储公开日历的市场隐含目标利率概率，月末加权算法与 Investing.com Fed Rate Monitor 同族；当前目标区间取自 FRED 的 DFEDTARU 日度序列。展示未来两至三场 FOMC 决议的期货价格、北京时间决议时刻与倒计时、各目标利率区间的概率横条及较昨日变化（按期货昨收盘复算）；第二场起按路径递推（以前一场期望结果为基准），概率随期货价格每 10 分钟刷新。新增 /api/fed-rate-monitor 接口，并随 /api/fed-calendar 一并下发。所有数字是市场定价快照，不构成方向预测。</dd></dl><hr>` + v21271FedRateChangelog;
+  // v2.12.72：推送设置新增「推送日志」+ 桌面 app 切回旧标签自动重载（根治缓存错位）
+  const v21272PushLogChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.72 更新日志</b><dl><dt>推送设置新增「推送日志」+ 桌面 app 根治缓存错位</dt><dd>推送设置（⚙）新增「推送日志」按钮：弹窗按时间倒序列出历史推送投递，逐条展示投递时间、状态（送达 / 失败）、消息类型与标题、以及各渠道服务名（成功 / 失败），即「几点几分往哪个服务推送了哪条消息」。数据来自服务端 alert_deliveries 表（本次已把推送消息正文补进投递记录，此前仅存消息类型），新增 /api/alerts/deliveries 查询接口（需登录）。桌面启动器同步根治：命中已开旧标签后顺手 location.reload()，以后每次点 app 自动吃到最新前端，不再有「我这边好、你那边坏」的缓存错位。</dd></dl><hr>` + v21272PushLogChangelog;
+  // v2.12.73：推送日志补全详细内容 + 按钮挪到「消息推送」标题栏。
+  const v21273PushLogDetailChangelog = log.innerHTML;
+  log.innerHTML = `<b>v2.12.73 更新日志</b><dl><dt>推送日志展示完整推送内容 + 入口挪到「消息推送」标题栏</dt><dd>推送日志逐条展示手机端实际收到的完整文本：推送标题 + 多行正文（保留换行），逐渠道标注成功 / 失败，失败渠道直接附上具体失败原因（悬停徽章也可查看），整体投递失败时展示顶层错误。旧记录（本次升级前入库）当时未存正文，仅能显示消息类型；新推送起全部带完整内容。「推送日志」入口从「推送设置」弹窗挪到「消息推送」弹层标题栏（标题右侧），打开消息推送即可一键查看，无需先进设置。</dd></dl><hr>` + v21273PushLogDetailChangelog;
+  // v2.12.74：推送日志默认只加载最近 10 条 + 「展示全部」，根治打开日志卡「加载中」很久。
+  const v21274PushLogPageChangelog = log.innerHTML;
+  log.innerHTML = '<b>v2.12.75 更新日志</b><dl><dt>市场异动监测卡片</dt><dd>周期涨幅下方新增「市场异动监测」面板，基于现有 OKX 数据实时评估 5 类异动并给出三态提示（正常/关注/异动）：成交量放大（当前 K 线量 ÷ 近 20 根均值）、资金费率极端（|费率|/8h）、永续 OI 快速变化（约 5 分钟窗口）、关键支撑/阻力有效收盘突破（近期摆动高低点）、巨鲸交易与交易所净流出。其中成交量/资金费率/OI/支撑阻力四项完全由站内数据计算；巨鲸与净流出需配置 ONCHAIN_API_KEY（CryptoQuant / Coinglass）后启用，未配置时显示「未配置」而不报错。</dd></dl><hr>' + `<b>v2.12.74 更新日志</b><dl><dt>推送日志分页加载：默认 10 条 + 「展示全部」</dt><dd>推送日志此前一次性拉取并渲染最近 100 条，打开后长时间停在「加载中」。现改为默认只加载最近 10 条（秒开），列表底部出现「展示全部（更早的推送）」按钮，点击后才拉取全量（最多 200 条）。请求同时加 8 秒超时保护：超时或失败会给出明确提示，不再永久转圈。服务端 alert_deliveries 补 user_id 维度索引，日志查询随数据量增长仍保持毫秒级。</dd></dl><hr>` + v21274PushLogPageChangelog;
+  // v2.12.76：API 接入中心新增 CryptoQuant 接入区。
+  const v21276CqApiCenterChangelog = log.innerHTML;
+  log.innerHTML = '<b>v2.12.76 更新日志</b><dl><dt>API 接入中心新增 CryptoQuant 接入区</dt><dd>「API 接入中心 → 可选升级」新增 CryptoQuant 行：填入免费 API key（cryptoquant.com 免费注册即得）即可启用「市场异动监测」卡片中的交易所净流入与巨鲸大额交易监测；免费层为日级数据、巨鲸笔数可能不含，缺失项自动降级不报错。支持一键「验证 Key」，Key 仍以服务端加密保存、不会回显；服务器环境变量 ONCHAIN_API_KEY 注入方式继续可用，页面保存的 Key 优先。顺带修正链上请求鉴权头（token → Bearer）并把请求分辨率对齐免费层（hour → day）。</dd></dl><hr>' + v21276CqApiCenterChangelog;
+  // v2.12.77：链上净流出默认走 CoinMetrics 免费源；修正 CryptoQuant 套餐认知与验证端点。
+  const v21277CmOnchainChangelog = log.innerHTML;
+  log.innerHTML = '<b>v2.12.77 更新日志</b><dl><dt>交易所净流出改为默认可用（CoinMetrics 免费源）</dt><dd>经与官方文档核实，CryptoQuant 的链上数据（交易所净流入/巨鲸交易）需 Professional 及以上付费套餐，免费 Key 调用会返回 403（此前「免费层可用」的说法有误）。现改为：「市场异动监测」卡片的交易所净流出一律默认走 CoinMetrics Community 免费 API（无需任何 Key，日级数据，正=净流入 / 负=净流出），开箱即用。API 接入中心的 CryptoQuant 行改为「付费增强源（可选）」：验证 Key 改用所有套餐均可调的 market-data 端点（免费 Key 也能验证通过并明确提示套餐限制）；若配了付费套餐 Key，链上请求优先走 CryptoQuant，遇 403 自动回落 CoinMetrics 不空转。Coinglass 路径保留。</dd></dl><hr>' + v21277CmOnchainChangelog;
+  // v2.12.78：规则信号基准周期 3h → 4h/6h，并修掉取数失败被静默吞掉的隐患。
+  const v21278BasisIntervalChangelog = log.innerHTML;
+  log.innerHTML = '<b>v2.12.78 更新日志</b><dl><dt>「当前规则信号」基准周期：3 小时 → 4 小时 / 6 小时</dt><dd>原 3 小时档位只有 OKX 能提供，且还需服务端把 1 小时 K 线聚合而成；Gate 与 Binance 都不支持该周期（实测分别返回 INVALID_PARAM_VALUE 与 Invalid interval），切到这两个数据源时规则信号会取不到数据。现移除 3 小时，改为 4 小时与 6 小时——三家数据源全部原生支持，同时与图表 K 线选择器、多周期共振、AI 快照所用的周期保持一致：4 小时是币圈中线通用档，6 小时给出更长一档的趋势视角。各档「有效至」时长同步按 24 根基准 K 线计算（4 小时 ≈ 4 天、6 小时 ≈ 6 天）。另修复：基准取数失败此前被空 catch 静默吞掉，卡片会继续展示上一次数据源的旧 K 线却看不出异常，现在改为在基准行直接提示失败原因。停留在 3 小时的历史偏好会自动迁移到 4 小时。</dd></dl><hr>' + v21278BasisIntervalChangelog;
   // 旧版本默认收起，确保用户打开日志时首先看到当前版本的完整变更。
   // Older releases are collapsed by default so opening the log focuses on the current release.
   const collapseLegacyRelease = () => {
@@ -7849,6 +7892,8 @@ window.btcPersonalEntries = personalEntries;
 function savePersonalEntries(changedIndex = null) {
   window.btcPersonalEntries = personalEntries;
   localStorage.setItem(entryPricesStorageKey(), JSON.stringify(personalEntries));
+  /* v2.12.69：BTC 持仓集合时间戳，供登录双向同步按集合时间戳整组替换。 */
+  if ((changedIndex === 0 || changedIndex === 1) && typeof activeCoin === 'function' && activeCoin() === BASE_COIN) { try { localStorage.setItem('btc_positions_sync_ts_v1', String(Date.now())); } catch {} }
   personalEntries.forEach((entry, index) =>
     localStorage.setItem(entrySideStorageKey(index), entry.side),
   );
@@ -8398,6 +8443,53 @@ function refreshMacroUpdateAges() {
     );
   });
 }
+/* v2.12.70：美联储利率监测面板（Fed Rate Monitor）。
+   服务端 /api/fed-calendar 的 rateMonitor 字段：CME 30 天联邦基金期货（ZQ 月度合约）
+   + FRED DFEDTARU 当前目标区间，月末加权算出各场 FOMC 决议的 25bp 步数期望（steps）。
+   这里把 steps 换算成概率桶（与 Investing.com 同族算法）并渲染横条。 */
+function fedRatePanelHtml(rateMonitor) {
+  if (!rateMonitor || !Array.isArray(rateMonitor.meetings) || !rateMonitor.meetings.length) return "";
+  const pct = (v) => `${(v * 100).toFixed(1)}%`;
+  const rangeText = (mid, step) =>
+    `${(mid + step * 0.25 - 0.125).toFixed(2)} – ${(mid + step * 0.25 + 0.125).toFixed(2)}`;
+  const bucketsFromSteps = (steps, midBefore) => {
+    if (!Number.isFinite(steps)) return [];
+    const s = Math.max(-2, Math.min(2, steps)),
+      mag = Math.abs(s),
+      dir = s >= 0 ? 1 : -1;
+    return (mag <= 1 ? [[0, 1 - mag], [dir, mag]] : [[dir, 2 - mag], [2 * dir, mag - 1]])
+      .filter(([, p]) => p > 0.0005)
+      .map(([step, p]) => ({ step, p, range: rangeText(midBefore, step) }));
+  };
+  const dateFmt = new Intl.DateTimeFormat(uiLang === "zh" ? "zh-CN" : "en-US", { month: "long", day: "numeric", timeZone: "Asia/Shanghai" });
+  const timeFmt = new Intl.DateTimeFormat(uiLang === "zh" ? "zh-CN" : "en-US", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "Asia/Shanghai" });
+  const meetingCards = rateMonitor.meetings.map((meeting, meetingIndex) => {
+    const head = `<header><span>FOMC · ${tx("决议", "Decision")} · ${dateFmt.format(meeting.at)}</span>${
+      meeting.available ? `<b>${Number(meeting.price).toFixed(3)}</b>` : `<b class="flat">--</b>`
+    }</header>`;
+    if (!meeting.available) {
+      return `<article class="fed-rate-meeting unavailable">${head}<small>${tx(`该月合约（${meeting.contract}）暂不可用：${meeting.detail || "数据源失败"}，下次刷新自动重试。`, `Contract ${meeting.contract} unavailable (${meeting.detail || "source failure"}); will retry.`)}</small></article>`;
+    }
+    const buckets = bucketsFromSteps(meeting.steps, meeting.midBefore),
+      prevBuckets = Number.isFinite(meeting.stepsPrev) ? bucketsFromSteps(meeting.stepsPrev, meeting.midBefore) : [];
+    const max = Math.max(...buckets.map((b) => b.p), 0.0001);
+    const rows = buckets
+      .map((bucket) => {
+        const prev = prevBuckets.find((b) => b.step === bucket.step),
+          delta = prev ? (prev.p - bucket.p) * 100 : null,
+          hold = bucket.step === 0;
+        const deltaText =
+          delta != null && Math.abs(delta) > 0.05
+            ? `<small class="${delta >= 0 ? "up" : "down"}">${delta >= 0 ? "+" : ""}${delta.toFixed(1)}pp ${tx("较昨日", "vs 1d")}</small>`
+            : `<small class="muted">${tx("与昨日持平", "flat vs 1d")}</small>`;
+        return `<div class="fed-rate-bucket${hold ? "" : " is-change"}"><span class="fed-rate-range">${bucket.range}${hold && meetingIndex === 0 ? tx("（维持）", "") : ""}</span><span class="fed-rate-bar"><i class="${bucket.p === max ? "lead" : ""}" style="width:${Math.max((bucket.p / max) * 100, 2).toFixed(1)}%"></i></span><b>${pct(bucket.p)}</b>${deltaText}</div>`;
+      })
+      .join("");
+    return `<article class="fed-rate-meeting">${head}<strong>${tx("距决议 ", "In ")}${macroCountdown(meeting.at)}</strong><small>${tx("北京时间", "Beijing")} ${timeFmt.format(meeting.at)} · ${tx("期货", "futures")} ${meeting.contract}${Number.isFinite(meeting.prevPrice) ? ` · ${tx("昨收", "prev")} ${Number(meeting.prevPrice).toFixed(3)}` : ""}</small><div class="fed-rate-buckets">${rows}</div></article>`;
+  }).join("");
+  return `<section class="fed-rate-panel"><div class="fed-rate-head"><div><h3>${tx("美联储利率监测", "Fed rate monitor")}<em class="fed-rate-en">Fed Rate Monitor</em></h3><p>${tx("基于 CME 30 天联邦基金期货与美联储公开日历的市场隐含目标利率概率（月末加权，与 Investing.com 同族算法）。这是市场定价快照，不是本站预测；概率随期货价格实时变化。", "Market-implied target-rate probabilities from CME 30-Day Fed Funds futures and the Fed's public calendar (month-end weighted, same family as Investing.com). A market-pricing snapshot, not a forecast.")}</p></div><span class="fed-rate-current">${tx("当前目标区间", "Current target range")}<b>${Number(rateMonitor.targetLower).toFixed(2)} – ${Number(rateMonitor.targetUpper).toFixed(2)}%</b></span></div><div class="fed-rate-grid">${meetingCards}</div></section>`;
+}
+
 function renderFedMonitor(data) {
   macroCalendarData = data || null;
   macroCalendarError = data ? null : macroCalendarError;
@@ -8499,7 +8591,7 @@ function renderFedMonitor(data) {
     ? `<section class="fed-market-panel"><div><h3>${tx("综合指标", "Market context")}</h3><span class="fed-market-head-right">${tx("公开数据 · 每 2 分钟检查", "Public data · checked every 2 min")}<button type="button" class="fed-live-cog" data-fed-live-settings aria-haspopup="true" aria-expanded="false" title="${tx("自定义顶部实况条显示的指标", "Choose indicators shown in the top ticker")}">⚙ ${tx("实况条设置", "Ticker settings")}</button></span><div id="macroLiveSettings" class="fed-live-settings" hidden></div></div><div class="fed-market-grid">${signalCards}</div></section>`
     : "";
   const correlationPanel = `<section class="fed-corr-panel"><div class="fed-corr-head"><div><h3>${tx(coinLabel() + " × 美股联动", coinLabel() + " × US equities linkage")}</h3><p id="correlationStatus">${tx("等待市场数据…", "Waiting for market data…")}</p></div><button id="refreshCorrelation" type="button">${tx("更新分析", "Refresh analysis")}</button></div><div id="correlationOutput" class="correlation-output"></div></section>`;
-  card.innerHTML = `<div class="fed-monitor-head"><div><h2>${tx("宏观环境与跨市场联动", "Macro environment & cross-market linkage")}</h2><p>${tx("综合指标、美联储公开日历与 BTC × 美股联动同处一卡；事件前后行情波动可能放大，不构成方向预测。", "Market context, the Fed's public calendar and BTC × US equities linkage in one card. Volatility can rise around releases; this is not a directional forecast.")}</p></div><span class="fed-head-right"><button type="button" class="fed-live-toggle" data-fed-toggle-live>${macroLiveHidden() ? tx("显示实况条", "Show live ticker") : tx("隐藏实况条", "Hide live ticker")}</button><span class="fed-check-pill">${tx("每 2 分钟检查", "Checked every 2 min")}</span></span></div>${marketPanel}<div class="fed-event-grid">${eventCards || `<article class="fed-event unavailable"><span>${tx("公开日历暂不可用", "Public calendar unavailable")}</span><small>${tx("下次 2 分钟检查会自动重试。", "The next two-minute check will retry automatically.")}</small></article>`}</div>${correlationPanel}<footer>${nearest ? tx(`最近事件：${tname(MACRO_EVENT_NAMES, nearest.key)}，请在发布前后降低杠杆和仓位集中度。`, `Nearest event: ${tname(MACRO_EVENT_NAMES, nearest.key)}. Consider reducing leverage and concentration around the release.`) : tx("使用 Federal Reserve 与 BLS 的公开发布日历。", "Uses public Federal Reserve and BLS release calendars.")} <em>${data?.cached ? tx("缓存", "Cached") : tx("刚更新", "Updated")}</em></footer>`;
+  card.innerHTML = `<div class="fed-monitor-head"><div><h2>${tx("宏观环境与跨市场联动", "Macro environment & cross-market linkage")}</h2><p>${tx("综合指标、美联储公开日历与 BTC × 美股联动同处一卡；事件前后行情波动可能放大，不构成方向预测。", "Market context, the Fed's public calendar and BTC × US equities linkage in one card. Volatility can rise around releases; this is not a directional forecast.")}</p></div><span class="fed-head-right"><button type="button" class="fed-live-toggle" data-fed-toggle-live>${macroLiveHidden() ? tx("显示实况条", "Show live ticker") : tx("隐藏实况条", "Hide live ticker")}</button><span class="fed-check-pill">${tx("每 2 分钟检查", "Checked every 2 min")}</span></span></div>${marketPanel}<div class="fed-event-grid">${eventCards || `<article class="fed-event unavailable"><span>${tx("公开日历暂不可用", "Public calendar unavailable")}</span><small>${tx("下次 2 分钟检查会自动重试。", "The next two-minute check will retry automatically.")}</small></article>`}</div>${fedRatePanelHtml(data?.rateMonitor)}${correlationPanel}<footer>${nearest ? tx(`最近事件：${tname(MACRO_EVENT_NAMES, nearest.key)}，请在发布前后降低杠杆和仓位集中度。`, `Nearest event: ${tname(MACRO_EVENT_NAMES, nearest.key)}. Consider reducing leverage and concentration around the release.`) : tx("使用 Federal Reserve 与 BLS 的公开发布日历。", "Uses public Federal Reserve and BLS release calendars.")} <em>${data?.cached ? tx("缓存", "Cached") : tx("刚更新", "Updated")}</em></footer>`;
   refreshMacroUpdateAges();
   // v2.12.55：顶部「宏观实况」条显示/隐藏开关（与宏观事件中枢预警条开关同一套逻辑，持久化）。
   card.querySelector("[data-fed-toggle-live]")?.addEventListener("click", () => {
@@ -8552,6 +8644,13 @@ function renderFedMonitor(data) {
     "综合传统市场与加密市场的公开快照，用于识别宏观环境；各数据更新频率不同，不能视为同一时点的交易信号。",
     "Combines public traditional-market and crypto snapshots for macro context. Update cadences differ, so it is not a single-time trading signal.",
   );
+  const fedRateHead = card.querySelector(".fed-rate-panel h3");
+  if (fedRateHead)
+    addHelp(
+      fedRateHead,
+      "目标利率概率的算法：30 天联邦基金期货价格给出该月有效联邦基金利率均值的市场定价（100 − 期货价），再按决议日把当月拆成「现行利率天数 / 新利率天数」，反推一次 25 个基点变动的概率。期货合约由 CME 上市、行情经 Yahoo Finance 免费源转发，当前目标区间取自美联储 FRED 的 DFEDTARU 日度序列。两场以上的会议按路径递推（第二场以第一场的期望结果为基准）。所有数字是市场定价的快照，会随期货价格波动，不构成任何方向预测。",
+      "How the probabilities work: the 30-Day Fed Funds futures price prices the month's average effective fed funds rate (100 − price); splitting the month around the decision day lets us back out the probability of one 25bp move. Contracts are listed by CME with quotes relayed via Yahoo Finance; the current target range comes from FRED's daily DFEDTARU series. Later meetings chain off the expected outcome of earlier ones. All figures are market-pricing snapshots that move with the futures — not a forecast.",
+    );
   const signalTips = {
     gold: [
       "黄金通常被视为避险资产，和 BTC 的短线关系并不稳定；这里仅观察其日内风险偏好变化。",
@@ -10517,6 +10616,7 @@ loadCurrent = async function () {
         "2h": 7_200_000,
         "3h": 10_800_000,
         "4h": 14_400_000,
+        "6h": 21_600_000,
         "1d": 86_400_000,
       }[state.interval] || 60_000,
     seconds = intervalMs / 1_000,
@@ -10584,7 +10684,8 @@ function estimatedSignalDuration(m) {
     "15m": 15,
     "30m": 30,
     "1h": 60,
-    "3h": 180,
+    "4h": 240,
+    "6h": 360,
   };
   const candleMinutes = minutesByInterval[fixedRuleSignal.interval] || 15;
   const strength = Math.max(0, Math.min(100, Math.abs(m.score) || 0));
@@ -10822,12 +10923,82 @@ async function loadExtendedPeriodHistories() {
 }
 function ensurePeriodChangeCard() {
   let period = $("periodChangeCard");
-  if (period) return period;
+  if (period) { ensureMarketHealthCard(); return period; }
   period = document.createElement("section");
   period.id = "periodChangeCard";
   period.className = "card change-card chart-periods";
   period.innerHTML = `<h2>${tx("周期涨幅（当前价 vs 历史收盘价）", "Period return (current vs historical close)")}</h2><div id="changeTags"></div>`;
+  ensureMarketHealthCard();
   return period;
+}
+/* ---- 市场异动监测卡片（周期涨幅下方独立小卡片）---- */
+let marketHealthData = null;
+let marketHealthLoading = false;
+function ensureMarketHealthCard() {
+  let card = $("marketHealthCard");
+  if (card) return card;
+  card = document.createElement("section");
+  card.id = "marketHealthCard";
+  card.className = "card market-health-card";
+  card.innerHTML = `<h2>${tx("市场异动监测", "Market anomaly monitor")}<span class="mh-int" id="mhInterval">4h</span><span class="help-dot" data-tip="${mhHelpTip()}"></span></h2><ul class="mh-list" id="mhList"></ul>`;
+  return card;
+}
+function mhHelpTip() {
+  return tx("基于现有数据实时监测 5 类异动：①成交量放大（当前 K 线量 ÷ 近 20 根均值，≥1.6× 关注 / ≥2.5× 异动）；②资金费率极端（|费率|≥0.05%/8h 关注 / ≥0.1% 异动）；③永续 OI 快速变化（|变化|≥3% 关注 / ≥8% 异动，约 5 分钟窗口）；④关键支撑/阻力有效收盘突破（最近收盘价实体突破近期摆动高低点）；⑤交易所净流出（CoinMetrics 免费源，日级数据；正=净流入 / 负=净流出）。仅供研究，非投资建议。",
+    "Real-time monitoring of 5 anomalies from existing data: ① volume amplification (current bar ÷ 20-bar MA, ≥1.6× watch / ≥2.5× alert); ② extreme funding rate (|rate|≥0.05%/8h watch / ≥0.1% alert); ③ rapid perp OI change (|Δ|≥3% watch / ≥8% alert, ~5 min window); ④ valid close breakout of key S/R (recent close body beyond a swing high/low); ⑤ exchange netflow (free CoinMetrics source, daily; positive = net inflow / negative = net outflow). Research only, not investment advice.");
+}
+function mhLevelPill(level) {
+  const map = { normal: tx("正常", "Normal"), watch: tx("关注", "Watch"), alert: tx("异动", "Alert") };
+  return `<span class="mh-pill ${level}">${map[level] || map.normal}</span>`;
+}
+function mhRow(label, value, level, hint) {
+  return `<li class="mh-row"><span class="mh-label">${label}</span><span class="mh-value" title="${hint || ''}">${value}</span>${mhLevelPill(level)}</li>`;
+}
+function renderMarketHealth() {
+  const list = $("mhList"); if (!list) return;
+  const d = marketHealthData;
+  const head = $("mhInterval"); if (head && d) head.textContent = d.interval || "4h";
+  const tip = document.querySelector("#marketHealthCard .help-dot"); if (tip) tip.dataset.tip = mhHelpTip();
+  if (!d) { list.innerHTML = `<li class="mh-row mh-empty"><span class="mh-label">${tx("加载中…", "Loading…")}</span></li>`; return; }
+  const rows = [];
+  rows.push(mhRow(tx("成交量放大", "Volume"), d.volume.ratio != null ? `${d.volume.ratio.toFixed(2)}×` : "--", d.volume.level, d.volume.note));
+  rows.push(mhRow(tx("资金费率", "Funding"), d.funding.rate != null ? `${(d.funding.rate * 100).toFixed(4)}%` : "--", d.funding.level, d.funding.note));
+  rows.push(mhRow(tx("永续 OI 变化", "Perp OI Δ"), d.oi.changePct != null ? `${d.oi.changePct >= 0 ? "+" : ""}${d.oi.changePct.toFixed(2)}%` : "--", d.oi.level, d.oi.note));
+  let srVal = "--", srHint = d.srBreakout.note || "";
+  if (d.srBreakout.broken) srVal = tx("突破", "Break ") + (d.srBreakout.broken.type === "resistance" ? tx("阻力", "R") : tx("支撑", "S"));
+  else if (d.srBreakout.near) srVal = tx("逼近", "Near ") + (d.srBreakout.near.type === "resistance" ? tx("阻力", "R") : tx("支撑", "S"));
+  else srVal = tx("无突破", "None");
+  rows.push(mhRow(tx("支撑/阻力", "S/R"), srVal, d.srBreakout.level, srHint));
+  const oc = d.onchain || {};
+  let whaleVal = "--", whaleHint = oc.note || "";
+  if (!oc.configured) whaleVal = tx("未配置", "No key");
+  else if (oc.netflow != null || oc.whaleTx != null) {
+    const parts = [];
+    if (oc.netflow != null) parts.push(`${tx("净流", "Netflow")} ${oc.netflow >= 0 ? "+" : ""}${Math.round(oc.netflow)} BTC`);
+    if (oc.whaleTx != null) parts.push(`${tx("巨鲸笔数", "Whale tx")} ${oc.whaleTx}`);
+    whaleVal = parts.join(" · ") || "--";
+    if (oc.netflow != null) whaleHint = `${tx("交易所净流（正=流入 / 负=流出），日级数据" + (oc.day ? " · " + oc.day : ""), "Exchange netflow (positive = inflow / negative = outflow), daily" + (oc.day ? " · " + oc.day : ""))}${whaleHint ? " · " + whaleHint : ""}`;
+  }
+  const whaleLevel = oc.configured ? (oc.netflowLevel === "alert" || oc.whaleLevel === "alert" ? "alert" : (oc.netflowLevel === "watch" || oc.whaleLevel === "watch" ? "watch" : "normal")) : "normal";
+  rows.push(mhRow(tx("巨鲸/净流出", "Whale/Flow"), whaleVal, whaleLevel, whaleHint));
+  list.innerHTML = rows.join("");
+}
+async function loadMarketHealth() {
+  if (marketHealthLoading) return;
+  const card = ensureMarketHealthCard();
+  if (!card.isConnected) return;
+  marketHealthLoading = true;
+  try {
+    const source = state.source || "okx";
+    const r = await fetch("/api/market-health?" + new URLSearchParams({ source, interval: "4h" }));
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    marketHealthData = await r.json();
+    renderMarketHealth();
+  } catch {
+    if (!marketHealthData) renderMarketHealth();
+  } finally {
+    marketHealthLoading = false;
+  }
 }
 function ensureFearGreedCard() {
   let card = $("fearGreedGauge");
@@ -10861,6 +11032,7 @@ let sentimentContentFill = false;
 function placePeriodAndSentimentCards() {
   const period = ensurePeriodChangeCard(),
     micro = $("okxMicrostructureCard"),
+    health = ensureMarketHealthCard(),
     layout = document.querySelector(".terminal-layout"),
     sentiment = ensureFearGreedCard(),
     released = ensureReleasedDataCard();
@@ -10872,10 +11044,15 @@ function placePeriodAndSentimentCards() {
   if (micro && micro.isConnected) micro.after(period);
   else if (chart?.isConnected && period.parentElement !== chart.parentElement)
     chart.after(period);
+  // 市场异动监测卡片放在周期涨幅下方（与周期涨幅同属左列，受 arrange() 的 replaceChildren 清单保护）。
+  if (health && health.parentElement !== period.parentElement && period.parentElement) period.after(health);
+  else if (health && !health.isConnected) period.after(health);
   // 宏观与情绪的位置统一交给 responsive arrange()：桌面端在右侧 side-stack，
   // 移动端在 terminal-layout 之后。避免多处代码反复移动导致闪烁。
   window.arrangeTerminalLayout?.();
   scheduleMicrostructureAlignment();
+  // 异动监测卡片随布局稳定后拉取一次（loading 守卫避免并发重复请求）。
+  loadMarketHealth();
   // 布局重排（arrange 里的 side.replaceChildren）会丢弃“早于它插入”的情绪卡，
   // 使卡片停在「正在加载」占位状态。布局稳定后补渲染一次内容（带重入保护）。
   // Layout rearrangement drops the sentiment card when it was inserted too early,
@@ -10908,6 +11085,7 @@ addDecisionRenderEnhancer("extended-periods", () => {
   renderExtendedPeriodReturns();
   loadExtendedPeriodHistories();
   placePeriodAndSentimentCards();
+  if (marketHealthData) renderMarketHealth();
 });
 const renderFearGreedGaugeWithPlacement = renderFearGreedGauge;
 renderFearGreedGauge = function () {

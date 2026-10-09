@@ -1310,6 +1310,8 @@ setTimeout(() => {
     /* 同步页面设置供状态恢复；服务端不执行关闭页面后的接力播报。 */
     syncVoiceToServer();
   };
+  /* v2.12.69：登录双向同步用 —— 直接读写内存中的语音规则并落盘。 */
+  window.btcVoiceRulesAccess = { get: () => voiceRules, set: (arr) => { if (Array.isArray(arr)) { voiceRules = arr; saveVoiceRules(); } } };
   const syncVoiceToServer = () => {
     fetch("/api/voice/sync", {
       method: "POST",
@@ -1906,6 +1908,7 @@ setTimeout(() => {
     if (kind === "price_move" && !Number.isFinite(anchorPrice)) return;
     const updated = {
       id: existing?.id || crypto.randomUUID(),
+      updatedAt: Date.now(),
       kind,
       targetPrice,
       direction,

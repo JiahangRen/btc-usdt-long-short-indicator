@@ -6,6 +6,7 @@ import { createClient } from 'redis';
 import { validateChannelConfig, maskConfig, isMaskedConfig, sendChannelMessage, verifyChannelConfig, buildAlertMessage, fetchWithTimeout as sharedFetchWithTimeout } from './notification.mjs';
 // fetchWithTimeout 原先由本模块导出（alert-worker 引用），拆分后转出口保持兼容。
 export const fetchWithTimeout = sharedFetchWithTimeout;
+import { COIN_KEYS } from './shared/coins.mjs'; // 多币种规则隔离（v2.12.75）
 
 const scrypt = promisify(scryptCallback);
 const { Pool } = pg;
@@ -66,13 +67,20 @@ export async function createAlertStore() {
     CREATE TABLE IF NOT EXISTS alert_sessions (token_hash TEXT PRIMARY KEY, user_id UUID NOT NULL REFERENCES alert_users(id) ON DELETE CASCADE, expires_at TIMESTAMPTZ NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now());
     CREATE TABLE IF NOT EXISTS alert_user_profiles (user_id UUID PRIMARY KEY REFERENCES alert_users(id) ON DELETE CASCADE, profile JSONB NOT NULL DEFAULT '{}'::jsonb, profile_ciphertext TEXT, updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
     CREATE TABLE IF NOT EXISTS alert_credentials (user_id UUID PRIMARY KEY REFERENCES alert_users(id) ON DELETE CASCADE, sendkey_ciphertext TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
-    CREATE TABLE IF NOT EXISTS alert_rules (id UUID PRIMARY KEY, user_id UUID NOT NULL REFERENCES alert_users(id) ON DELETE CASCADE, kind TEXT NOT NULL CHECK(kind IN ('price_reached','price_above','price_below','long_liquidation','short_liquidation')), target_price NUMERIC NOT NULL CHECK(target_price > 0), repeat_enabled BOOLEAN NOT NULL DEFAULT false, cooldown_seconds INTEGER NOT NULL DEFAULT 300 CHECK(cooldown_seconds >= 0), enabled BOOLEAN NOT NULL DEFAULT true, last_triggered_at TIMESTAMPTZ, last_triggered_price NUMERIC, created_at TIMESTAMPTZ NOT NULL DEFAULT now());
+    CREATE TABLE IF NOT EXISTS alert_rules (id UUID PRIMARY KEY, user_id UUID NOT NULL REFERENCES alert_users(id) ON DELETE CASCADE, kind TEXT NOT NULL CHECK(kind IN ('price_reached','price_above','price_below','long_liquidation','short_liquidation')), target_price NUMERIC NOT NULL CHECK(target_price > 0), repeat_enabled BOOLEAN NOT NULL DEFAULT false, cooldown_seconds INTEGER NOT NULL DEFAULT 300 CHECK(cooldown_seconds >= 0), enabled BOOLEAN NOT NULL DEFAULT true, coin TEXT NOT NULL DEFAULT 'BTC', last_triggered_at TIMESTAMPTZ, last_triggered_price NUMERIC, created_at TIMESTAMPTZ NOT NULL DEFAULT now());
     CREATE INDEX IF NOT EXISTS alert_rules_active_idx ON alert_rules(enabled, kind, target_price);
     CREATE TABLE IF NOT EXISTS alert_deliveries (id UUID PRIMARY KEY, rule_id UUID REFERENCES alert_rules(id) ON DELETE SET NULL, user_id UUID REFERENCES alert_users(id) ON DELETE SET NULL, queued_at TIMESTAMPTZ NOT NULL DEFAULT now(), sent_at TIMESTAMPTZ, status TEXT NOT NULL, response_json JSONB, push_id TEXT, read_key TEXT, error TEXT);
     CREATE INDEX IF NOT EXISTS alert_deliveries_rule_idx ON alert_deliveries(rule_id, queued_at DESC);
+    /* v2.12.74：推送日志按 user_id 查询（listDeliveries），补用户维度索引。 */
+    CREATE INDEX IF NOT EXISTS alert_deliveries_user_idx ON alert_deliveries(user_id, queued_at DESC);
     CREATE TABLE IF NOT EXISTS alert_channels (id UUID PRIMARY KEY, user_id UUID NOT NULL REFERENCES alert_users(id) ON DELETE CASCADE, type TEXT NOT NULL CHECK(type IN ('serverchan','bark','feishu','dingtalk','webhook')), name TEXT NOT NULL, config_ciphertext TEXT NOT NULL, enabled BOOLEAN NOT NULL DEFAULT true, last_verified_at TIMESTAMPTZ, last_verify_ok BOOLEAN, created_at TIMESTAMPTZ NOT NULL DEFAULT now());
     CREATE INDEX IF NOT EXISTS alert_channels_user_idx ON alert_channels(user_id);
     CREATE TABLE IF NOT EXISTS alert_push_settings (user_id UUID PRIMARY KEY REFERENCES alert_users(id) ON DELETE CASCADE, settings JSONB NOT NULL DEFAULT '{}'::jsonb, updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
+    /* v2.12.69：规则双向合并需要 updated_at；ALTER 幂等，既有表也会补列。 */
+    ALTER TABLE alert_rules ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+    /* v2.12.75：多币种规则隔离，历史 BTC 规则默认 'BTC'。 */
+    ALTER TABLE alert_rules ADD COLUMN IF NOT EXISTS coin TEXT NOT NULL DEFAULT 'BTC';
+    CREATE INDEX IF NOT EXISTS alert_rules_coin_idx ON alert_rules(coin, enabled);
   `);
   // PostgreSQL does not support ADD COLUMN IF NOT EXISTS in very old versions;
   // supported deployments are modern, and this keeps existing accounts online.
@@ -87,7 +95,7 @@ export async function createAlertStore() {
     async logout(request) { const token=parseCookies(request.headers.cookie).btc_alert_session; if(token) await pool.query('DELETE FROM alert_sessions WHERE token_hash=$1',[tokenHash(token)]); },
     userFromRequest,
     async getProfile(userId) { const row=(await pool.query('SELECT profile,profile_ciphertext FROM alert_user_profiles WHERE user_id=$1',[userId])).rows[0]; if(!row)return {}; if(!row.profile_ciphertext){const profile=row.profile || {}, ciphertext=encrypt(json(profile),key,`profile:${userId}`); await pool.query("UPDATE alert_user_profiles SET profile='{}'::jsonb,profile_ciphertext=$2,updated_at=now() WHERE user_id=$1",[userId,ciphertext]); return profile;} try { return unjson(decrypt(row.profile_ciphertext,key,`profile:${userId}`)); } catch { throw Object.assign(new Error('账户加密资料无法验证，请联系支持人员恢复。'),{statusCode:500}); } },
-    async setProfile(userId,input) { const entries=input?.personalEntries; if(!Array.isArray(entries)||entries.length!==2||entries.some((entry,index)=>{const price=entry?.price,amount=entry?.amount,margin=entry?.margin,leverage=entry?.leverage;return !entry||!['long','short'].includes(entry.side)||(price!==null&&(!Number.isFinite(Number(price))||Number(price)<=0||Number(price)>100_000_000))||(amount!==null&&amount!==undefined&&(!Number.isFinite(Number(amount))||Number(amount)<=0||Number(amount)>1_000_000_000))||(margin!==null&&margin!==undefined&&(!Number.isFinite(Number(margin))||Number(margin)<=0||Number(margin)>1_000_000_000))||(leverage!==null&&leverage!==undefined&&(!Number.isFinite(Number(leverage))||Number(leverage)<1||Number(leverage)>125))||index!==0&&index!==1;})) throw Object.assign(new Error('持仓资料格式无效。'),{statusCode:400}); const profile={personalEntries:entries.map((entry,index)=>({price:entry.price===null?null:Number(entry.price),amount:entry.amount===null||entry.amount===undefined?null:Number(entry.amount),margin:entry.margin===null||entry.margin===undefined?null:Number(entry.margin),leverage:entry.leverage===null||entry.leverage===undefined?null:Number(entry.leverage),side:entry.side==='short'?'short':'long'}))}; const ciphertext=encrypt(json(profile),key,`profile:${userId}`); await pool.query('INSERT INTO alert_user_profiles(user_id,profile,profile_ciphertext) VALUES($1,$2::jsonb,$3) ON CONFLICT(user_id) DO UPDATE SET profile=$2::jsonb,profile_ciphertext=$3,updated_at=now()',[userId,'{}',ciphertext]); return profile; },
+    async setProfile(userId,input) { const entries=input?.personalEntries; if(!Array.isArray(entries)||entries.length!==2||entries.some((entry,index)=>{const price=entry?.price,amount=entry?.amount,margin=entry?.margin,leverage=entry?.leverage;return !entry||!['long','short'].includes(entry.side)||(price!==null&&(!Number.isFinite(Number(price))||Number(price)<=0||Number(price)>100_000_000))||(amount!==null&&amount!==undefined&&(!Number.isFinite(Number(amount))||Number(amount)<=0||Number(amount)>1_000_000_000))||(margin!==null&&margin!==undefined&&(!Number.isFinite(Number(margin))||Number(margin)<=0||Number(margin)>1_000_000_000))||(leverage!==null&&leverage!==undefined&&(!Number.isFinite(Number(leverage))||Number(leverage)<1||Number(leverage)>125))||index!==0&&index!==1;})) throw Object.assign(new Error('持仓资料格式无效。'),{statusCode:400}); const profile={personalEntries:entries.map((entry,index)=>({price:entry.price===null?null:Number(entry.price),amount:entry.amount===null||entry.amount===undefined?null:Number(entry.amount),margin:entry.margin===null||entry.margin===undefined?null:Number(entry.margin),leverage:entry.leverage===null||entry.leverage===undefined?null:Number(entry.leverage),side:entry.side==='short'?'short':'long'}))}; const entriesTs=input?.personalEntriesUpdatedAt; if(Number.isFinite(Number(entriesTs))&&Number(entriesTs)>0)profile.personalEntriesUpdatedAt=Number(entriesTs); const ciphertext=encrypt(json(profile),key,`profile:${userId}`); await pool.query('INSERT INTO alert_user_profiles(user_id,profile,profile_ciphertext) VALUES($1,$2::jsonb,$3) ON CONFLICT(user_id) DO UPDATE SET profile=$2::jsonb,profile_ciphertext=$3,updated_at=now()',[userId,'{}',ciphertext]); return profile; },
     // ---- 多渠道推送（v2.10.52）：渠道即唯一事实来源，legacy alert_credentials 只作迁移源 ----
     // 老用户首次触达渠道体系时，把 alert_credentials 里的 SendKey 静默迁移成一条 serverchan 渠道。
     async ensureLegacySendKeyMigrated() {
@@ -143,23 +151,51 @@ export async function createAlertStore() {
       await pool.query('UPDATE alert_channels SET last_verified_at=now(), last_verify_ok=$3 WHERE id=$1 AND user_id=$2', [id, userId, result.ok]);
       return result;
     },
-    // 推送设置：总开关 + 亏损联动（与持仓档案联动的 ROE 阈值）。
+    // 推送设置：总开关 + 亏损联动（三维度阈值：亏损百分比 / 亏损额 / 距离强平价百分比）。
     async getPushSettings(userId) {
       const row = (await pool.query('SELECT settings FROM alert_push_settings WHERE user_id=$1', [userId])).rows[0];
       const saved = row?.settings || {};
       const loss = saved.lossPush || {};
-      return { masterEnabled: saved.masterEnabled !== false, lossPush: { enabled: Boolean(loss.enabled), warnRoe: Math.min(1000, Math.max(1, Number(loss.warnRoe) || 20)), lossRoe: Math.min(1000, Math.max(1, Number(loss.lossRoe) || 50)), cooldownMinutes: Math.min(1440, Math.max(1, Number(loss.cooldownMinutes) || 30)) } };
+      const clamp = (v, min, max) => Math.min(max, Math.max(min, Number.isFinite(Number(v)) ? Number(v) : min));
+      return {
+        masterEnabled: saved.masterEnabled !== false,
+        lossPush: {
+          enabled: Boolean(loss.enabled),
+          lossThresholdAmount: Number.isFinite(Number(loss.lossThresholdAmount))
+            ? Math.min(1e9, Math.max(0.01, Number(loss.lossThresholdAmount)))
+            : (Number.isFinite(Number(loss.pushLossAmount)) ? Math.min(1e9, Math.max(0.01, Number(loss.pushLossAmount))) : 500),
+          liqDistancePct: Number.isFinite(Number(loss.liqDistancePct))
+            ? Math.min(100, Math.max(0.01, Number(loss.liqDistancePct)))
+            : (Number.isFinite(Number(loss.pushLiqDistancePct)) ? Math.min(100, Math.max(0.01, Number(loss.pushLiqDistancePct))) : 10),
+          cooldownMinutes: clamp(loss.cooldownMinutes, 1, 1440),
+          refIndex: Number.isInteger(loss.refIndex) ? loss.refIndex : 0,
+          lossUnit: (loss.lossUnit === 'pct' || loss.lossUnit === 'usdt') ? loss.lossUnit : 'usdt',
+          lossValue: Number.isFinite(Number(loss.lossValue)) ? Number(loss.lossValue) : null,
+          liqUnit: loss.liqUnit === 'price' ? 'price' : (loss.liqUnit === 'pct' ? 'pct' : 'pct'),
+          liqValue: Number.isFinite(Number(loss.liqValue)) ? Number(loss.liqValue) : null,
+        },
+      };
     },
     async setPushSettings(userId, patch) {
       const current = await this.getPushSettings(userId);
       const loss = patch?.lossPush || {};
+      const clamp = (v, min, max, fallback) => {
+        const n = Number(v);
+        return Math.min(max, Math.max(min, Number.isFinite(n) ? n : fallback));
+      };
+      const pick = (key, min, max, fallback) => loss[key] === undefined ? current.lossPush[key] : clamp(loss[key], min, max, fallback);
       const settings = {
         masterEnabled: patch?.masterEnabled === undefined ? current.masterEnabled : Boolean(patch.masterEnabled),
         lossPush: {
           enabled: loss.enabled === undefined ? current.lossPush.enabled : Boolean(loss.enabled),
-          warnRoe: loss.warnRoe === undefined ? current.lossPush.warnRoe : Math.min(1000, Math.max(1, Number(loss.warnRoe) || 1)),
-          lossRoe: loss.lossRoe === undefined ? current.lossPush.lossRoe : Math.min(1000, Math.max(1, Number(loss.lossRoe) || 1)),
-          cooldownMinutes: loss.cooldownMinutes === undefined ? current.lossPush.cooldownMinutes : Math.min(1440, Math.max(1, Number(loss.cooldownMinutes) || 1)),
+          lossThresholdAmount: pick('lossThresholdAmount', 0.01, 1e9, current.lossPush.lossThresholdAmount ?? 500),
+          liqDistancePct: pick('liqDistancePct', 0.01, 100, current.lossPush.liqDistancePct ?? 10),
+          cooldownMinutes: pick('cooldownMinutes', 1, 1440, 30),
+          refIndex: Number.isInteger(Number(loss.refIndex)) ? Number(loss.refIndex) : (current.lossPush.refIndex ?? 0),
+          lossUnit: (loss.lossUnit === 'pct' || loss.lossUnit === 'usdt') ? loss.lossUnit : (current.lossPush.lossUnit || 'usdt'),
+          lossValue: loss.lossValue === undefined ? current.lossPush.lossValue : (Number.isFinite(Number(loss.lossValue)) ? Number(loss.lossValue) : (current.lossPush.lossValue ?? null)),
+          liqUnit: (loss.liqUnit === 'price') ? 'price' : (loss.liqUnit === 'pct' ? 'pct' : (current.lossPush.liqUnit || 'pct')),
+          liqValue: loss.liqValue === undefined ? current.lossPush.liqValue : (Number.isFinite(Number(loss.liqValue)) ? Number(loss.liqValue) : (current.lossPush.liqValue ?? null)),
         },
       };
       await pool.query('INSERT INTO alert_push_settings(user_id,settings) VALUES($1,$2::jsonb) ON CONFLICT(user_id) DO UPDATE SET settings=$2::jsonb,updated_at=now()', [userId, JSON.stringify(settings)]);
@@ -178,8 +214,8 @@ export async function createAlertStore() {
       return out;
     },
     // 一次性投递记录（无规则实体，如亏损联动/测试）：只落 alert_deliveries 供追溯。
-    async recordDelivery(userId, kindLabel, results) {
-      try { await pool.query('INSERT INTO alert_deliveries(id,user_id,status,response_json,error) VALUES($1,$2,$3,$4,$5)', [randomUUID(), userId, results.some(r => r.ok) ? 'delivered' : 'failed', json({ kind: kindLabel, channels: results }), results.every(r => !r.ok) ? (results[0]?.error || '所有渠道投递失败') : null]); } catch {}
+    async recordDelivery(userId, kindLabel, results, message) {
+      try { await pool.query('INSERT INTO alert_deliveries(id,user_id,status,response_json,error) VALUES($1,$2,$3,$4,$5)', [randomUUID(), userId, results.some(r => r.ok) ? 'delivered' : 'failed', json({ kind: kindLabel, channels: results, message: message || null }), results.every(r => !r.ok) ? (results[0]?.error || '所有渠道投递失败') : null]); } catch {}
     },
     // 向该用户所有启用渠道发送一条消息；返回逐渠道结果。
     async dispatchToChannels(userId, message) {
@@ -220,19 +256,24 @@ export async function createAlertStore() {
       const message=buildAlertMessage({ categoryLabel, phrase, current:quote, test:isTest, note:note||(isTest?'该测试不会创建或触发规则。':''), direction });
       const { ok, results, error } = await this.dispatchToChannels(userId, message);
       if (!results.length) throw Object.assign(new Error(error || '请先添加并启用至少一个推送渠道。'),{statusCode:400});
-      await this.recordDelivery(userId, isTest ? '测试推送' : '规则推送', results);
+      await this.recordDelivery(userId, isTest ? '测试推送' : '规则推送', results, message);
       if (!ok) throw Object.assign(new Error(results.find(r => r.error)?.error || '所有渠道测试推送均失败。'),{statusCode:502});
       return { ok:true, results };
     },
-    async listRules(userId) { return (await pool.query('SELECT id,kind,target_price::float AS "targetPrice",repeat_enabled AS repeat,"cooldown_seconds"/60 AS "cooldownMinutes",enabled,last_triggered_at AS "lastTriggeredAt",last_triggered_price::float AS "lastTriggeredPrice",created_at AS "createdAt" FROM alert_rules WHERE user_id=$1 ORDER BY created_at DESC',[userId])).rows; },
-    async createRule(userId,input) { const kind=String(input.kind||''), target=Number(input.targetPrice), repeat=Boolean(input.repeat), cooldown=Math.max(0,Math.round(Number(input.cooldownMinutes||5)*60)); if(!['price_reached','price_above','price_below','long_liquidation','short_liquidation'].includes(kind)||!Number.isFinite(target)||target<=0) throw Object.assign(new Error('规则参数无效。'),{statusCode:400}); const id=randomUUID(); await pool.query('INSERT INTO alert_rules(id,user_id,kind,target_price,repeat_enabled,cooldown_seconds) VALUES($1,$2,$3,$4,$5,$6)',[id,userId,kind,target,repeat,cooldown]); return id; },
+    async listRules(userId) { return (await pool.query('SELECT id,kind,target_price::float AS "targetPrice",repeat_enabled AS repeat,"cooldown_seconds"/60 AS "cooldownMinutes",enabled,last_triggered_at AS "lastTriggeredAt",last_triggered_price::float AS "lastTriggeredPrice",created_at AS "createdAt",updated_at AS "updatedAt",r.coin AS "coin" FROM alert_rules WHERE user_id=$1 ORDER BY created_at DESC',[userId])).rows; },
+    async createRule(userId,input) { const kind=String(input.kind||''), target=Number(input.targetPrice), repeat=Boolean(input.repeat), cooldown=Math.max(0,Math.round(Number(input.cooldownMinutes||5)*60)), rawId=input?.id, id=(typeof rawId==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawId))?rawId:randomUUID(); const coin=COIN_KEYS.includes(input?.coin)?input.coin:'BTC'; if(!['price_reached','price_above','price_below','long_liquidation','short_liquidation'].includes(kind)||!Number.isFinite(target)||target<=0) throw Object.assign(new Error('规则参数无效。'),{statusCode:400}); await pool.query('INSERT INTO alert_rules(id,user_id,kind,target_price,repeat_enabled,cooldown_seconds,coin,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,now()) ON CONFLICT(id) DO UPDATE SET kind=EXCLUDED.kind,target_price=EXCLUDED.target_price,repeat_enabled=EXCLUDED.repeat_enabled,cooldown_seconds=EXCLUDED.cooldown_seconds,coin=EXCLUDED.coin,updated_at=now()',[id,userId,kind,target,repeat,cooldown,coin]); return id; },
     async deleteRule(userId,id) { if(!await ownRule(userId,id)) throw Object.assign(new Error('规则不存在。'),{statusCode:404}); await pool.query('DELETE FROM alert_rules WHERE id=$1 AND user_id=$2',[id,userId]); },
     async deleteAccount(userId) { await pool.query('DELETE FROM alert_users WHERE id=$1',[userId]); },
-    async activeRules() { await this.ensureLegacySendKeyMigrated(); return (await pool.query('SELECT r.id,r.user_id AS "userId",r.kind,r.target_price::float AS "targetPrice",r.repeat_enabled AS repeat,"cooldown_seconds" AS "cooldownSeconds" FROM alert_rules r WHERE r.enabled=true AND EXISTS (SELECT 1 FROM alert_channels c WHERE c.user_id=r.user_id AND c.enabled=true)')).rows; },
+    async activeRules(coin) { await this.ensureLegacySendKeyMigrated(); const c = COIN_KEYS.includes(coin) ? coin : null; return (await pool.query('SELECT r.id,r.user_id AS "userId",r.kind,r.target_price::float AS "targetPrice",r.repeat_enabled AS repeat,"cooldown_seconds" AS "cooldownSeconds",r.coin AS "coin" FROM alert_rules r WHERE r.enabled=true AND ($1::text IS NULL OR r.coin=$1) AND EXISTS (SELECT 1 FROM alert_channels c WHERE c.user_id=r.user_id AND c.enabled=true)',[c])).rows; },
     async claim(rule, price) { const result=await pool.query(`UPDATE alert_rules SET last_triggered_at=now(),last_triggered_price=$2 WHERE id=$1 AND enabled=true AND (repeat_enabled=true AND (last_triggered_at IS NULL OR last_triggered_at <= now()-(cooldown_seconds * interval '1 second')) OR repeat_enabled=false AND last_triggered_at IS NULL) RETURNING id,user_id AS "userId"`,[rule.id,price]); return result.rows[0] || null; },
     async enqueue(rule, price) { if(!await this.hasSendKey(rule.userId)) return; const deliveryId=randomUUID(); await pool.query('INSERT INTO alert_deliveries(id,rule_id,user_id,status) VALUES($1,$2,$3,$4)',[deliveryId,rule.id,rule.userId,'queued']); await redis.lPush('btc-alert:push',json({deliveryId,rule,price})); },
     async nextPush() { const result=await redis.brPop('btc-alert:push',1); return result ? unjson(result.element) : null; },
     async finishPush(deliveryId,result) { await pool.query('UPDATE alert_deliveries SET status=$2,sent_at=now(),response_json=$3,push_id=$4,read_key=$5,error=$6 WHERE id=$1',[deliveryId,result.ok?'queued_to_serverchan':'failed',json(result.payload),result.payload?.data?.pushid||null,result.payload?.data?.readkey||null,result.error||null]); },
+    // 推送日志：按用户列出历史投递（含时间/状态/消息类型/消息正文/渠道明细）。
+    async listDeliveries(userId, limit = 50) {
+      const rows = (await pool.query('SELECT id, queued_at, sent_at, status, response_json, error FROM alert_deliveries WHERE user_id=$1 ORDER BY COALESCE(sent_at, queued_at) DESC LIMIT $2', [userId, Math.max(1, Math.min(200, Number(limit) || 50))])).rows;
+      return rows.map(r => ({ id: r.id, queuedAt: r.queued_at, sentAt: r.sent_at, status: r.status, kind: r.response_json?.kind || null, message: r.response_json?.message || null, channels: Array.isArray(r.response_json?.channels) ? r.response_json.channels : [], error: r.error }));
+    },
     async close() { await redis.quit(); await pool.end(); }
   };
 }

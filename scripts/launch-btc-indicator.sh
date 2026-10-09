@@ -65,15 +65,19 @@ CHROME_TMPL='on run argv
       repeat with t in tabs of w
         set i to i + 1
         set u to URL of t
-        if (u contains portText) and ((u contains "127.0.0.1") or (u contains "localhost")) then
-          set active tab index of w to i
-          try
-            set miniaturized of w to false
-          end try
-          set index of w to 1
-          activate
-          return "ok"
-        end if
+      if (u contains portText) and ((u contains "127.0.0.1") or (u contains "localhost")) then
+        set active tab index of w to i
+        try
+          set miniaturized of w to false
+        end try
+        set index of w to 1
+        -- 切回旧标签后顺手重载，确保吃到最新前端（根治「我这边好、用户那边坏」的缓存错位）
+        try
+          tell t to execute javascript "if(location.hostname==='127.0.0.1'||location.hostname==='localhost'){location.reload();}"
+        end try
+        activate
+        return "ok"
+      end if
       end repeat
     end repeat
   end tell
@@ -86,15 +90,19 @@ SAFARI_TMPL='on run argv
     repeat with w in windows
       repeat with t in tabs of w
         set u to URL of t
-        if (u contains portText) and ((u contains "127.0.0.1") or (u contains "localhost")) then
-          set current tab of w to t
-          try
-            set miniaturized of w to false
-          end try
-          set index of w to 1
-          activate
-          return "ok"
-        end if
+      if (u contains portText) and ((u contains "127.0.0.1") or (u contains "localhost")) then
+        set current tab of w to t
+        try
+          set miniaturized of w to false
+        end try
+        set index of w to 1
+        -- 切回旧标签后顺手重载，确保吃到最新前端（根治「我这边好、用户那边坏」的缓存错位）
+        try
+          do JavaScript "if(location.hostname==='127.0.0.1'||location.hostname==='localhost'){location.reload();}" in t
+        end try
+        activate
+        return "ok"
+      end if
       end repeat
     end repeat
   end tell
@@ -127,7 +135,7 @@ open_or_focus() {
   local rc=$?
   case "$rc" in
     0)
-      log "命中已开标签，切回（不新开）"
+      log "命中已开标签，切回并刷新（不新开）"
       return 0
       ;;
     2)

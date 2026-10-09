@@ -210,7 +210,7 @@ export const plainFromMarkdown = s => String(s || '')
   .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '$1：$2')
   .replace(/\*\*([^*]+)\*\*/g, '$1')
   .replace(/(^|\n)#{1,6}\s*/g, '$1');
-export function buildAlertMessage({ categoryLabel = '价格', phrase, target, current, test = false, note = '', direction = null } = {}) {
+export function buildAlertMessage({ categoryLabel = '价格', phrase, target, current, test = false, note = '', direction = null, coin = 'BTC' } = {}) {
   // categoryLabel 允许传 '价格' 或 '价格告警'；统一成带「告警」的标签，避免重复（价格告警告警）或缺失（【价格】）。
   const label = categoryLabel.endsWith('告警') ? categoryLabel : `${categoryLabel}告警`;
   // 红跌绿涨色标（v2.12.63）：
@@ -223,7 +223,7 @@ export function buildAlertMessage({ categoryLabel = '价格', phrase, target, cu
     : /多头爆仓|long liquidation|跌破|下跌|下破|回落|逼近多头/.test(phrase) ? '🔴'
     : '⚠️';
   const title = test ? `${label}【测试】${dot} ${phrase}` : `【${label}】${dot} ${phrase}`;
-  const short = target ? `BTC ${target} USDT` : `BTC 当前价格 ${current} USDT`;
+  const short = target ? `${coin} ${target} USDT` : `${coin} 当前价格 ${current} USDT`;
   // note（客户端组装的完整明细）自带站点链接，不再重复拼接标题/短语；
   // 无 note 时就地组装：当前价 → 站点链接（触发短语只保留在标题里，避免正文重复）。
   const bodyParts = note

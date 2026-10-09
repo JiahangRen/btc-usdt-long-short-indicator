@@ -78,8 +78,20 @@ export function classification(score) {
       : [tx("观望", "Neutral"), "flat"];
 }
 
+/* Basis intervals offered by the rule-signal card. 3h is deliberately absent:
+   only OKX can serve it, and only through server-side 1h aggregation, so it
+   fails the moment the source switches to Gate or Binance. 4h and 6h are
+   native on every supported source. */
+export const RULE_SIGNAL_INTERVALS = ["5m", "15m", "30m", "1h", "4h", "6h"];
+/* A stored 3h preference would no longer match any <select> option, which left
+   the card pinned to another source's stale candles; migrate it explicitly. */
+function migrateRuleSignalInterval(stored) {
+  if (!stored) return "15m";
+  if (stored === "3h") return "4h";
+  return RULE_SIGNAL_INTERVALS.includes(stored) ? stored : "15m";
+}
 export const fixedRuleSignal = {
-  interval: localStorage.getItem("btc_rule_signal_interval") || "15m",
+  interval: migrateRuleSignalInterval(localStorage.getItem("btc_rule_signal_interval")),
   candles: [],
   source: "",
   closedAt: 0,
