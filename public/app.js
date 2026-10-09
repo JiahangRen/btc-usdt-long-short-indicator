@@ -4216,7 +4216,7 @@ renderRangeExtremaPoints = function () {
   const version = document.createElement("button");
   version.type = "button";
   version.id = "appVersion";
-  version.textContent = "v2.12.78";
+  version.textContent = "v2.12.79";
   version.title = "查看更新日志";
   version.setAttribute("aria-expanded", "false");
   // v2.12.7：版本号随「账户 / API / 连通性 / 数据源」一起收进设置齿轮面板。
@@ -4693,6 +4693,9 @@ renderRangeExtremaPoints = function () {
   // v2.12.78：规则信号基准周期 3h → 4h/6h，并修掉取数失败被静默吞掉的隐患。
   const v21278BasisIntervalChangelog = log.innerHTML;
   log.innerHTML = '<b>v2.12.78 更新日志</b><dl><dt>「当前规则信号」基准周期：3 小时 → 4 小时 / 6 小时</dt><dd>原 3 小时档位只有 OKX 能提供，且还需服务端把 1 小时 K 线聚合而成；Gate 与 Binance 都不支持该周期（实测分别返回 INVALID_PARAM_VALUE 与 Invalid interval），切到这两个数据源时规则信号会取不到数据。现移除 3 小时，改为 4 小时与 6 小时——三家数据源全部原生支持，同时与图表 K 线选择器、多周期共振、AI 快照所用的周期保持一致：4 小时是币圈中线通用档，6 小时给出更长一档的趋势视角。各档「有效至」时长同步按 24 根基准 K 线计算（4 小时 ≈ 4 天、6 小时 ≈ 6 天）。另修复：基准取数失败此前被空 catch 静默吞掉，卡片会继续展示上一次数据源的旧 K 线却看不出异常，现在改为在基准行直接提示失败原因。停留在 3 小时的历史偏好会自动迁移到 4 小时。</dd></dl><hr>' + v21278BasisIntervalChangelog;
+  // v2.12.79：修复账户面板规则列表查询的 SQL 别名错误（v2.12.78 多币种改动引入）。
+  const v21279AlertRulesFixChangelog = log.innerHTML;
+  log.innerHTML = '<b>v2.12.79 更新日志</b><dl><dt>修复：打开「账户与云端服务」报「云端服务暂不可用」</dt><dd>上一版加入多币种规则隔离时，规则列表查询把 coin 列写成了带表别名的 r.coin，但同一条 SQL 的 FROM 子句并未声明别名 r（同批改动里的另一条查询有别名、这条漏了），导致打开账户面板必然报错「接口不可用：missing FROM-clause entry for table "r"」，账户信息与规则列表完全无法加载。现已修正该查询，账户面板恢复正常。属纯查询语句修复，数据库结构与已存数据均不受影响。</dd></dl><hr>' + v21279AlertRulesFixChangelog;
   // 旧版本默认收起，确保用户打开日志时首先看到当前版本的完整变更。
   // Older releases are collapsed by default so opening the log focuses on the current release.
   const collapseLegacyRelease = () => {
