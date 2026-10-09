@@ -2,7 +2,7 @@ import { createAlertStore } from './alert-store.mjs';
 // 多渠道发送与文案统一在 notification.mjs（v2.10.52 拆分）。
 import { buildAlertMessage, SITE_LINK } from './notification.mjs';
 // 告警穿越判定抽到共享模块（见 docs/CODE_AUDIT_REPORT.md F6），与 server 共用单一事实来源。
-import { evaluateAlertRule } from './shared/alert-rule-eval.mjs';
+import { evaluateAlertRule, evaluateStatefulAlertRule } from './shared/alert-rule-eval.mjs';
 import { COIN_KEYS, okxInstId } from './shared/coins.mjs'; // 多币种行情订阅（v2.12.75）
 
 const store = await createAlertStore();
@@ -17,11 +17,49 @@ const category = kind => kind === 'long_liquidation' || kind === 'short_liquidat
 // 红跌绿涨方向：多头爆仓=价跌(红)/空头爆仓=价涨(绿)；上涨绿、下跌红。
 const directionOf = kind => kind === 'long_liquidation' ? 'down' : kind === 'short_liquidation' ? 'up' : kind === 'price_above' ? 'up' : kind === 'price_below' ? 'down' : 'none';
 
+// v2.12.80：整数位 / 网格 / 波动三类「状态型」规则上云（worker 端评估，语义与前端 notification.js 对齐）。
+const STATEFUL_KINDS = ['round_number', 'custom_grid', 'volatility'];
+// 每条状态型规则的评估状态（游标 / 滚动窗口），进程重启即重锚定——与本地页面刷新后的行为一致，不会误触发。
+const statefulStateByRule = new Map();
+const fmtUsd = n => Number(n).toLocaleString('en-US', { maximumFractionDigits: 2 });
+// 状态型推送文案：复用 buildAlertMessage 的标题/正文编排（红跌绿涨方向色标由 direction 决定）。
+function statefulMessage(rule, price) {
+  const event = rule.event || {};
+  const coin = rule.coin || 'BTC';
+  const current = fmtUsd(price);
+  const up = event.dir !== 'down';
+  if (rule.kind === 'round_number') {
+    return buildAlertMessage({
+      categoryLabel: up ? '整数上破告警' : '整数下破告警',
+      phrase: `${coin}/USDT ${up ? '↑ 上破' : '↓ 下破'}整数位 ${fmtUsd(event.level)}`,
+      target: event.level, current, direction: event.dir, coin,
+    });
+  }
+  if (rule.kind === 'custom_grid') {
+    return buildAlertMessage({
+      categoryLabel: '网格告警',
+      phrase: `${coin}/USDT ${up ? '↑' : '↓'} 触及网格线 ${fmtUsd(event.level)}`,
+      target: event.level, current, direction: event.dir, coin,
+    });
+  }
+  const move = Number(event.move) || 0;
+  const win = Number(rule.params?.windowMinutes) || 0;
+  return buildAlertMessage({
+    categoryLabel: '波动告警',
+    phrase: `${coin}/USDT ${win} 分钟内${move >= 0 ? '上涨' : '下跌'} ${fmtUsd(Math.abs(move))} USDT`,
+    target: event.level, current, direction: move >= 0 ? 'up' : 'down', coin,
+  });
+}
+
 // ---- 云端规则投递：逐渠道发送，任一成功即算送达 --------------------------
 async function deliver(job) {
-  const target = Number(job.rule.targetPrice).toLocaleString('en-US',{maximumFractionDigits:2});
-  const current = Number(job.price).toLocaleString('en-US',{maximumFractionDigits:2});
-  const message = buildAlertMessage({ categoryLabel: category(job.rule.kind), phrase: phrase(job.rule.kind, target, job.rule.coin || 'BTC'), target, current, direction: directionOf(job.rule.kind), coin: job.rule.coin || 'BTC' });
+  const message = STATEFUL_KINDS.includes(job.rule.kind)
+    ? statefulMessage(job.rule, job.price)
+    : (() => {
+        const target = Number(job.rule.targetPrice).toLocaleString('en-US',{maximumFractionDigits:2});
+        const current = Number(job.price).toLocaleString('en-US',{maximumFractionDigits:2});
+        return buildAlertMessage({ categoryLabel: category(job.rule.kind), phrase: phrase(job.rule.kind, target, job.rule.coin || 'BTC'), target, current, direction: directionOf(job.rule.kind), coin: job.rule.coin || 'BTC' });
+      })();
   const { ok, results, error } = await store.dispatchToChannels(job.rule.userId, message);
   await store.finishPush(job.deliveryId, { ok, payload: { channels: results, message }, error: ok ? '' : (error || '所有渠道投递失败') });
   if (!ok) console.error(`Alert delivery to all channels failed for user ${job.rule.userId}: ${error || 'unknown'}`);
@@ -110,6 +148,21 @@ async function evaluate(coin, price) {
     if (!crossed(rule, prev, price)) continue;
     const claimed = await store.claim(rule, price);
     if (claimed) await store.enqueue({ ...rule, ...claimed }, price);
+  }
+  // v2.12.80：状态型三类（整数位/网格/波动）——无法用 prev→next 穿越表达，逐规则喂价评估。
+  // 波动类每次喂价都要采样以维持滚动窗口，所以即使不命中也要跑一遍评估器。
+  const statefulRules = rules.filter(rule => STATEFUL_KINDS.includes(rule.kind));
+  if (statefulRules.length) {
+    const liveIds = new Set(statefulRules.map(rule => rule.id));
+    for (const id of statefulStateByRule.keys()) if (!liveIds.has(id)) statefulStateByRule.delete(id);
+    for (const rule of statefulRules) {
+      const state = statefulStateByRule.get(rule.id) || {};
+      const event = evaluateStatefulAlertRule(rule, price, Date.now(), state);
+      statefulStateByRule.set(rule.id, state);
+      if (!event) continue;
+      const claimed = await store.claim(rule, price);
+      if (claimed) await store.enqueue({ ...rule, ...claimed, event }, price);
+    }
   }
   previousByCoin.set(coin, price);
   // 亏损联动低频扫描（15 秒一次）仅 BTC 持仓触发，不阻塞逐笔规则判定。

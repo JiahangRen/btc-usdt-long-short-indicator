@@ -23,7 +23,22 @@
   const localChannelsKey='btc_local_channels_v1';
   const getLocalSendKey=async()=>{try{const channels=await window.btcSecureVault?.get(localChannelsKey);const serverchan=Array.isArray(channels)?channels.find(c=>c.type==='serverchan'):null;return serverchan?.config?.sendKey?.trim()||''}catch{return ''}};
   const saveLocalAlertData=async rules=>{const sendKey=await getLocalSendKey();await window.btcSecureVault?.put(localVaultKey(),{rules,sendKey});localStorage.removeItem('btc_local_notification_rules_v1')};
-  const CLOUD_KINDS=['price_reached','price_above','price_below','long_liquidation','short_liquidation'];
+  /* v2.12.80：整数位 / 网格 / 波动三类状态型规则也可上云（服务端 alert-worker 已支持评估）。
+     custom_grid 同步放行（worker 一起实现），即使用户当前没有网格规则。 */
+  const CLOUD_KINDS=['price_reached','price_above','price_below','long_liquidation','short_liquidation','round_number','custom_grid','volatility'];
+  const STATEFUL_KINDS=['round_number','custom_grid','volatility'];
+  /* 上传载荷：价格类沿用 targetPrice；状态型把私有参数放 params（服务端校验后存 JSONB），
+     targetPrice 存主参数（步长/阈值）以满足服务端 NOT NULL>0。状态型冷却下限 1 分钟，与本地评估默认一致。 */
+  const ruleSyncPayload=(r,coin)=>{
+    const payload={id:r.id,kind:r.kind,repeat:r.repeat!==false,cooldownMinutes:Math.max(STATEFUL_KINDS.includes(r.kind)?1:0,Number(r.cooldownMinutes)||0),coin};
+    if(STATEFUL_KINDS.includes(r.kind)){
+      payload.targetPrice=Number(r.kind==='volatility'?r.threshold:r.step);
+      payload.params=r.kind==='round_number'?{step:Number(r.step),direction:r.direction||'both'}
+        :r.kind==='custom_grid'?{basePrice:Number(r.basePrice),step:Number(r.step),direction:r.direction||'both'}
+        :{windowMinutes:Number(r.windowMinutes),threshold:Number(r.threshold),direction:r.direction||'both'};
+    } else payload.targetPrice=Number(r.targetPrice);
+    return payload;
+  };
   const tsOf=v=>Number(v&&v.updatedAt)||0;
   const mergeById=(localArr=[],cloudArr=[])=>{const map=new Map();for(const r of cloudArr)if(r&&r.id)map.set(r.id,{...r});for(const r of localArr)if(r&&r.id){const ex=map.get(r.id);if(!ex||tsOf(r)>=tsOf(ex))map.set(r.id,{...r});}return[...map.values()]};
   // v2.12.69：推送规则双向合并（同 id 比时间戳取新，不同 id 并集保留；本地专属类只留本地）
@@ -32,13 +47,15 @@
     const local=await localAlertData();
     const localRules=(Array.isArray(local.rules)?local.rules:[]).map(r=>({...r,coin}));
     const allCloud=(await api('/api/alerts/rules')).rules||[];
-    const cloudRules=allCloud.filter(r=>(r.coin||'BTC')===coin);
+    /* 下载侧：把服务端 params JSONB 展开回规则顶层字段（step/direction/windowMinutes/threshold），
+       mergeById 与本地规则格式保持一致。 */
+    const cloudRules=allCloud.filter(r=>(r.coin||'BTC')===coin).map(r=>({repeat:true,...r,...(r.params&&typeof r.params==='object'?r.params:{})}));
     const merged=mergeById(localRules,cloudRules);
     const localOrigin=new Set(localRules.filter(r=>CLOUD_KINDS.includes(r.kind)).map(r=>r.id));
     for(const r of merged){
       if((r.coin||'BTC')!==coin) continue; // 不触碰其它币种的云端规则
       if(!localOrigin.has(r.id)||!CLOUD_KINDS.includes(r.kind)) continue;
-      await api('/api/alerts/rules',{method:'POST',body:JSON.stringify({id:r.id,kind:r.kind,targetPrice:Number(r.targetPrice),repeat:r.repeat!==false,cooldownMinutes:Math.max(0,Number(r.cooldownMinutes)||0),coin})});
+      await api('/api/alerts/rules',{method:'POST',body:JSON.stringify(ruleSyncPayload(r,coin))});
     }
     const localOnly=localRules.filter(r=>r&&!CLOUD_KINDS.includes(r.kind));
     const finalLocal=[...merged.filter(r=>CLOUD_KINDS.includes(r.kind)),...localOnly];

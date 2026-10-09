@@ -67,7 +67,7 @@ export async function createAlertStore() {
     CREATE TABLE IF NOT EXISTS alert_sessions (token_hash TEXT PRIMARY KEY, user_id UUID NOT NULL REFERENCES alert_users(id) ON DELETE CASCADE, expires_at TIMESTAMPTZ NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now());
     CREATE TABLE IF NOT EXISTS alert_user_profiles (user_id UUID PRIMARY KEY REFERENCES alert_users(id) ON DELETE CASCADE, profile JSONB NOT NULL DEFAULT '{}'::jsonb, profile_ciphertext TEXT, updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
     CREATE TABLE IF NOT EXISTS alert_credentials (user_id UUID PRIMARY KEY REFERENCES alert_users(id) ON DELETE CASCADE, sendkey_ciphertext TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT now());
-    CREATE TABLE IF NOT EXISTS alert_rules (id UUID PRIMARY KEY, user_id UUID NOT NULL REFERENCES alert_users(id) ON DELETE CASCADE, kind TEXT NOT NULL CHECK(kind IN ('price_reached','price_above','price_below','long_liquidation','short_liquidation')), target_price NUMERIC NOT NULL CHECK(target_price > 0), repeat_enabled BOOLEAN NOT NULL DEFAULT false, cooldown_seconds INTEGER NOT NULL DEFAULT 300 CHECK(cooldown_seconds >= 0), enabled BOOLEAN NOT NULL DEFAULT true, coin TEXT NOT NULL DEFAULT 'BTC', last_triggered_at TIMESTAMPTZ, last_triggered_price NUMERIC, created_at TIMESTAMPTZ NOT NULL DEFAULT now());
+    CREATE TABLE IF NOT EXISTS alert_rules (id UUID PRIMARY KEY, user_id UUID NOT NULL REFERENCES alert_users(id) ON DELETE CASCADE, kind TEXT NOT NULL CHECK(kind IN ('price_reached','price_above','price_below','long_liquidation','short_liquidation','round_number','custom_grid','volatility')), target_price NUMERIC NOT NULL CHECK(target_price > 0), repeat_enabled BOOLEAN NOT NULL DEFAULT false, cooldown_seconds INTEGER NOT NULL DEFAULT 300 CHECK(cooldown_seconds >= 0), enabled BOOLEAN NOT NULL DEFAULT true, coin TEXT NOT NULL DEFAULT 'BTC', last_triggered_at TIMESTAMPTZ, last_triggered_price NUMERIC, created_at TIMESTAMPTZ NOT NULL DEFAULT now());
     CREATE INDEX IF NOT EXISTS alert_rules_active_idx ON alert_rules(enabled, kind, target_price);
     CREATE TABLE IF NOT EXISTS alert_deliveries (id UUID PRIMARY KEY, rule_id UUID REFERENCES alert_rules(id) ON DELETE SET NULL, user_id UUID REFERENCES alert_users(id) ON DELETE SET NULL, queued_at TIMESTAMPTZ NOT NULL DEFAULT now(), sent_at TIMESTAMPTZ, status TEXT NOT NULL, response_json JSONB, push_id TEXT, read_key TEXT, error TEXT);
     CREATE INDEX IF NOT EXISTS alert_deliveries_rule_idx ON alert_deliveries(rule_id, queued_at DESC);
@@ -81,6 +81,14 @@ export async function createAlertStore() {
     /* v2.12.75：多币种规则隔离，历史 BTC 规则默认 'BTC'。 */
     ALTER TABLE alert_rules ADD COLUMN IF NOT EXISTS coin TEXT NOT NULL DEFAULT 'BTC';
     CREATE INDEX IF NOT EXISTS alert_rules_coin_idx ON alert_rules(coin, enabled);
+    /* v2.12.80：整数位 / 网格 / 波动三类「状态型」规则上云。
+       旧库的 kind CHECK 只含五类价格/强平，约束名未显式指定 → 默认 alert_rules_kind_check，先删再建。
+       新库由上方 CREATE TABLE 直接建出同名列约束，此处 DROP+ADD 与其等价、幂等。
+       params 存状态型规则的私有参数（step/basePrice/windowMinutes/threshold/direction），
+       target_price 对这三类存主参数（步长或阈值），保持 NOT NULL>0 约束不变。 */
+    ALTER TABLE alert_rules DROP CONSTRAINT IF EXISTS alert_rules_kind_check;
+    ALTER TABLE alert_rules ADD CONSTRAINT alert_rules_kind_check CHECK (kind IN ('price_reached','price_above','price_below','long_liquidation','short_liquidation','round_number','custom_grid','volatility'));
+    ALTER TABLE alert_rules ADD COLUMN IF NOT EXISTS params JSONB NOT NULL DEFAULT '{}'::jsonb;
   `);
   // PostgreSQL does not support ADD COLUMN IF NOT EXISTS in very old versions;
   // supported deployments are modern, and this keeps existing accounts online.
@@ -260,11 +268,45 @@ export async function createAlertStore() {
       if (!ok) throw Object.assign(new Error(results.find(r => r.error)?.error || '所有渠道测试推送均失败。'),{statusCode:502});
       return { ok:true, results };
     },
-    async listRules(userId) { return (await pool.query('SELECT id,kind,target_price::float AS "targetPrice",repeat_enabled AS repeat,"cooldown_seconds"/60 AS "cooldownMinutes",enabled,last_triggered_at AS "lastTriggeredAt",last_triggered_price::float AS "lastTriggeredPrice",created_at AS "createdAt",updated_at AS "updatedAt",coin AS "coin" FROM alert_rules WHERE user_id=$1 ORDER BY created_at DESC',[userId])).rows; },
-    async createRule(userId,input) { const kind=String(input.kind||''), target=Number(input.targetPrice), repeat=Boolean(input.repeat), cooldown=Math.max(0,Math.round(Number(input.cooldownMinutes||5)*60)), rawId=input?.id, id=(typeof rawId==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawId))?rawId:randomUUID(); const coin=COIN_KEYS.includes(input?.coin)?input.coin:'BTC'; if(!['price_reached','price_above','price_below','long_liquidation','short_liquidation'].includes(kind)||!Number.isFinite(target)||target<=0) throw Object.assign(new Error('规则参数无效。'),{statusCode:400}); await pool.query('INSERT INTO alert_rules(id,user_id,kind,target_price,repeat_enabled,cooldown_seconds,coin,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,now()) ON CONFLICT(id) DO UPDATE SET kind=EXCLUDED.kind,target_price=EXCLUDED.target_price,repeat_enabled=EXCLUDED.repeat_enabled,cooldown_seconds=EXCLUDED.cooldown_seconds,coin=EXCLUDED.coin,updated_at=now()',[id,userId,kind,target,repeat,cooldown,coin]); return id; },
+    async listRules(userId) { return (await pool.query('SELECT id,kind,target_price::float AS "targetPrice",repeat_enabled AS repeat,"cooldown_seconds"/60 AS "cooldownMinutes",enabled,last_triggered_at AS "lastTriggeredAt",last_triggered_price::float AS "lastTriggeredPrice",created_at AS "createdAt",updated_at AS "updatedAt",coin AS "coin",params FROM alert_rules WHERE user_id=$1 ORDER BY created_at DESC',[userId])).rows; },
+    /* v2.12.80：放行整数位 / 自定义网格 / 快速波动三类状态型规则。
+       price/liquidation 五类行为不变；状态型校验私有 params 并把主参数写入 target_price（保持原 NOT NULL>0 约束）。
+       状态型规则冷却下限 60s：worker 逐 tick 判定，波动类窗口未滑走前条件会持续成立，无下限会逐秒刷屏。 */
+    async createRule(userId,input) {
+      const PRICE_KINDS=['price_reached','price_above','price_below','long_liquidation','short_liquidation'];
+      const STATEFUL_KINDS=['round_number','custom_grid','volatility'];
+      const kind=String(input.kind||''), repeat=Boolean(input.repeat);
+      let cooldown=Math.max(0,Math.round(Number(input.cooldownMinutes||5)*60));
+      const rawId=input?.id, id=(typeof rawId==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawId))?rawId:randomUUID();
+      const coin=COIN_KEYS.includes(input?.coin)?input.coin:'BTC';
+      let target=Number(input.targetPrice), params={};
+      const positive=v=>{const n=Number(v);return Number.isFinite(n)&&n>0?n:null;};
+      if(STATEFUL_KINDS.includes(kind)){
+        cooldown=Math.max(60,cooldown);
+        const p=input?.params&&typeof input.params==='object'?input.params:{};
+        const direction=['up','down','both'].includes(p.direction)?p.direction:'both';
+        if(kind==='round_number'){
+          const step=positive(p.step);
+          if(!step) throw Object.assign(new Error('整数推送规则需要正的步长。'),{statusCode:400});
+          target=step; params={step,direction};
+        } else if(kind==='custom_grid'){
+          const base=positive(p.basePrice), step=positive(p.step);
+          if(!base||!step) throw Object.assign(new Error('网格规则需要正的基准价与步长。'),{statusCode:400});
+          target=step; params={basePrice:base,step,direction};
+        } else {
+          const win=positive(p.windowMinutes), thr=positive(p.threshold);
+          if(!win||!thr) throw Object.assign(new Error('波动规则需要正的窗口分钟数与阈值。'),{statusCode:400});
+          target=thr; params={windowMinutes:win,threshold:thr,direction};
+        }
+      } else {
+        if(!PRICE_KINDS.includes(kind)||!Number.isFinite(target)||target<=0) throw Object.assign(new Error('规则参数无效。'),{statusCode:400});
+      }
+      await pool.query('INSERT INTO alert_rules(id,user_id,kind,target_price,repeat_enabled,cooldown_seconds,coin,params,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,now()) ON CONFLICT(id) DO UPDATE SET kind=EXCLUDED.kind,target_price=EXCLUDED.target_price,repeat_enabled=EXCLUDED.repeat_enabled,cooldown_seconds=EXCLUDED.cooldown_seconds,coin=EXCLUDED.coin,params=EXCLUDED.params,updated_at=now()',[id,userId,kind,target,repeat,cooldown,coin,json(params)]);
+      return id;
+    },
     async deleteRule(userId,id) { if(!await ownRule(userId,id)) throw Object.assign(new Error('规则不存在。'),{statusCode:404}); await pool.query('DELETE FROM alert_rules WHERE id=$1 AND user_id=$2',[id,userId]); },
     async deleteAccount(userId) { await pool.query('DELETE FROM alert_users WHERE id=$1',[userId]); },
-    async activeRules(coin) { await this.ensureLegacySendKeyMigrated(); const c = COIN_KEYS.includes(coin) ? coin : null; return (await pool.query('SELECT r.id,r.user_id AS "userId",r.kind,r.target_price::float AS "targetPrice",r.repeat_enabled AS repeat,"cooldown_seconds" AS "cooldownSeconds",r.coin AS "coin" FROM alert_rules r WHERE r.enabled=true AND ($1::text IS NULL OR r.coin=$1) AND EXISTS (SELECT 1 FROM alert_channels c WHERE c.user_id=r.user_id AND c.enabled=true)',[c])).rows; },
+    async activeRules(coin) { await this.ensureLegacySendKeyMigrated(); const c = COIN_KEYS.includes(coin) ? coin : null; return (await pool.query('SELECT r.id,r.user_id AS "userId",r.kind,r.target_price::float AS "targetPrice",r.repeat_enabled AS repeat,"cooldown_seconds" AS "cooldownSeconds",r.coin AS "coin",r.params FROM alert_rules r WHERE r.enabled=true AND ($1::text IS NULL OR r.coin=$1) AND EXISTS (SELECT 1 FROM alert_channels c WHERE c.user_id=r.user_id AND c.enabled=true)',[c])).rows; },
     async claim(rule, price) { const result=await pool.query(`UPDATE alert_rules SET last_triggered_at=now(),last_triggered_price=$2 WHERE id=$1 AND enabled=true AND (repeat_enabled=true AND (last_triggered_at IS NULL OR last_triggered_at <= now()-(cooldown_seconds * interval '1 second')) OR repeat_enabled=false AND last_triggered_at IS NULL) RETURNING id,user_id AS "userId"`,[rule.id,price]); return result.rows[0] || null; },
     async enqueue(rule, price) { if(!await this.hasSendKey(rule.userId)) return; const deliveryId=randomUUID(); await pool.query('INSERT INTO alert_deliveries(id,rule_id,user_id,status) VALUES($1,$2,$3,$4)',[deliveryId,rule.id,rule.userId,'queued']); await redis.lPush('btc-alert:push',json({deliveryId,rule,price})); },
     async nextPush() { const result=await redis.brPop('btc-alert:push',1); return result ? unjson(result.element) : null; },

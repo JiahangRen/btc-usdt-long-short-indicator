@@ -4216,7 +4216,7 @@ renderRangeExtremaPoints = function () {
   const version = document.createElement("button");
   version.type = "button";
   version.id = "appVersion";
-  version.textContent = "v2.12.79";
+  version.textContent = "v2.12.80";
   version.title = "查看更新日志";
   version.setAttribute("aria-expanded", "false");
   // v2.12.7：版本号随「账户 / API / 连通性 / 数据源」一起收进设置齿轮面板。
@@ -4696,6 +4696,9 @@ renderRangeExtremaPoints = function () {
   // v2.12.79：修复账户面板规则列表查询的 SQL 别名错误（v2.12.78 多币种改动引入）。
   const v21279AlertRulesFixChangelog = log.innerHTML;
   log.innerHTML = '<b>v2.12.79 更新日志</b><dl><dt>修复：打开「账户与云端服务」报「云端服务暂不可用」</dt><dd>上一版加入多币种规则隔离时，规则列表查询把 coin 列写成了带表别名的 r.coin，但同一条 SQL 的 FROM 子句并未声明别名 r（同批改动里的另一条查询有别名、这条漏了），导致打开账户面板必然报错「接口不可用：missing FROM-clause entry for table "r"」，账户信息与规则列表完全无法加载。现已修正该查询，账户面板恢复正常。属纯查询语句修复，数据库结构与已存数据均不受影响。</dd></dl><hr>' + v21279AlertRulesFixChangelog;
+  // v2.12.80：整数位 / 网格 / 波动三类规则支持云端推送（关页后由服务器 worker 接管）。
+  const v21280StatefulCloudChangelog = log.innerHTML;
+  log.innerHTML = '<b>v2.12.80 更新日志</b><dl><dt>整数推送 / 网格 / 快速波动规则支持云端后台推送</dt><dd>此前「消息推送」里的整数推送（步长）、自定义推送（网格）、快速波动推送三类规则只能在页面开着时由浏览器评估，关页即失效，且「同步到云端」会自动跳过它们。现服务端 alert-worker 补齐这三类的判定逻辑（整数位游标、网格索引、滚动窗口采样，与本地评估逐语义一致），数据库规则表扩展对应类型与私有参数，同步时三类规则正常上传云端。关页后由云端 worker 独立取价判定并经钉钉等渠道推送，与价格类规则一致。注意事项：状态型规则云端冷却下限 1 分钟（防逐秒刷屏）；worker 重启后波动窗口重新采样、整数位/网格游标按当前价重新锚定，均不会误触发。</dd></dl><hr>' + v21280StatefulCloudChangelog;
   // 旧版本默认收起，确保用户打开日志时首先看到当前版本的完整变更。
   // Older releases are collapsed by default so opening the log focuses on the current release.
   const collapseLegacyRelease = () => {
